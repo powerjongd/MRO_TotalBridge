@@ -58,12 +58,10 @@ image-bridge/
 # PyInstaller 빌드 (파이썬/라이브러리 포함 EXE)
 
 ## one-folder (콘솔 숨김):
-pyinstaller --noconfirm --clean --name ImageBridge --hidden-import "pymavlink.dialects.v20.common" --hidden-import "pymavlink.dialects.v20.ardupilotmega" --hidden-import "serial.tools.list_ports" --collect-submodules "pymavlink" --collect-submodules "PIL" --collect-data "pymavlink" --collect-data "PIL" --windowed main.py
+pyinstaller --noconfirm --clean --name MroTotalBridge --hidden-import "pymavlink.dialects.v20.common" --hidden-import "pymavlink.dialects.v20.ardupilotmega" --hidden-import "serial.tools.list_ports" --collect-submodules "pymavlink" --collect-submodules "PIL" --collect-data "pymavlink" --collect-data "PIL" --windowed main.py
 ## one-file (단일 exe, 최초 실행 다소 느림):
 
-pyinstaller --noconfirm --clean --name ImageBridge --hidden-import "pymavlink.dialects.v20.common" --hidden-import "pymavlink.dialects.v20.ardupilotmega" --hidden-import "serial.tools.list_ports" --collect-submodules "pymavlink" --collect-submodules "PIL" --collect-data "pymavlink" --collect-data "PIL" --windowed --onefile main.py
-
-빌드 결과: dist/ImageBridge/ImageBridge.exe
+pyinstaller --noconfirm --clean --name MroTotalBridge --hidden-import "pymavlink.dialects.v20.common" --hidden-import "pymavlink.dialects.v20.ardupilotmega" --hidden-import "serial.tools.list_ports" --collect-submodules "pymavlink" --collect-submodules "PIL" --collect-data "pymavlink" --collect-data "PIL" --windowed --onefile main.py
 
 # 설정(Editable)
  Bridge Settings: Bind IP, TCP Port(9999), UDP Port(9998)
