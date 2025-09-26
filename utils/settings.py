@@ -15,16 +15,57 @@ from typing import Any, Dict, Optional, Tuple
 # 경로 유틸
 # ------------------------------------------------------------
 
+def _is_writable_dir(path: str) -> bool:
+    try:
+        os.makedirs(path, exist_ok=True)
+        test = os.path.join(path, ".write_test.tmp")
+        with open(test, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(test)
+        return True
+    except Exception:
+        return False
+
 def get_program_dir() -> str:
     """
-    실행 환경에 따라 기준 디렉터리를 반환.
-    - PyInstaller exe:   sys.executable 위치
-    - 일반 파이썬 실행:  본 파일(utils/settings.py)의 상위(프로젝트 루트 기준)로 환산
+    실행 기준 폴더를 반환.
+    - one-file(PyInstaller)에서도 '원래 exe가 있는 폴더'를 우선 사용
+      (sys.argv[0] 또는 sys.orig_argv[0] 기반)
+    - 쓰기 불가하면 사용자 홈 아래 AppData 로 폴백
     """
-    if getattr(sys, "frozen", False) and hasattr(sys, "executable"):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    # utils/settings.py → utils → 프로젝트 루트
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # 1) 원래 exe 경로 우선
+    cand = None
+    try:
+        if hasattr(sys, "orig_argv") and sys.orig_argv:
+            cand = os.path.dirname(os.path.abspath(sys.orig_argv[0]))
+        elif sys.argv and sys.argv[0]:
+            cand = os.path.dirname(os.path.abspath(sys.argv[0]))
+    except Exception:
+        cand = None
+
+    # 2) 일반 venv/스크립트 실행일 때의 후보
+    if not cand:
+        if getattr(sys, "frozen", False) and hasattr(sys, "executable"):
+            cand = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            # utils/settings.py → utils → 프로젝트 루트
+            cand = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # 3) 쓰기 가능 여부 확인, 불가하면 사용자 폴더로 폴백
+    if not _is_writable_dir(cand):
+        # Windows: %LOCALAPPDATA%\MroTotalBridge
+        # 기타 OS: ~/.local/share/MroTotalBridge
+        from pathlib import Path
+        if os.name == "nt":
+            base = os.environ.get("LOCALAPPDATA", str(Path.home()))
+            fallback = os.path.join(base, "MroTotalBridge")
+        else:
+            fallback = os.path.join(str(Path.home()), ".local", "share", "MroTotalBridge")
+
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
+    return cand
 
 
 def get_default_save_dir() -> str:
