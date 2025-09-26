@@ -1,0 +1,21 @@
+# 가상환경/빌드 산출물
+.venv/
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+
+# 로컬 실행 저장 데이터
+savedata/
+images/
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

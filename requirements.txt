@@ -1,0 +1,4 @@
+pymavlink>=2.4
+pyserial>=3.5
+Pillow
+# tkinter는 표준 라이브러리. Windows 배포시 PyInstaller가 자동 포함.
