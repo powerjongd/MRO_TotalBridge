@@ -174,9 +174,22 @@ class AppConfig:
         b.setdefault("ip", "0.0.0.0")
         b.setdefault("tcp_port", 9999)
         b.setdefault("udp_port", 9998)
-        # 이미지 저장 폴더 (프로그램 아래 ./images)
-        b.setdefault("images", os.path.join(get_program_dir(), "images"))
-        ensure_dir(b["images"])
+        default_realtime = os.path.join(get_program_dir(), "SaveFile")
+        default_predefined = os.path.join(get_program_dir(), "PreDefinedImageSet")
+
+        if "realtime_dir" not in b:
+            if b.get("images"):
+                b["realtime_dir"] = b["images"]
+            else:
+                b["realtime_dir"] = default_realtime
+        if "predefined_dir" not in b:
+            b["predefined_dir"] = default_predefined
+
+        ensure_dir(b["realtime_dir"])
+        ensure_dir(b["predefined_dir"])
+
+        b.setdefault("image_source_mode", "realtime")
+        b["images"] = b["realtime_dir"]
         # GUI 미리보기 등
         b.setdefault("console_echo", True)         # 콘솔 로그 echo
         b.setdefault("show_hud", True)             # (옵션) 간단 상태 표시

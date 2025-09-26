@@ -365,6 +365,10 @@ class ImageBridgeCore:
                 "last_saved_path": self._last_image_meta["saved_path"],
                 "udp_listening": bool(self._udp_sock),
                 "tcp_listening": bool(self._tcp_sock),
+                "image_source_mode": self.image_source_mode,
+                "realtime_dir": self.realtime_dir,
+                "predefined_dir": self.predefined_dir,
+                "active_library_dir": self.realtime_dir if self.image_source_mode == "realtime" else self.predefined_dir,
             }
 
     @staticmethod
@@ -392,10 +396,56 @@ class ImageBridgeCore:
     # --------------- utils ---------------
 
     def _prepare_dirs(self) -> None:
+        for label, path in ("SaveFile", self.realtime_dir), ("PreDefinedImageSet", self.predefined_dir):
+            try:
+                os.makedirs(path, exist_ok=True)
+            except Exception as e:
+                self.log(f"[BRIDGE] mkdir {label} failed: {e}")
+
+    def _sync_next_number(self) -> None:
         try:
-            os.makedirs(self.images_dir, exist_ok=True)
+            digits = [
+                int(os.path.splitext(name)[0])
+                for name in os.listdir(self.realtime_dir)
+                if os.path.splitext(name)[0].isdigit()
+            ]
+            if digits:
+                self._next_image_number = (max(digits) + 1) % 1000
+        except Exception:
+            pass
+
+    def _resolve_image_path(self, img_num: int) -> str:
+        base_dir = self.realtime_dir if self.image_source_mode == "realtime" else self.predefined_dir
+        return os.path.join(base_dir, f"{img_num:03d}.jpg")
+
+    def _scan_predefined_numbers(self) -> list[int]:
+        numbers: list[int] = []
+        try:
+            for name in os.listdir(self.predefined_dir):
+                stem, ext = os.path.splitext(name)
+                if stem.isdigit() and ext.lower() in {".jpg", ".jpeg"}:
+                    try:
+                        numbers.append(int(stem))
+                    except ValueError:
+                        continue
+            numbers.sort()
         except Exception as e:
-            self.log(f"[BRIDGE] mkdir images failed: {e}")
+            self.log(f"[BRIDGE] predefined scan failed: {e}")
+        return numbers
+
+    def _sanitize_mode(self, mode: str) -> str:
+        if isinstance(mode, str) and mode.lower() in {"realtime", "predefined"}:
+            return mode.lower()
+        return "realtime"
+
+    def set_image_source_mode(self, mode: str) -> None:
+        new_mode = self._sanitize_mode(mode)
+        if new_mode == self.image_source_mode:
+            return
+        self.image_source_mode = new_mode
+        if new_mode == "predefined":
+            self._predefined_numbers = self._scan_predefined_numbers()
+        self.log(f"[BRIDGE] image source mode -> {self.image_source_mode}")
 
     def _close_sockets(self) -> None:
         try:

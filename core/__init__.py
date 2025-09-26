@@ -3,10 +3,10 @@
 """
 Core layer public API.
 
-This package contains UI-agnostic services:
-- ImageBridgeCore: UDP image reassembly + TCP command server
-- GimbalControl:   MAVLink(Command Long) intake -> 10706 out (angle/rate controller)
-- UdpRelay:        UDP relay (raw/proc) with simple parse/transform hooks
+This package contains UI-agnostic services (Unified Bridge modules):
+- ImageStreamBridge: 영상 스트리밍(TCP 카메라 명령 + UDP 조립)
+- GimbalControl:     짐벌 제어 모듈
+- UdpRelay:          Gazebo/가상 센서 릴레이 모듈
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ class CoreService(Protocol):
 
 # Re-export concrete services (lazy-safe)
 try:
-    from .bridge_core import ImageBridgeCore  # noqa: F401
+    from .image_stream_bridge import ImageStreamBridge  # noqa: F401
 except Exception:  # pragma: no cover
-    ImageBridgeCore = None  # type: ignore
+    ImageStreamBridge = None  # type: ignore
 
 try:
     from .gimbal_control import GimbalControl  # noqa: F401
@@ -42,7 +42,7 @@ except Exception:  # pragma: no cover
 
 __all__ = [
     "CoreService",
-    "ImageBridgeCore",
+    "ImageStreamBridge",
     "GimbalControl",
     "UdpRelay",
 ]

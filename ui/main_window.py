@@ -21,13 +21,13 @@ class MainWindow(tk.Tk):
     메인 앱 창.
     - Gimbal Controls 팝업 열기
     - Gazebo Relay Settings 팝업 열기
-    - 간단한 서버 토글 (ImageBridgeCore)
+    - 영상 스트리밍 모듈(ImageStreamBridge) 토글
     - 주기적 상태 표시 업데이트
     """
 
     def __init__(self, cfg, bridge, gimbal, relay, log):
         super().__init__()
-        self.title("Image Bridge")
+        self.title("Unified Bridge")
         self.geometry("1000x700")
 
         self.cfg = cfg
@@ -61,13 +61,13 @@ class MainWindow(tk.Tk):
         top = ttk.Frame(root, padding=8)
         top.pack(side=tk.TOP, fill=tk.X)
 
-        self.btn_server = ttk.Button(top, text="Start Server", command=self.on_toggle_server)
+        self.btn_server = ttk.Button(top, text="Start Image Stream Module", command=self.on_toggle_server)
         self.btn_server.grid(row=0, column=0, padx=(0, 8), pady=4, sticky="w")
 
-        self.btn_bridge = ttk.Button(top, text="Bridge Settings", command=self.open_bridge_window)
+        self.btn_bridge = ttk.Button(top, text="Image Stream Module Settings", command=self.open_bridge_window)
         self.btn_bridge.grid(row=0, column=1, padx=(0, 16), pady=4, sticky="w")
 
-        self.lbl_bridge = ttk.Label(top, text="Bridge: Stopped")
+        self.lbl_bridge = ttk.Label(top, text="Image Stream Module: Stopped (Realtime)")
         self.lbl_bridge.grid(row=0, column=2, padx=(0, 16), sticky="w")
 
         self.btn_gimbal = ttk.Button(top, text="Gimbal Controls", command=self.open_gimbal_window)
@@ -108,7 +108,7 @@ class MainWindow(tk.Tk):
 
     def on_preview(self, jpeg_bytes: bytes):
         """
-        core.bridge_core가 UDP로 최신 JPEG을 수신할 때 호출됨 (백그라운드 스레드).
+        ImageStreamBridge가 UDP로 최신 JPEG을 수신할 때 호출됨 (백그라운드 스레드).
         Tk 위젯 업데이트는 메인스레드에서 after로 처리.
         """
         if self._preview_paused:
@@ -154,8 +154,13 @@ class MainWindow(tk.Tk):
             return
         try:
             _, jpeg = self._last_photo
-            # Bridge의 images 디렉터리에 타임스탬프명으로 저장
-            images_dir = self.cfg.get("bridge", {}).get("images", "./images")
+            # Image stream 모듈의 SaveFile 디렉터리에 타임스탬프명으로 저장
+            bridge_cfg = self.cfg.get("bridge", {})
+            images_dir = (
+                bridge_cfg.get("realtime_dir")
+                or bridge_cfg.get("images")
+                or "./SaveFile"
+            )
             import os
             os.makedirs(images_dir, exist_ok=True)
             fn = os.path.join(images_dir, f"preview_{int(self._last_img_ts)}.jpg")
@@ -173,8 +178,15 @@ class MainWindow(tk.Tk):
     def _refresh_status_periodic(self) -> None:
         try:
             running = getattr(self.bridge, "is_server_running", None) and self.bridge.is_server_running.is_set()
-            self._set_bridge_status("Running" if running else "Stopped")
-            
+            try:
+                mode = self.bridge.get_runtime_status().get("image_source_mode")
+            except Exception:
+                mode = None
+            self._set_bridge_status("Running" if running else "Stopped", mode)
+            self.btn_server.configure(
+                text="Stop Image Stream Module" if running else "Start Image Stream Module"
+            )
+
             # Gimbal 상태
             if hasattr(self.gimbal, "get_status"):
                 st = self.gimbal.get_status()
@@ -194,8 +206,12 @@ class MainWindow(tk.Tk):
         # 500ms 주기
         self.after(500, self._refresh_status_periodic)
 
-    def _set_bridge_status(self, text: str) -> None:
-        self.lbl_bridge.configure(text=f"Bridge: {text}")
+    def _set_bridge_status(self, text: str, mode: Optional[str] = None) -> None:
+        if mode:
+            display = f"{text} ({mode.capitalize()})"
+        else:
+            display = text
+        self.lbl_bridge.configure(text=f"Image Stream Module: {display}")
 
     def _set_gimbal_status(self, text: str) -> None:
         self.lbl_gimbal.configure(text=f"Gimbal: {text}")
@@ -210,13 +226,13 @@ class MainWindow(tk.Tk):
             running = getattr(self.bridge, "is_server_running", None) and self.bridge.is_server_running.is_set()
             if running:
                 self.bridge.stop()
-                self.btn_server.configure(text="Start Server")
+                self.btn_server.configure(text="Start Image Stream Module")
             else:
                 # 설정에서 네트워크 파라미터 읽어와 재시작 가능
                 bs = self.cfg.get("bridge", {})
                 self.bridge.update_settings(bs)
                 self.bridge.start()
-                self.btn_server.configure(text="Stop Server")
+                self.btn_server.configure(text="Stop Image Stream Module")
         except Exception as e:
             messagebox.showerror("Error", f"Toggle server failed:\n{e}")
 
@@ -225,7 +241,7 @@ class MainWindow(tk.Tk):
             from ui.bridge_window import BridgeSettingsWindow
             BridgeSettingsWindow(self, self.cfg, self.bridge, self.log)
         except Exception as e:
-            messagebox.showerror("Error", f"Open Bridge window failed:\n{e}")
+            messagebox.showerror("Error", f"Open Image Stream Module window failed:\n{e}")
 
     def open_gimbal_window(self) -> None:
         try:

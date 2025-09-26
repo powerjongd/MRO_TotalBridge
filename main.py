@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional
 
 from utils.helpers import has_display, get_logger
 from utils.settings import ConfigManager, AppConfig
-from core.bridge_core import ImageBridgeCore
+from core.image_stream_bridge import ImageStreamBridge
 from core.gimbal_control import GimbalControl
 from core.udp_relay import UdpRelay
 
@@ -28,8 +28,10 @@ from core.udp_relay import UdpRelay
 # -----------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="image-bridge",
-        description="Image Bridge (GUI/Headless) with TCP MroCameraControl, UDP image receiver, Gimbal control, and UDP relay.",
+        prog="unified-bridge",
+        description=(
+            "Unified Bridge (GUI/Headless) with Image Stream, Gimbal, and Sensor Relay modules."
+        ),
     )
     # mode
     p.add_argument("--no-gui", action="store_true", help="Force headless mode (ignore display).")
@@ -44,7 +46,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bridge-ip", type=str, help="Bridge bind IP (TCP/UDP).")
     p.add_argument("--bridge-tcp", type=int, help="Bridge TCP port.")
     p.add_argument("--bridge-udp", type=int, help="Bridge UDP port.")
-    p.add_argument("--images", type=str, help="Images directory.")
+    p.add_argument("--images", type=str, help="(Legacy) images directory alias for realtime SaveFile.")
+    p.add_argument("--realtime-dir", type=str, help="SaveFile directory for realtime captures.")
+    p.add_argument("--predefined-dir", type=str, help="PreDefined image set directory.")
+    p.add_argument(
+        "--image-source-mode",
+        type=str,
+        choices=["realtime", "predefined"],
+        help="Select TCP image source library.",
+    )
 
     # (Optional) Gimbal overrides
     p.add_argument("--gimbal-bind-ip", type=str, help="Gimbal RX bind IP.")
@@ -116,7 +126,16 @@ def apply_cli_overrides(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
     if args.bridge_ip is not None:   b["ip"] = args.bridge_ip
     if args.bridge_tcp is not None:  b["tcp_port"] = int(args.bridge_tcp)
     if args.bridge_udp is not None:  b["udp_port"] = int(args.bridge_udp)
-    if args.images is not None:      b["images"] = args.images
+    if args.images is not None:
+        b["images"] = args.images
+        b["realtime_dir"] = args.images
+    if args.realtime_dir is not None:
+        b["realtime_dir"] = args.realtime_dir
+        b["images"] = args.realtime_dir
+    if args.predefined_dir is not None:
+        b["predefined_dir"] = args.predefined_dir
+    if args.image_source_mode is not None:
+        b["image_source_mode"] = args.image_source_mode
 
     # Gimbal
     g = cfg.setdefault("gimbal", {})
@@ -155,7 +174,7 @@ def make_status_cb(logger, name: str):
 # -----------------------------
 def main() -> None:
     args = parse_args()
-    log = get_logger("image-bridge")
+    log = get_logger("unified-bridge")
 
     # 1) 설정 로드
     cfg_mgr = ConfigManager()
@@ -178,7 +197,7 @@ def main() -> None:
     gimbal_log = make_log_cb(log, "[GIMBAL]")
     relay_log  = make_log_cb(log, "[RELAY]")
 
-    bridge = ImageBridgeCore(
+    bridge = ImageStreamBridge(
         log_cb=bridge_log,
         preview_cb=None,  # GUI 미리보기는 UI 쪽에서 연결
         status_cb=make_status_cb(log, "BRIDGE"),
@@ -213,8 +232,12 @@ def main() -> None:
         while not hud_stop.is_set():
             try:
                 st = bridge.get_runtime_status()
+                mode = st.get("image_source_mode", "-")
+                active_dir = st.get("active_library_dir") or "-"
                 log.info(
-                    "[HUD] next=%03d | last=%.1fKB @ %s | saved=%s | TCP=%s UDP=%s",
+                    "[HUD] mode=%s | dir=%s | next=%03d | last=%.1fKB @ %s | saved=%s | TCP=%s UDP=%s",
+                    mode,
+                    active_dir,
                     st.get("next_image_number", -1),
                     st.get("last_image_kb", 0.0),
                     st.get("last_image_received_at") or "-",
@@ -253,7 +276,7 @@ def main() -> None:
         # 설정 저장 (메모리 cfg_dict → AppConfig → 파일)
         try:
             cfg_mgr.save(AppConfig.from_dict(cfg_dict))
-            log.info("[MAIN] Config saved to %s", cfg_mgr.config_path())
+            log.info("[MAIN] Config saved to %s", cfg_mgr.config_path)
         except Exception as e:
             log.error("[MAIN] Failed to save config: %s", e)
 
