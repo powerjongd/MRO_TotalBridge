@@ -28,21 +28,13 @@ GUI / Headless(무화면) 모두 지원하며, 설정과 데이터는 실행 파
 
 # 폴더 구조
 unified-bridge/
-
 ├─ main.py
-
 ├─ requirements.txt
-
 ├─ core/
-
 ├─ ui/
-
 ├─ utils/
-
 ├─ savedata/        # 실행 후 자동 생성(설정/상태 저장)
-
 ├─ SaveFile/        # 실시간 캡처 이미지/프리뷰 저장 (기본 이미지 라이브러리)
-
 └─ PreDefinedImageSet/ # 사전 정의된 JPEG 이미지 세트 (선택 시 TCP 응답 사용)
 
 # 실행 방법
