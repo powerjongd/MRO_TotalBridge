@@ -217,7 +217,18 @@ class AppConfig:
         g.setdefault("serial_baud", 115200)
         g.setdefault("generator_ip", "127.0.0.1")
         g.setdefault("generator_port", 15020)
-        g.setdefault("presets", {"version": 1, "slots": []})
+        g.setdefault("presets", {"version": 2, "slots": [None] * 6})
+        g.setdefault(
+            "preset_bundle",
+            {
+                "network": {
+                    "ip": g.get("generator_ip", "127.0.0.1"),
+                    "port": g.get("generator_port", 15020),
+                },
+                "presets": [None] * 6,
+                "selected": 0,
+            },
+        )
         g.setdefault("selected_preset", 0)
 
         # Relay 기본값
