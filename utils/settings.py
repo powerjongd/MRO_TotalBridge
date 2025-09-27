@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 
 # ------------------------------------------------------------
@@ -53,14 +53,14 @@ def get_program_dir() -> str:
 
     # 3) 쓰기 가능 여부 확인, 불가하면 사용자 폴더로 폴백
     if not _is_writable_dir(cand):
-        # Windows: %LOCALAPPDATA%\MroTotalBridge
-        # 기타 OS: ~/.local/share/MroTotalBridge
+        # Windows: %LOCALAPPDATA%\MroUnifiedBridge
+        # 기타 OS: ~/.local/share/MroUnifiedBridge
         from pathlib import Path
         if os.name == "nt":
             base = os.environ.get("LOCALAPPDATA", str(Path.home()))
-            fallback = os.path.join(base, "MroTotalBridge")
+            fallback = os.path.join(base, "MroUnifiedBridge")
         else:
-            fallback = os.path.join(str(Path.home()), ".local", "share", "MroTotalBridge")
+            fallback = os.path.join(str(Path.home()), ".local", "share", "MroUnifiedBridge")
 
         os.makedirs(fallback, exist_ok=True)
         return fallback

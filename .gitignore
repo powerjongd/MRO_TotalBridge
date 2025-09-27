@@ -21,3 +21,4 @@ logs/
 Thumbs.db
 
 *.diff
+*.rej
