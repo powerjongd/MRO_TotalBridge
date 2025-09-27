@@ -144,8 +144,29 @@ class ImageStreamBridge:
         self.ip = settings.get("ip", self.ip)
         self.tcp_port = int(settings.get("tcp_port", self.tcp_port))
         self.udp_port = int(settings.get("udp_port", self.udp_port))
-        self.images_dir = str(settings.get("images", self.images_dir))
+
+        legacy_images = settings.get("images")
+        if "realtime_dir" in settings or legacy_images is not None:
+            new_realtime = str(settings.get("realtime_dir", legacy_images or self.realtime_dir))
+            if new_realtime:
+                self.realtime_dir = new_realtime
+
+        if "predefined_dir" in settings:
+            new_predefined = settings.get("predefined_dir")
+            if new_predefined:
+                self.predefined_dir = str(new_predefined)
+
+        # Keep legacy alias in sync for older callers.
+        self.images_dir = self.realtime_dir
+
+        if "image_source_mode" in settings:
+            self.set_image_source_mode(settings.get("image_source_mode", self.image_source_mode))
+        elif self.image_source_mode == "predefined":
+            # Directory change without explicit mode update -> rescan predefined list.
+            self._predefined_numbers = self._scan_predefined_numbers()
+
         self._prepare_dirs()
+        self._sync_next_number()
         self.log("[BRIDGE] settings updated")
 
     # --------------- TCP Server ---------------
@@ -246,7 +267,7 @@ class ImageStreamBridge:
             if not self._latest_jpeg:
                 self.log("[BRIDGE] no image to capture (UDP not received yet)")
                 return
-            fn = os.path.join(self.images_dir, f"{self._next_image_number:03d}.jpg")
+            fn = os.path.join(self.realtime_dir, f"{self._next_image_number:03d}.jpg")
             try:
                 with open(fn, "wb") as f:
                     f.write(self._latest_jpeg)
@@ -278,7 +299,7 @@ class ImageStreamBridge:
             self.log(f"[BRIDGE] send Get_ImgNum failed: {e}")
 
     def _handle_req_send_img(self, conn: socket.socket, img_num: int) -> None:
-        fp = os.path.join(self.images_dir, f"{img_num:03d}.jpg")
+        fp = self._resolve_image_path(img_num)
         ack_uuid = 0
         try:
             with open(fp, "rb") as f:
@@ -415,6 +436,8 @@ class ImageStreamBridge:
 
     def _prepare_dirs(self) -> None:
         for label, path in ("SaveFile", self.realtime_dir), ("PreDefinedImageSet", self.predefined_dir):
+            if not path:
+                continue
             try:
                 os.makedirs(path, exist_ok=True)
             except Exception as e:
@@ -496,4 +519,10 @@ class ImageStreamBridge:
                 self.status_cb(text)
         except Exception:
             pass
+
+
+class ImageStreamBridge(ImageBridgeCore):
+    """Concrete alias retained for backwards compatibility."""
+
+    pass
 
