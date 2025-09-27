@@ -215,6 +215,8 @@ class AppConfig:
         # Serial (임무컴퓨터용 MAVLink)
         g.setdefault("serial_port", "")
         g.setdefault("serial_baud", 115200)
+        g.setdefault("presets", [])
+        g.setdefault("selected_preset", 0)
 
         # Relay 기본값
         r = self.relay

@@ -521,7 +521,7 @@ class ImageStreamBridge:
             pass
 
 
-class ImageStreamBridge(ImageBridgeCore):
+class ImageBridgeCore(ImageStreamBridge):
     """Concrete alias retained for backwards compatibility."""
 
     pass
