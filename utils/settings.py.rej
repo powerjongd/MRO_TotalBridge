@@ -1,49 +1,5 @@
 diff a/utils/settings.py b/utils/settings.py	(rejected hunks)
-@@ -152,53 +152,66 @@ class AppConfig:
-             if k not in d:
-                 d[k] = v
-         return d
- 
-     @staticmethod
-     def from_dict(d: Dict[str, Any]) -> "AppConfig":
-         # 알려진 섹션 추출
-         bridge = dict(d.get("bridge", {}))
-         gimbal = dict(d.get("gimbal", {}))
-         relay  = dict(d.get("relay", {}))
-         # 나머지 extras
-         extras = {k: v for k, v in d.items() if k not in ("bridge", "gimbal", "relay")}
-         ac = AppConfig(bridge=bridge, gimbal=gimbal, relay=relay, _extras=extras)
-         # 기본값 주입/마이그레이션
-         ac._inject_defaults()
-         return ac
- 
-     # ---------- 섹션별 기본값 주입 ----------
- 
-     def _inject_defaults(self) -> None:
-         # Bridge 기본값
-         b = self.bridge
-         b.setdefault("ip", "0.0.0.0")
-         b.setdefault("tcp_port", 9999)
-         b.setdefault("udp_port", 9998)
--        # 이미지 저장 폴더 (프로그램 아래 ./images)
--        b.setdefault("images", os.path.join(get_program_dir(), "images"))
--        ensure_dir(b["images"])
-+        default_realtime = os.path.join(get_program_dir(), "SaveFile")
-+        default_predefined = os.path.join(get_program_dir(), "PreDefinedImageSet")
-+
-+        if "realtime_dir" not in b:
-+            if b.get("images"):
-+                b["realtime_dir"] = b["images"]
-+            else:
-+                b["realtime_dir"] = default_realtime
-+        if "predefined_dir" not in b:
-+            b["predefined_dir"] = default_predefined
-+
-+        ensure_dir(b["realtime_dir"])
-+        ensure_dir(b["predefined_dir"])
-+
-+        b.setdefault("image_source_mode", "realtime")
-+        b["images"] = b["realtime_dir"]
+@@ -193,50 +193,54 @@ class AppConfig:
          # GUI 미리보기 등
          b.setdefault("console_echo", True)         # 콘솔 로그 echo
          b.setdefault("show_hud", True)             # (옵션) 간단 상태 표시
@@ -69,3 +25,32 @@ diff a/utils/settings.py b/utils/settings.py	(rejected hunks)
          # Serial (임무컴퓨터용 MAVLink)
          g.setdefault("serial_port", "")
          g.setdefault("serial_baud", 115200)
++        g.setdefault("generator_ip", "127.0.0.1")
++        g.setdefault("generator_port", 15020)
++        g.setdefault("presets", {"version": 1, "slots": []})
++        g.setdefault("selected_preset", 0)
+ 
+         # Relay 기본값
+         r = self.relay
+         # Gazebo 입력
+         r.setdefault("gazebo_listen_ip", "0.0.0.0")
+         r.setdefault("gazebo_listen_port", 17000)
+         # ExternalCtrl 출력 (원본 릴레이)
+         r.setdefault("ext_udp_ip", "127.0.0.1")
+         r.setdefault("ext_udp_port", 9091)         # 요구사항: 기본 9091
+         # Distance 입력 (RAW 기본)
+         r.setdefault("distance_mode", "raw")       # "raw" | "mavlink"
+         r.setdefault("distance_udp_listen_ip", "0.0.0.0")
+         r.setdefault("distance_udp_listen_port", 14650)
+         # 공용 Serial (OpticalFlow + Distance out)
+         r.setdefault("serial_port", "")
+         r.setdefault("serial_baud", 115200)
+         r.setdefault("flow_sensor_id", 0)
+         # Auto-start
+         r.setdefault("autostart", False)
+         # Optical Flow 스케일/품질 모델
+         r.setdefault("of_scale_pix", 100.0)
+         r.setdefault("q_base", 255)
+         r.setdefault("q_min", 0)
+         r.setdefault("q_max", 255)
+         r.setdefault("accel_thresh", 5.0)
