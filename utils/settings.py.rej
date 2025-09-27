@@ -1,5 +1,5 @@
 diff a/utils/settings.py b/utils/settings.py	(rejected hunks)
-@@ -193,50 +193,54 @@ class AppConfig:
+@@ -193,50 +193,65 @@ class AppConfig:
          # GUI 미리보기 등
          b.setdefault("console_echo", True)         # 콘솔 로그 echo
          b.setdefault("show_hud", True)             # (옵션) 간단 상태 표시
@@ -27,7 +27,18 @@ diff a/utils/settings.py b/utils/settings.py	(rejected hunks)
          g.setdefault("serial_baud", 115200)
 +        g.setdefault("generator_ip", "127.0.0.1")
 +        g.setdefault("generator_port", 15020)
-+        g.setdefault("presets", {"version": 1, "slots": []})
++        g.setdefault("presets", {"version": 2, "slots": [None] * 6})
++        g.setdefault(
++            "preset_bundle",
++            {
++                "network": {
++                    "ip": g.get("generator_ip", "127.0.0.1"),
++                    "port": g.get("generator_port", 15020),
++                },
++                "presets": [None] * 6,
++                "selected": 0,
++            },
++        )
 +        g.setdefault("selected_preset", 0)
  
          # Relay 기본값
