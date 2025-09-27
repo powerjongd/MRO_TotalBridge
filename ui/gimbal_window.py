@@ -285,6 +285,20 @@ class GimbalControlsWindow(tk.Toplevel):
             "generator_port": port,
         }
 
+    @staticmethod
+    def _to_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on", "y"}:
+                return True
+            if lowered in {"0", "false", "no", "off", "n", ""}:
+                return False
+        return bool(value)
+
     def _collect_values(self) -> Dict[str, Any]:
         combo = (self.v_sensor_type_combo.get() or "0: Camera").strip()
         try:
@@ -301,7 +315,7 @@ class GimbalControlsWindow(tk.Toplevel):
             "init_pitch_deg": float(self.v_pitch.get()),
             "init_yaw_deg": float(self.v_yaw.get()),
             "max_rate_dps": float(self.v_max_rate.get()),
-            "power_on": bool(self.v_power_on.get()),
+            "power_on": self._to_bool(self.v_power_on.get()),
             "serial_port": self.v_serial_port.get().strip(),
             "serial_baud": int(self.v_baud.get()),
             "mav_sysid": int(self.v_mav_sysid.get()),
@@ -313,6 +327,35 @@ class GimbalControlsWindow(tk.Toplevel):
     def _collect_preset_values(self) -> Dict[str, Any]:
         values = self._collect_values()
         return {k: values[k] for k in PRESET_VALUE_KEYS if k in values}
+
+    def _coerce_preset_payload(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        coerced: Dict[str, Any] = {}
+        for key in PRESET_VALUE_KEYS:
+            if key not in values:
+                continue
+            val = values[key]
+            try:
+                if key in {"sensor_type", "sensor_id", "serial_baud", "mav_sysid", "mav_compid"}:
+                    coerced[key] = int(val)
+                elif key in {
+                    "pos_x",
+                    "pos_y",
+                    "pos_z",
+                    "init_roll_deg",
+                    "init_pitch_deg",
+                    "init_yaw_deg",
+                    "max_rate_dps",
+                }:
+                    coerced[key] = float(val)
+                elif key == "power_on":
+                    coerced[key] = self._to_bool(val)
+                elif key == "serial_port":
+                    coerced[key] = str(val)
+                else:
+                    coerced[key] = val
+            except Exception as exc:
+                self.log.warning("Failed to coerce preset value %s=%r: %s", key, val, exc)
+        return coerced
 
     def _apply_values(self, values: Dict[str, Any]) -> None:
         if "generator_ip" in values:
@@ -351,7 +394,7 @@ class GimbalControlsWindow(tk.Toplevel):
         if "max_rate_dps" in values:
             self.v_max_rate.set(float(values["max_rate_dps"]))
         if "power_on" in values:
-            self.v_power_on.set(bool(values["power_on"]))
+            self.v_power_on.set(self._to_bool(values["power_on"]))
         if "serial_port" in values:
             self.v_serial_port.set(str(values["serial_port"]))
         if "serial_baud" in values:
@@ -437,14 +480,22 @@ class GimbalControlsWindow(tk.Toplevel):
             name = self._default_preset_name(idx)
         self.v_preset_name.set(name)
 
-    def _apply_preset(self, idx: int) -> None:
+    def _apply_preset(self, idx: int) -> Dict[str, Any]:
         if not (0 <= idx < MAX_SENSOR_PRESETS):
             idx = 0
             self.v_preset_index.set(idx)
         preset = self.presets[idx]
+        applied: Dict[str, Any] = {}
         if preset and isinstance(preset.get("values"), dict):
-            self._apply_values(preset["values"])
+            payload = {
+                key: preset["values"].get(key)
+                for key in PRESET_VALUE_KEYS
+                if key in preset["values"]
+            }
+            applied = dict(payload)
+            self._apply_values(payload)
         self._sync_preset_widgets()
+        return applied
 
     def _export_presets(self) -> Dict[str, Any]:
         slots: List[Optional[Dict[str, Any]]] = []
@@ -483,9 +534,23 @@ class GimbalControlsWindow(tk.Toplevel):
 
     def on_select_preset(self, idx: int) -> None:
         self.v_preset_index.set(idx)
-        self._apply_preset(idx)
-        self.cfg.setdefault("gimbal", {}).update(self._collect_values())
+        applied = self._apply_preset(idx)
+        common = self._collect_common_values()
+        combined: Dict[str, Any]
+        if applied:
+            coerced = self._coerce_preset_payload(applied)
+            combined = {**coerced, **common}
+        else:
+            try:
+                combined = self._collect_values()
+            except Exception as exc:
+                self.log.error("Failed to gather gimbal values after selecting preset %s: %s", idx + 1, exc)
+                combined = {**common}
+        gconf = self.cfg.setdefault("gimbal", {})
+        gconf.update(combined)
         self._sync_gimbal_config_metadata()
+        if applied:
+            self._apply_preset_runtime(combined)
 
     def on_save_preset(self) -> None:
         idx = int(self.v_preset_index.get())
@@ -509,6 +574,52 @@ class GimbalControlsWindow(tk.Toplevel):
         self.cfg.setdefault("gimbal", {}).update(self._collect_values())
         self._sync_gimbal_config_metadata()
         messagebox.showinfo("Cleared", f"Preset {idx + 1} cleared.")
+
+    def _apply_preset_runtime(self, values: Dict[str, Any]) -> None:
+        try:
+            if hasattr(self.gimbal, "update_settings"):
+                self.gimbal.update_settings(values)
+        except Exception as exc:
+            self.log.exception("Failed to update gimbal settings for preset: %s", exc)
+
+        pose_keys = ("pos_x", "pos_y", "pos_z", "init_roll_deg", "init_pitch_deg", "init_yaw_deg")
+        if all(k in values for k in pose_keys) and hasattr(self.gimbal, "set_target_pose"):
+            try:
+                self.gimbal.set_target_pose(
+                    values["pos_x"],
+                    values["pos_y"],
+                    values["pos_z"],
+                    values["init_roll_deg"],
+                    values["init_pitch_deg"],
+                    values["init_yaw_deg"],
+                )
+            except Exception as exc:
+                self.log.exception("Failed to push preset pose to gimbal: %s", exc)
+
+        if "max_rate_dps" in values and hasattr(self.gimbal, "set_max_rate"):
+            try:
+                self.gimbal.set_max_rate(values["max_rate_dps"])
+            except Exception as exc:
+                self.log.exception("Failed to update gimbal max rate from preset: %s", exc)
+
+        if "power_on" in values and hasattr(self.gimbal, "set_power"):
+            try:
+                self.gimbal.set_power(self._to_bool(values["power_on"]))
+            except Exception as exc:
+                self.log.exception("Failed to sync gimbal power state from preset: %s", exc)
+
+        if {"mav_sysid", "mav_compid"}.issubset(values.keys()) and hasattr(self.gimbal, "set_mav_ids"):
+            try:
+                self.gimbal.set_mav_ids(values["mav_sysid"], values["mav_compid"])
+            except Exception as exc:
+                self.log.exception("Failed to set MAV IDs from preset: %s", exc)
+
+        port = str(values.get("serial_port", "")).strip()
+        if port and "serial_baud" in values and hasattr(self.gimbal, "open_serial"):
+            try:
+                self.gimbal.open_serial(port, int(values["serial_baud"]))
+            except Exception as exc:
+                self.log.exception("Failed to open serial from preset: %s", exc)
 
     def on_apply_pose(self) -> None:
         try:
