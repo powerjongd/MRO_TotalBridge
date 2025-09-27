@@ -10,7 +10,10 @@ import time
 from typing import Callable, Optional, Dict, Any, List, Tuple
 
 from pymavlink import mavutil
-from serial import SerialException
+try:
+    from serial import SerialException
+except ImportError:
+    from serial.serialutil import SerialException
 
 from utils.helpers import euler_to_quat
 
