@@ -15,8 +15,6 @@ SENSOR_COMBO_VALUES = [f"{i}: {name}" for i, name in enumerate(SENSOR_TYPES)]
 
 MAX_SENSOR_PRESETS = 6
 PRESET_VALUE_KEYS = [
-    "generator_ip",
-    "generator_port",
     "sensor_type",
     "sensor_id",
     "pos_x",
@@ -108,6 +106,15 @@ class GimbalControlsWindow(tk.Toplevel):
 
         row = 0
 
+        net_box = ttk.Labelframe(frm, text="Network Sensor Control")
+        net_box.grid(row=row, column=0, columnspan=4, sticky="ew", **pad)
+        ttk.Label(net_box, text="IP").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+        ttk.Entry(net_box, textvariable=self.v_gen_ip, width=18).grid(row=0, column=1, sticky="w", padx=4, pady=2)
+        ttk.Label(net_box, text="Port").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+        ttk.Entry(net_box, textvariable=self.v_gen_port, width=8).grid(row=0, column=3, sticky="w", padx=4, pady=2)
+
+        row += 1
+
         presets_box = ttk.Labelframe(frm, text="Sensor Presets")
         presets_box.grid(row=row, column=0, columnspan=4, sticky="ew", **pad)
         presets_box.columnconfigure(1, weight=1)
@@ -129,16 +136,6 @@ class GimbalControlsWindow(tk.Toplevel):
         ttk.Entry(presets_box, textvariable=self.v_preset_name, width=24).grid(row=1, column=1, sticky="we", padx=4, pady=(2, 2))
         ttk.Button(presets_box, text="Save to Preset", command=self.on_save_preset).grid(row=1, column=2, sticky="w", padx=4, pady=(2, 2))
         ttk.Button(presets_box, text="Clear Preset", command=self.on_clear_preset).grid(row=1, column=3, sticky="w", padx=4, pady=(2, 2))
-
-        row += 1
-
-        # Generator
-        ttk.Label(frm, text="Generator (MORAI)").grid(row=row, column=0, columnspan=4, sticky="w", **pad)
-        row += 1
-        ttk.Label(frm, text="IP").grid(row=row, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_gen_ip, width=18).grid(row=row, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Port").grid(row=row, column=2, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_gen_port, width=8).grid(row=row, column=3, sticky="w", **pad)
 
         row += 1
 
@@ -275,15 +272,26 @@ class GimbalControlsWindow(tk.Toplevel):
         except Exception:
             return []
 
+    def _collect_common_values(self) -> Dict[str, Any]:
+        try:
+            port = int(self.v_gen_port.get())
+        except Exception:
+            try:
+                port = int(self.cfg.get("gimbal", {}).get("generator_port", 15020))
+            except Exception:
+                port = 15020
+        return {
+            "generator_ip": self.v_gen_ip.get(),
+            "generator_port": port,
+        }
+
     def _collect_values(self) -> Dict[str, Any]:
         combo = (self.v_sensor_type_combo.get() or "0: Camera").strip()
         try:
             sensor_code = int(combo.split(":")[0])
         except Exception:
             sensor_code = 0
-        return {
-            "generator_ip": self.v_gen_ip.get(),
-            "generator_port": int(self.v_gen_port.get()),
+        values = {
             "sensor_type": sensor_code,
             "sensor_id": int(self.v_sensor_id.get()),
             "pos_x": float(self.v_pos_x.get()),
@@ -299,6 +307,12 @@ class GimbalControlsWindow(tk.Toplevel):
             "mav_sysid": int(self.v_mav_sysid.get()),
             "mav_compid": int(self.v_mav_compid.get()),
         }
+        values.update(self._collect_common_values())
+        return values
+
+    def _collect_preset_values(self) -> Dict[str, Any]:
+        values = self._collect_values()
+        return {k: values[k] for k in PRESET_VALUE_KEYS if k in values}
 
     def _apply_values(self, values: Dict[str, Any]) -> None:
         if "generator_ip" in values:
@@ -364,14 +378,36 @@ class GimbalControlsWindow(tk.Toplevel):
         base = self._default_preset_name(idx)
         if preset and isinstance(preset, dict):
             name = str(preset.get("name", "")).strip() or base
-            return f"{idx + 1}. {name}"
-        return f"{idx + 1}. {base}"
+            return name
+        return base
 
     def _normalize_presets(self, raw: Any) -> List[Optional[Dict[str, Any]]]:
         presets: List[Optional[Dict[str, Any]]] = []
-        if isinstance(raw, list):
-            for item in raw[:MAX_SENSOR_PRESETS]:
-                presets.append(self._normalize_single_preset(item))
+        slots: List[Any] = []
+        if isinstance(raw, dict):
+            slots_raw = raw.get("slots")
+            if isinstance(slots_raw, list):
+                slots = slots_raw
+            elif isinstance(slots_raw, dict):
+                keys = set(slots_raw.keys())
+                zero_based = any(k in keys for k in (0, "0"))
+                for i in range(MAX_SENSOR_PRESETS):
+                    candidates = []
+                    if zero_based:
+                        candidates.extend([i, str(i)])
+                    else:
+                        candidates.extend([i + 1, str(i + 1)])
+                    candidates.extend([i, str(i), i + 1, str(i + 1)])
+                    val = None
+                    for key in candidates:
+                        if key in slots_raw:
+                            val = slots_raw[key]
+                            break
+                    slots.append(val)
+        elif isinstance(raw, list):
+            slots = raw
+        for item in slots[:MAX_SENSOR_PRESETS]:
+            presets.append(self._normalize_single_preset(item))
         while len(presets) < MAX_SENSOR_PRESETS:
             presets.append(None)
         return presets
@@ -410,24 +446,28 @@ class GimbalControlsWindow(tk.Toplevel):
             self._apply_values(preset["values"])
         self._sync_preset_widgets()
 
-    def _export_presets(self) -> List[Optional[Dict[str, Any]]]:
-        exported: List[Optional[Dict[str, Any]]] = []
+    def _export_presets(self) -> Dict[str, Any]:
+        slots: List[Optional[Dict[str, Any]]] = []
         for preset in self.presets:
             if preset and isinstance(preset.get("values"), dict):
-                exported.append({
+                slots.append({
                     "name": str(preset.get("name", "")),
-                    "values": {k: preset["values"].get(k) for k in PRESET_VALUE_KEYS if k in preset["values"]},
+                    "values": {
+                        k: preset["values"].get(k) for k in PRESET_VALUE_KEYS if k in preset["values"]
+                    },
                 })
             else:
-                exported.append(None)
-        return exported
+                slots.append(None)
+        return {"version": 1, "slots": slots}
 
     def _sync_gimbal_config_metadata(self) -> None:
         gconf = self.cfg.setdefault("gimbal", {})
+        gconf.update(self._collect_common_values())
         gconf["presets"] = self._export_presets()
         gconf["selected_preset"] = int(self.v_preset_index.get())
 
     def _inject_presets_into_dict(self, target: Dict[str, Any]) -> None:
+        target.update(self._collect_common_values())
         target["presets"] = self._export_presets()
         target["selected_preset"] = int(self.v_preset_index.get())
 
@@ -444,18 +484,20 @@ class GimbalControlsWindow(tk.Toplevel):
     def on_select_preset(self, idx: int) -> None:
         self.v_preset_index.set(idx)
         self._apply_preset(idx)
+        self.cfg.setdefault("gimbal", {}).update(self._collect_values())
         self._sync_gimbal_config_metadata()
 
     def on_save_preset(self) -> None:
         idx = int(self.v_preset_index.get())
         try:
-            values = self._collect_values()
+            preset_values = self._collect_preset_values()
         except Exception as e:
             messagebox.showerror("Error", f"Save preset failed:\n{e}")
             return
         name = self.v_preset_name.get().strip() or self._default_preset_name(idx)
-        self.presets[idx] = {"name": name, "values": values}
+        self.presets[idx] = {"name": name, "values": preset_values}
         self.v_preset_name.set(name)
+        self.cfg.setdefault("gimbal", {}).update(self._collect_values())
         self._sync_preset_widgets()
         self._sync_gimbal_config_metadata()
         messagebox.showinfo("Saved", f"Preset {idx + 1} saved.")
@@ -464,6 +506,7 @@ class GimbalControlsWindow(tk.Toplevel):
         idx = int(self.v_preset_index.get())
         self.presets[idx] = None
         self._sync_preset_widgets()
+        self.cfg.setdefault("gimbal", {}).update(self._collect_values())
         self._sync_gimbal_config_metadata()
         messagebox.showinfo("Cleared", f"Preset {idx + 1} cleared.")
 
