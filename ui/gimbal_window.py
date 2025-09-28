@@ -660,32 +660,6 @@ class GimbalControlsWindow(tk.Toplevel):
         self._write_back_state()
         messagebox.showinfo("Cleared", f"Preset {idx + 1} cleared.")
 
-    def on_select_preset(self, idx: int) -> None:
-        self.v_preset_index.set(idx)
-        self._apply_preset(idx)
-        self._sync_gimbal_config_metadata()
-
-    def on_save_preset(self) -> None:
-        idx = int(self.v_preset_index.get())
-        try:
-            values = self._collect_values()
-        except Exception as e:
-            messagebox.showerror("Error", f"Save preset failed:\n{e}")
-            return
-        name = self.v_preset_name.get().strip() or self._default_preset_name(idx)
-        self.presets[idx] = {"name": name, "values": values}
-        self.v_preset_name.set(name)
-        self._sync_preset_widgets()
-        self._sync_gimbal_config_metadata()
-        messagebox.showinfo("Saved", f"Preset {idx + 1} saved.")
-
-    def on_clear_preset(self) -> None:
-        idx = int(self.v_preset_index.get())
-        self.presets[idx] = None
-        self._sync_preset_widgets()
-        self._sync_gimbal_config_metadata()
-        messagebox.showinfo("Cleared", f"Preset {idx + 1} cleared.")
-
     def on_apply_pose(self) -> None:
         try:
             values = self._active_runtime_values()

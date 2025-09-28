@@ -28,7 +28,7 @@ CMD_IMG_NUM_RESPONSE = 0x11
 CMD_FILE_IMG_TRANSFER= 0x12
 
 
-__all__ = ["ImageStreamBridge"]
+__all__ = ["ImageStreamBridge", "ImageBridgeCore"]
 
 
 class ImageStreamBridge:
@@ -531,7 +531,7 @@ class ImageStreamBridge:
             pass
 
 
-class ImageStreamBridge(ImageBridgeCore):
+class ImageBridgeCore(ImageStreamBridge):
 
     """Concrete alias retained for backwards compatibility."""
 
