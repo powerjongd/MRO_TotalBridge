@@ -60,14 +60,21 @@ class ImageStreamBridge:
         self.ip = settings.get("ip", "0.0.0.0")
         self.tcp_port = int(settings.get("tcp_port", 9999))
         self.udp_port = int(settings.get("udp_port", 9998))
+
+        legacy_images = settings.get("images")
         self.realtime_dir = str(
-            settings.get(
-                "realtime_dir",
-                settings.get("images", "./SaveFile"),
-            )
+            settings.get("realtime_dir")
+            or legacy_images
+            or "./SaveFile"
         )
         self.predefined_dir = str(settings.get("predefined_dir", "./PreDefinedImageSet"))
         self.image_source_mode = self._sanitize_mode(settings.get("image_source_mode", "realtime"))
+        # Backward compatibility: maintain images_dir alias used by legacy callers/UI.
+        self.images_dir = self.realtime_dir
+
+        # Cached metadata for predefined set enumeration.
+        self._predefined_numbers: list[int] = []
+
 
         # runtime
         self.is_server_running = threading.Event()
@@ -92,7 +99,10 @@ class ImageStreamBridge:
 
         self._prepare_dirs()
         self._sync_next_number()
-        self._predefined_numbers = self._scan_predefined_numbers()
+
+        if self.image_source_mode == "predefined":
+            self._predefined_numbers = self._scan_predefined_numbers()
+
 
     # --------------- lifecycle ---------------
 
@@ -521,7 +531,8 @@ class ImageStreamBridge:
             pass
 
 
-class ImageBridgeCore(ImageStreamBridge):
+class ImageStreamBridge(ImageBridgeCore):
+
     """Concrete alias retained for backwards compatibility."""
 
     pass
