@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Any, Dict, Iterable, List, Optional
 
+
 from serial.tools import list_ports
 from utils.settings import ConfigManager, AppConfig  # type: ignore
 
@@ -31,7 +32,6 @@ PRESET_VALUE_KEYS = [
     "mav_sysid",
     "mav_compid",
 ]
-
 
 def _as_int(value: Any, default: int) -> int:
     try:
@@ -240,6 +240,7 @@ class PresetBundle:
         return None
 
 
+
 class GimbalControlsWindow(tk.Toplevel):
     def __init__(self, master: tk.Misc, cfg: Dict[str, Any], gimbal, log: logging.Logger) -> None:
         super().__init__(master)
@@ -297,6 +298,7 @@ class GimbalControlsWindow(tk.Toplevel):
         self._build_layout()
         self._load_selected_preset(self.bundle.selected_index, apply_runtime=False)
         self._write_back_state()
+
         self._refresh_status_periodic()
 
     # ------------------------------------------------------------------
@@ -337,12 +339,14 @@ class GimbalControlsWindow(tk.Toplevel):
             btn = ttk.Radiobutton(
                 rb_holder,
                 text=f"Preset {idx + 1}",
+
                 variable=self.v_preset_index,
                 value=idx,
                 command=lambda i=idx: self.on_select_preset(i),
             )
             btn.grid(row=0, column=idx, sticky="w", padx=2)
             self._preset_radios.append(btn)
+
 
         ttk.Label(box, text="Name").grid(row=1, column=0, sticky="e", padx=4, pady=2)
         ttk.Entry(box, textvariable=self.v_preset_name, width=24).grid(row=1, column=1, sticky="we", padx=4, pady=2)
@@ -427,6 +431,7 @@ class GimbalControlsWindow(tk.Toplevel):
 
     def _build_status_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
         cur = ttk.Frame(parent)
+
         cur.grid(row=row, column=0, columnspan=4, sticky="we", **pad)
         ttk.Label(cur, text="Current Pose:").grid(row=0, column=0, sticky="w")
         ttk.Label(cur, text="x").grid(row=1, column=0, sticky="e")
@@ -599,6 +604,7 @@ class GimbalControlsWindow(tk.Toplevel):
 
     # ------------------------------------------------------------------
     # Actions
+
     def _set_tpl(self, x, y, z, r, p, yw):
         if x is not None:
             self.v_pos_x.set(x)
@@ -652,6 +658,32 @@ class GimbalControlsWindow(tk.Toplevel):
         self.v_preset_name.set(self._default_preset_name(idx))
         self._update_preset_labels()
         self._write_back_state()
+        messagebox.showinfo("Cleared", f"Preset {idx + 1} cleared.")
+
+    def on_select_preset(self, idx: int) -> None:
+        self.v_preset_index.set(idx)
+        self._apply_preset(idx)
+        self._sync_gimbal_config_metadata()
+
+    def on_save_preset(self) -> None:
+        idx = int(self.v_preset_index.get())
+        try:
+            values = self._collect_values()
+        except Exception as e:
+            messagebox.showerror("Error", f"Save preset failed:\n{e}")
+            return
+        name = self.v_preset_name.get().strip() or self._default_preset_name(idx)
+        self.presets[idx] = {"name": name, "values": values}
+        self.v_preset_name.set(name)
+        self._sync_preset_widgets()
+        self._sync_gimbal_config_metadata()
+        messagebox.showinfo("Saved", f"Preset {idx + 1} saved.")
+
+    def on_clear_preset(self) -> None:
+        idx = int(self.v_preset_index.get())
+        self.presets[idx] = None
+        self._sync_preset_widgets()
+        self._sync_gimbal_config_metadata()
         messagebox.showinfo("Cleared", f"Preset {idx + 1} cleared.")
 
     def on_apply_pose(self) -> None:
@@ -738,6 +770,7 @@ class GimbalControlsWindow(tk.Toplevel):
                 self.gimbal.update_settings(values)
         except Exception as exc:
             messagebox.showerror("Error", f"Apply failed:\n{exc}")
+
             return
         self.destroy()
 

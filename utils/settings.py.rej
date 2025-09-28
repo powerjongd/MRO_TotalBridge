@@ -1,0 +1,67 @@
+diff a/utils/settings.py b/utils/settings.py	(rejected hunks)
+@@ -193,50 +193,65 @@ class AppConfig:
+         # GUI 미리보기 등
+         b.setdefault("console_echo", True)         # 콘솔 로그 echo
+         b.setdefault("show_hud", True)             # (옵션) 간단 상태 표시
+         # req_capture / get_imgnum 페이로드 정책
+         b.setdefault("use_1byte_payload_for_rcv", True)
+ 
+         # Gimbal 기본값
+         g = self.gimbal
+         g.setdefault("enabled", True)
+         g.setdefault("sensor_type", 0)             # 0: Camera
+         g.setdefault("sensor_id", 0)
+         g.setdefault("max_rate_deg_s", 60.0)       # 최대 각속도
+         # 제너레이터(시뮬레이터) UDP 목적지
+         g.setdefault("sim_ip", "127.0.0.1")
+         g.setdefault("sim_port", 10706)            # gimbal ctrl 포트 가정 시 명시 사용
+         g.setdefault("sim_power_port", 10707)      # power ctrl 포트 가정 시 명시 사용
+         # system/component id (MAVLink 상호작용용 UI에서 사용)
+         g.setdefault("sys_id", 1)
+         g.setdefault("comp_id", 154)
+         # 초기 포즈 (xyzrpy)
+         g.setdefault("pose_xyzrpy", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+         g.setdefault("power_on", True)
+         # Serial (임무컴퓨터용 MAVLink)
+         g.setdefault("serial_port", "")
+         g.setdefault("serial_baud", 115200)
++        g.setdefault("generator_ip", "127.0.0.1")
++        g.setdefault("generator_port", 15020)
++        g.setdefault("presets", {"version": 2, "slots": [None] * 6})
++        g.setdefault(
++            "preset_bundle",
++            {
++                "network": {
++                    "ip": g.get("generator_ip", "127.0.0.1"),
++                    "port": g.get("generator_port", 15020),
++                },
++                "presets": [None] * 6,
++                "selected": 0,
++            },
++        )
++        g.setdefault("selected_preset", 0)
+ 
+         # Relay 기본값
+         r = self.relay
+         # Gazebo 입력
+         r.setdefault("gazebo_listen_ip", "0.0.0.0")
+         r.setdefault("gazebo_listen_port", 17000)
+         # ExternalCtrl 출력 (원본 릴레이)
+         r.setdefault("ext_udp_ip", "127.0.0.1")
+         r.setdefault("ext_udp_port", 9091)         # 요구사항: 기본 9091
+         # Distance 입력 (RAW 기본)
+         r.setdefault("distance_mode", "raw")       # "raw" | "mavlink"
+         r.setdefault("distance_udp_listen_ip", "0.0.0.0")
+         r.setdefault("distance_udp_listen_port", 14650)
+         # 공용 Serial (OpticalFlow + Distance out)
+         r.setdefault("serial_port", "")
+         r.setdefault("serial_baud", 115200)
+         r.setdefault("flow_sensor_id", 0)
+         # Auto-start
+         r.setdefault("autostart", False)
+         # Optical Flow 스케일/품질 모델
+         r.setdefault("of_scale_pix", 100.0)
+         r.setdefault("q_base", 255)
+         r.setdefault("q_min", 0)
+         r.setdefault("q_max", 255)
+         r.setdefault("accel_thresh", 5.0)

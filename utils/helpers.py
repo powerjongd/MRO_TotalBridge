@@ -1,13 +1,20 @@
 # utils/helpers.py
 # -*- coding: utf-8 -*-
-"""
-Common helpers:
+"""Utility helpers for the desktop bridge suite.
 
-- has_display(): 리눅스 무헤드 환경 감지
-- get_logger(name): 중복 핸들러 방지 로거
-- euler_to_quat(roll,pitch,yaw): deg → (x,y,z,w)
-- clamp(v, vmin, vmax)
-- rate_limit(x, limit)
+The module intentionally keeps dependencies light so it can be imported by
+both GUI and headless entry points without side effects.  The available
+helpers are:
+
+* :func:`has_display` - Detect whether a display is available (mainly for
+  Linux headless deployments).
+* :func:`get_logger` - Provide a lazily configured logger without duplicating
+  handlers when the module is imported multiple times.
+* :func:`euler_to_quat` - Convert roll, pitch, yaw degrees into a quaternion
+  tuple (x, y, z, w) using the ZYX convention.
+* :func:`clamp` - Clamp a value to optional minimum/maximum bounds.
+* :func:`rate_limit` - Limit the absolute value of a signal to the provided
+  threshold.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# core/bridge_core.py
+# core/image_stream_bridge.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -28,12 +28,21 @@ CMD_IMG_NUM_RESPONSE = 0x11
 CMD_FILE_IMG_TRANSFER= 0x12
 
 
-class ImageBridgeCore:
-    """
+__all__ = ["ImageStreamBridge"]
+
+
+class ImageStreamBridge:
+    """Image stream module for MRO UnifiedBridge (통합브릿지).
+
+    MRO UnifiedBridge를 구성하는 세 모듈 중 영상 스트리밍 담당 파트로,
+    실시간 UDP 프레임을 조립하고 TCP 명령(캡처/파일 전송 등)에 대응한다.
+    SaveFile(실시간 캡처) 또는 PreDefinedImageSet(사전 이미지) 중 선택된
+    라이브러리를 사용해 TCP 클라이언트에 이미지를 제공한다.
+
     - TCP 서버: MroCameraControl 명령 송수신
     - UDP 수신: New ICD(30B 헤더) 기반 JPEG 조립
-    - 콜백:
-        log_cb(text), preview_cb(jpeg_bytes), status_cb(text)
+    - 이미지 라이브러리 선택: realtime(SaveFile) / predefined(PreDefinedImageSet)
+    - 콜백: log_cb(text), preview_cb(jpeg_bytes), status_cb(text)
     """
 
     def __init__(
@@ -66,6 +75,7 @@ class ImageBridgeCore:
         # Cached metadata for predefined set enumeration.
         self._predefined_numbers: list[int] = []
 
+
         # runtime
         self.is_server_running = threading.Event()
         self._tcp_sock: Optional[socket.socket] = None
@@ -89,8 +99,10 @@ class ImageBridgeCore:
 
         self._prepare_dirs()
         self._sync_next_number()
+
         if self.image_source_mode == "predefined":
             self._predefined_numbers = self._scan_predefined_numbers()
+
 
     # --------------- lifecycle ---------------
 
@@ -520,6 +532,7 @@ class ImageBridgeCore:
 
 
 class ImageStreamBridge(ImageBridgeCore):
+
     """Concrete alias retained for backwards compatibility."""
 
     pass
