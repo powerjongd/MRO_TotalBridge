@@ -195,6 +195,7 @@ class AppConfig:
         b.setdefault("show_hud", True)             # (옵션) 간단 상태 표시
         # req_capture / get_imgnum 페이로드 정책
         b.setdefault("use_1byte_payload_for_rcv", True)
+        b.setdefault("zoom_scale", 1.0)
 
         # Gimbal 기본값
         g = self.gimbal
@@ -206,12 +207,15 @@ class AppConfig:
         g.setdefault("sim_ip", "127.0.0.1")
         g.setdefault("sim_port", 10706)            # gimbal ctrl 포트 가정 시 명시 사용
         g.setdefault("sim_power_port", 10707)      # power ctrl 포트 가정 시 명시 사용
+        g.setdefault("bind_ip", "0.0.0.0")
+        g.setdefault("bind_port", 16060)
         # system/component id (MAVLink 상호작용용 UI에서 사용)
         g.setdefault("sys_id", 1)
         g.setdefault("comp_id", 154)
         # 초기 포즈 (xyzrpy)
         g.setdefault("pose_xyzrpy", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         g.setdefault("power_on", True)
+        g.setdefault("zoom_scale", 1.0)
         # Serial (임무컴퓨터용 MAVLink)
         g.setdefault("serial_port", "")
         g.setdefault("serial_baud", 115200)

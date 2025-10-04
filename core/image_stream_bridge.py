@@ -75,6 +75,9 @@ class ImageStreamBridge:
         # Cached metadata for predefined set enumeration.
         self._predefined_numbers: list[int] = []
 
+        self._zoom_scale = max(1.0, float(settings.get("zoom_scale", 1.0)))
+        self._logged_zoom_warn = False
+
 
         # runtime
         self.is_server_running = threading.Event()
@@ -316,6 +319,8 @@ class ImageStreamBridge:
                 img = f.read()
         except FileNotFoundError:
             img = b""
+        if img:
+            img = self._apply_zoom_to_jpeg(img)
         data = struct.pack("<III", ack_uuid, img_num, len(img)) + img
         ts_sec, ts_nsec = int(time.time()), time.time_ns() % 1_000_000_000
         full = struct.pack("<IIB", ts_sec, ts_nsec, CMD_FILE_IMG_TRANSFER) + data
@@ -418,7 +423,46 @@ class ImageStreamBridge:
                 "realtime_dir": self.realtime_dir,
                 "predefined_dir": self.predefined_dir,
                 "active_library_dir": self.realtime_dir if self.image_source_mode == "realtime" else self.predefined_dir,
+                "zoom_scale": self._zoom_scale,
             }
+
+    def set_zoom_scale(self, zoom: float) -> None:
+        value = max(1.0, float(zoom))
+        with self._lock:
+            if abs(value - self._zoom_scale) < 1e-3:
+                return
+            self._zoom_scale = value
+        self.log(f"[BRIDGE] zoom scale -> {self._zoom_scale:.2f}x")
+
+    def _apply_zoom_to_jpeg(self, jpeg: bytes) -> bytes:
+        zoom = self._zoom_scale
+        if zoom <= 1.0001:
+            return jpeg
+        if not _HAS_PIL:
+            if not self._logged_zoom_warn:
+                self.log("[BRIDGE] zoom requested but Pillow is unavailable; skipping digital zoom")
+                self._logged_zoom_warn = True
+            return jpeg
+        try:
+            with Image.open(io.BytesIO(jpeg)) as img:
+                width, height = img.size
+                if width <= 0 or height <= 0:
+                    return jpeg
+                crop_w = max(1, min(width, int(round(width / zoom))))
+                crop_h = max(1, min(height, int(round(height / zoom))))
+                left = max(0, (width - crop_w) // 2)
+                top = max(0, (height - crop_h) // 2)
+                right = min(width, left + crop_w)
+                bottom = min(height, top + crop_h)
+                img = img.crop((left, top, right, bottom))
+                if (right - left) != width or (bottom - top) != height:
+                    img = img.resize((width, height), Image.BICUBIC)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=90)
+                return buf.getvalue()
+        except Exception as exc:
+            self.log(f"[BRIDGE] zoom processing failed: {exc}")
+        return jpeg
 
     @staticmethod
     def _parse_udp_header(data: bytes) -> Optional[Dict[str, int]]:

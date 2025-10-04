@@ -207,6 +207,7 @@ def main() -> None:
         log_cb=gimbal_log,
         status_cb=make_status_cb(log, "GIMBAL"),
         settings=cfg_dict.get("gimbal", {}),
+        zoom_update_cb=bridge.set_zoom_scale,
     )
     relay = UdpRelay(
         log_cb=relay_log,
