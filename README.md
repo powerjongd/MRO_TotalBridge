@@ -7,6 +7,7 @@ Unreal 기반 MORAI Sim Air(MRO)와 외부 소프트웨어 사이에서 이미�
 - **Image Stream Module (ImageStreamBridge)**
   - UDP JPEG 수신 → 실시간 프리뷰 및 저장
   - TCP `MroCameraControl`: `Req_Capture`(최신 프레임을 `SaveFile/000.jpg` 순환 저장), `Set_Count`, `Get_ImgNum`, `Req_SendImg`, `Set_Zoomratio`/`Get_Zoomratio`(응답 `Ack_Zoomratio`) 지원
+
   - `./SaveFile/000.jpg`(실시간 캡처) 또는 `./PreDefinedImageSet/000.jpg`(사전 이미지) 중 UI에서 선택 가능
   - GUI 프리뷰 스냅샷 저장: `./SaveFile/preview_<timestamp>.jpg`
   - 짐벌 TCP 제어에서 전달된 디지털 줌 배율을 반영해 `Req_SendImg` JPEG를 중앙 크롭 후 리사이즈(광학 줌 대신 화상 확대)
@@ -16,6 +17,7 @@ Unreal 기반 MORAI Sim Air(MRO)와 외부 소프트웨어 사이에서 이미�
   - UI에서 Sensor type/ID/Power/MaxRate/TargetPose(x, y, z, r, p, y) 편집 및 UDP Apply
   - 저장된 센서 프리셋을 개별 적용하거나 **Apply All** 버튼으로 한 번에 순차 전송(100 ms 간격)
   - TCP `GimbalControl`: 길이(4B) + `<ts_sec, ts_nsec, cmd>` 헤더로 Pose/Zoom 설정 및 상태 조회 지원 (아래 Sensor Control ICD 참고)
+
 - **Sensor Relay Module (Gazebo/가상 센서 릴레이)**
   - Gazebo UDP(자세/속도) → ExternalCtrl UDP 원본 릴레이
   - Gazebo UDP → MAVLink `OPTICAL_FLOW`(100) 시리얼 송신
@@ -64,6 +66,7 @@ python main.py
 ### 3) Headless(무화면) 실행
 
 ```bash
+
 python main.py --nogui --ip 0.0.0.0 --tcp 9999 --udp 9998
 ```
 
