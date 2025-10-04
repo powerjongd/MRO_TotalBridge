@@ -6,14 +6,18 @@ Unreal 기반 MORAI Sim Air(MRO)와 외부 소프트웨어 사이에서 이미�
 
 - **Image Stream Module (ImageStreamBridge)**
   - UDP JPEG 수신 → 실시간 프리뷰 및 저장
-  - TCP `MroCameraControl`: `Req_Capture`(최신 프레임을 `SaveFile/000.jpg` 순환 저장), `Set_Count`, `Get_ImgNum`, `Req_SendImg` 지원
+  - TCP `MroCameraControl`: `Req_Capture`(최신 프레임을 `SaveFile/000.jpg` 순환 저장), `Set_Count`, `Get_ImgNum`, `Req_SendImg`, `Set_Zoomratio`/`Get_Zoomratio`(응답 `Ack_Zoomratio`) 지원
+
   - `./SaveFile/000.jpg`(실시간 캡처) 또는 `./PreDefinedImageSet/000.jpg`(사전 이미지) 중 UI에서 선택 가능
   - GUI 프리뷰 스냅샷 저장: `./SaveFile/preview_<timestamp>.jpg`
+  - 짐벌 TCP 제어에서 전달된 디지털 줌 배율을 반영해 `Req_SendImg` JPEG를 중앙 크롭 후 리사이즈(광학 줌 대신 화상 확대)
 - **Gimbal Control Module**
   - `SensorGimbalCtrl`(10706): position(double[3]) + orientation(float[4, quaternion]) 송신
   - `SensorPowerCtrl`(10707): sensor_type / id / power(0/1) 송신
   - UI에서 Sensor type/ID/Power/MaxRate/TargetPose(x, y, z, r, p, y) 편집 및 UDP Apply
   - 저장된 센서 프리셋을 개별 적용하거나 **Apply All** 버튼으로 한 번에 순차 전송(100 ms 간격)
+  - TCP `GimbalControl`: 길이(4B) + `<ts_sec, ts_nsec, cmd>` 헤더로 Pose/Zoom 설정 및 상태 조회 지원 (아래 Sensor Control ICD 참고)
+
 - **Sensor Relay Module (Gazebo/가상 센서 릴레이)**
   - Gazebo UDP(자세/속도) → ExternalCtrl UDP 원본 릴레이
   - Gazebo UDP → MAVLink `OPTICAL_FLOW`(100) 시리얼 송신
@@ -62,6 +66,7 @@ python main.py
 ### 3) Headless(무화면) 실행
 
 ```bash
+
 python main.py --nogui --ip 0.0.0.0 --tcp 9999 --udp 9998
 ```
 
@@ -100,7 +105,7 @@ pyinstaller --noconfirm --clean --name MroUnifiedBridge \
 ## 설정 항목(Editable)
 
 - **Image Stream Module**: Bind IP, TCP Port(9999), UDP Port(9998), Image Source Mode(Realtime SaveFile / PreDefined ImageSet) 및 각 디렉터리 지정
-- **Gimbal Controls**: Sensor Type(ID), Power(Apply Power), Max Rate, Target Pose(x, y, z, r, p, y), Preset 저장/적용(Apply/Apply All)
+- **Gimbal Controls**: Sensor Type(ID), Power(Apply Power), Max Rate, Target Pose(x, y, z, r, p, y), Preset 저장/적용(Apply/Apply All), TCP Bind IP/Port(짐벌 수신) 및 Zoom Scale
 - **Gazebo Relay**
   - Gazebo Listen IP/Port (기본 `0.0.0.0:17000`)
   - ExternalCtrl UDP Out IP/Port (기본 `127.0.0.1:9091`)
@@ -113,6 +118,45 @@ pyinstaller --noconfirm --clean --name MroUnifiedBridge \
 - 포터블 저장: 설정/이미지가 실행 파일(.exe) 옆 폴더에 저장
 - 원자적 저장: 설정 파일을 임시 파일로 작성 후 교체하여 무결성 확보
 - GUI/Headless 겸용 + 프리뷰: 무화면 장비에서도 동작, GUI에서는 실시간 미리보기/일시정지/스냅샷 제공
+
+## Sensor Control ICD
+
+### UDP (Generator Forward)
+- **10706 SensorGimbalCtrl**: `<uint16 sensor_type><uint16 sensor_id><float64 pos_x><float64 pos_y><float64 pos_z><float32 roll_deg><float32 pitch_deg><float32 yaw_deg>` (little-endian)
+- **10707 SensorPowerCtrl**: `<uint16 sensor_type><uint16 sensor_id><uint8 power_on>`
+
+### TCP `MroCameraControl` Command Set
+- Frame: `<uint32 payload_len>` prefix + payload (`payload_len` bytes)
+- Payload header: `<uint32 ts_sec><uint32 ts_nsec><uint8 cmd_id>` (little-endian)
+
+| Cmd ID | 이름 | Payload 구조 | 비고 |
+| ------ | ---- | ------------ | ---- |
+| `0x01` | Req_Capture | `<uint8 capture=1>` | 최신 이미지(UDP 수신본)를 SaveFile 디렉터리에 저장하고 파일 번호를 +1. |
+| `0x02` | Set_Gimbal | `<float x, y, z, roll, pitch, yaw>` | 예약 기능(현재 미사용). |
+| `0x03` | Set_Count | `<uint32 count_num>` | 다음 저장될 이미지 번호를 설정(000~999 순환). |
+| `0x04` | Get_ImgNum | `<uint8 get_flag=1>` | 마지막으로 저장된 이미지 번호 질의. `Img_Num_Response`(0x11) 반환. |
+| `0x05` | Req_SendImg | `<uint32 img_num>` | 지정 번호 이미지를 TCP 전송. `File_ImgTransfer`(0x12) 응답. |
+| `0x06` | Set_Zoomratio | `<float zoom_ratio>` | 디지털 줌 배율 설정. 적용된 배율은 `Ack_Zoomratio`(0x13)로 회신. |
+| `0x07` | Get_Zoomratio | `<uint8 get_flag=1>` | 현재 줌 배율 질의. `Ack_Zoomratio` 응답. |
+| `0x11` | Img_Num_Response | `<uint32 ack_uuid><uint32 img_num>` | 마지막 저장 번호 응답(기존 동작 유지). |
+| `0x12` | File_ImgTransfer | `<uint32 ack_uuid><uint32 img_num><uint32 data_size><byte[] data>` | JPEG 바이너리 응답(줌 1.0 초과 시 중앙 크롭 후 리사이즈). |
+| `0x13` | Ack_Zoomratio | `<float zoom_ratio>` | Set/Get 요청에 대한 현재 줌 배율 회신. |
+
+> `zoom_ratio` 는 디지털 확대 배율(1.0 = 원본)이며, Pillow 가 사용 가능하면 JPEG 중앙부를 crop 후 원 해상도로 리사이즈하여 적용합니다.
+
+### TCP `GimbalControl` Command Set
+- Framing: `<uint32 payload_len>` prefix + payload (`payload_len` bytes)
+- Payload header: `<uint32 ts_sec><uint32 ts_nsec><uint8 cmd_id>`
+- All values are little-endian. Responses use the same header.
+
+| Cmd ID | 이름 | Payload 구조 | 비고 |
+| ------ | ---- | ------------ | ---- |
+| `0x01` | Set_TargetPose | `<int16 sensor_type><int16 sensor_id><float64 pos_x><float64 pos_y><float64 pos_z><float32 roll_deg><float32 pitch_deg><float32 yaw_deg>` | UDP 루프의 목표 포즈를 갱신. 성공 시 `Status`(0x81) 응답. |
+| `0x02` | Set_Zoom | `<float32 zoom_scale>` (1.0 이상) | 디지털 줌 배율을 설정. ImageStreamBridge가 TCP 이미지 송신 시 동일 배율로 중앙 크롭/리사이즈. 성공 시 `Status` 응답. |
+| `0x80` | Get_Status | (없음) | 현재 상태 보고를 요청. 즉시 `Status` 응답. |
+| `0x81` | Status | `<int16 sensor_type><int16 sensor_id><float64 pos_x><float64 pos_y><float64 pos_z><float32 cur_roll><float32 cur_pitch><float32 cur_yaw><float32 tgt_roll><float32 tgt_pitch><float32 tgt_yaw><float32 zoom_scale><float32 max_rate_dps>` | 서버→클라이언트 전용. 현재/목표 RPY, 위치, 줌 배율, 최대 속도 포함. |
+
+> `zoom_scale` 은 디지털 확대 배율(1.0 = 원본)로, TCP 카메라 응답에도 즉시 반영되며 `Status` 응답으로 조회할 수 있습니다.
 
 ## 빠른 점검
 

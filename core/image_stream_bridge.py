@@ -19,13 +19,16 @@ except Exception:
 
 
 # ---- Command IDs (MroCameraControl) ----
-CMD_REQ_CAPTURE      = 0x01
-CMD_SET_GIMBAL       = 0x02  # 예약
-CMD_SET_COUNT        = 0x03
-CMD_GET_IMG_NUM      = 0x04
-CMD_REQ_SEND_IMG     = 0x05
-CMD_IMG_NUM_RESPONSE = 0x11
-CMD_FILE_IMG_TRANSFER= 0x12
+CMD_REQ_CAPTURE       = 0x01
+CMD_SET_GIMBAL        = 0x02  # 예약
+CMD_SET_COUNT         = 0x03
+CMD_GET_IMG_NUM       = 0x04
+CMD_REQ_SEND_IMG      = 0x05
+CMD_SET_ZOOM_RATIO    = 0x06
+CMD_GET_ZOOM_RATIO    = 0x07
+CMD_IMG_NUM_RESPONSE  = 0x11
+CMD_FILE_IMG_TRANSFER = 0x12
+CMD_ACK_ZOOM_RATIO    = 0x13
 
 
 __all__ = ["ImageStreamBridge", "ImageBridgeCore"]
@@ -74,6 +77,9 @@ class ImageStreamBridge:
 
         # Cached metadata for predefined set enumeration.
         self._predefined_numbers: list[int] = []
+
+        self._zoom_scale = max(1.0, float(settings.get("zoom_scale", 1.0)))
+        self._logged_zoom_warn = False
 
 
         # runtime
@@ -269,6 +275,24 @@ class ImageStreamBridge:
         elif cmd_id == CMD_SET_GIMBAL:
             self.log("[BRIDGE] Set_Gimbal received (reserved)")
 
+        elif cmd_id == CMD_SET_ZOOM_RATIO:
+            if len(cmd_payload) < 4:
+                self.log("[BRIDGE] Set_Zoomratio: missing float zoom_ratio")
+                return
+            (zoom_ratio,) = struct.unpack("<f", cmd_payload[:4])
+            self.set_zoom_scale(zoom_ratio)
+            with self._lock:
+                applied = self._zoom_scale
+            self.log(f"[BRIDGE] Set_Zoomratio -> request={zoom_ratio:.3f}, applied={applied:.3f}")
+            self._send_zoom_ratio_ack(conn, applied)
+
+        elif cmd_id == CMD_GET_ZOOM_RATIO:
+            _expect_uint8_one(cmd_payload, "Get_Zoomratio")
+            with self._lock:
+                applied = self._zoom_scale
+            self.log(f"[BRIDGE] Get_Zoomratio -> {applied:.3f}")
+            self._send_zoom_ratio_ack(conn, applied)
+
         else:
             self.log(f"[BRIDGE] unknown cmd_id: 0x{cmd_id:02X}")
 
@@ -316,6 +340,8 @@ class ImageStreamBridge:
                 img = f.read()
         except FileNotFoundError:
             img = b""
+        if img:
+            img = self._apply_zoom_to_jpeg(img)
         data = struct.pack("<III", ack_uuid, img_num, len(img)) + img
         ts_sec, ts_nsec = int(time.time()), time.time_ns() % 1_000_000_000
         full = struct.pack("<IIB", ts_sec, ts_nsec, CMD_FILE_IMG_TRANSFER) + data
@@ -418,7 +444,57 @@ class ImageStreamBridge:
                 "realtime_dir": self.realtime_dir,
                 "predefined_dir": self.predefined_dir,
                 "active_library_dir": self.realtime_dir if self.image_source_mode == "realtime" else self.predefined_dir,
+                "zoom_scale": self._zoom_scale,
             }
+
+    def set_zoom_scale(self, zoom: float) -> None:
+        value = max(1.0, float(zoom))
+        with self._lock:
+            if abs(value - self._zoom_scale) < 1e-3:
+                return
+            self._zoom_scale = value
+        self.log(f"[BRIDGE] zoom scale -> {self._zoom_scale:.2f}x")
+
+    def _send_zoom_ratio_ack(self, conn: socket.socket, zoom_ratio: float) -> None:
+        ts_sec, ts_nsec = int(time.time()), time.time_ns() % 1_000_000_000
+        data = struct.pack("<f", float(zoom_ratio))
+        full = struct.pack("<IIB", ts_sec, ts_nsec, CMD_ACK_ZOOM_RATIO) + data
+        header = struct.pack("<I", len(full))
+        try:
+            conn.sendall(header + full)
+            self.log(f"[BRIDGE] Ack_Zoomratio sent: {zoom_ratio:.3f}")
+        except Exception as e:
+            self.log(f"[BRIDGE] send Ack_Zoomratio failed: {e}")
+
+    def _apply_zoom_to_jpeg(self, jpeg: bytes) -> bytes:
+        zoom = self._zoom_scale
+        if zoom <= 1.0001:
+            return jpeg
+        if not _HAS_PIL:
+            if not self._logged_zoom_warn:
+                self.log("[BRIDGE] zoom requested but Pillow is unavailable; skipping digital zoom")
+                self._logged_zoom_warn = True
+            return jpeg
+        try:
+            with Image.open(io.BytesIO(jpeg)) as img:
+                width, height = img.size
+                if width <= 0 or height <= 0:
+                    return jpeg
+                crop_w = max(1, min(width, int(round(width / zoom))))
+                crop_h = max(1, min(height, int(round(height / zoom))))
+                left = max(0, (width - crop_w) // 2)
+                top = max(0, (height - crop_h) // 2)
+                right = min(width, left + crop_w)
+                bottom = min(height, top + crop_h)
+                img = img.crop((left, top, right, bottom))
+                if (right - left) != width or (bottom - top) != height:
+                    img = img.resize((width, height), Image.BICUBIC)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=90)
+                return buf.getvalue()
+        except Exception as exc:
+            self.log(f"[BRIDGE] zoom processing failed: {exc}")
+        return jpeg
 
     @staticmethod
     def _parse_udp_header(data: bytes) -> Optional[Dict[str, int]]:
