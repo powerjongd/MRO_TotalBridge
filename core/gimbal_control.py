@@ -168,6 +168,39 @@ class GimbalControl:
         except Exception as e:
             self.log(f"[GIMBAL] power send error: {e}")
 
+    def send_udp_preset(
+        self,
+        sensor_type: int,
+        sensor_id: int,
+        pos_x: float,
+        pos_y: float,
+        pos_z: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+        *,
+        ip: Optional[str] = None,
+        port: Optional[int] = None,
+    ) -> None:
+        """Send a one-shot gimbal control packet for a specific sensor preset."""
+
+        target_ip = ip or self.s.get("generator_ip", "127.0.0.1")
+        target_port = int(port or self.s.get("generator_port", 15020))
+        pkt = self._pack_gimbal_ctrl(
+            int(sensor_type),
+            int(sensor_id),
+            [float(pos_x), float(pos_y), float(pos_z)],
+            [float(roll_deg), float(pitch_deg), float(yaw_deg)],
+        )
+        try:
+            self.tx_sock.sendto(pkt, (target_ip, target_port))
+            self.log(
+                f"[GIMBAL] preset UDP sent -> sensor={sensor_type}/{sensor_id}, "
+                f"target={target_ip}:{target_port}"
+            )
+        except Exception as exc:
+            self.log(f"[GIMBAL] preset UDP send error: {exc}")
+
     def set_mav_ids(self, sys_id: int, comp_id: int) -> None:
         with self._lock:
             self.mav_sys_id  = int(sys_id)
