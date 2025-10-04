@@ -19,13 +19,16 @@ except Exception:
 
 
 # ---- Command IDs (MroCameraControl) ----
-CMD_REQ_CAPTURE      = 0x01
-CMD_SET_GIMBAL       = 0x02  # 예약
-CMD_SET_COUNT        = 0x03
-CMD_GET_IMG_NUM      = 0x04
-CMD_REQ_SEND_IMG     = 0x05
-CMD_IMG_NUM_RESPONSE = 0x11
-CMD_FILE_IMG_TRANSFER= 0x12
+CMD_REQ_CAPTURE       = 0x01
+CMD_SET_GIMBAL        = 0x02  # 예약
+CMD_SET_COUNT         = 0x03
+CMD_GET_IMG_NUM       = 0x04
+CMD_REQ_SEND_IMG      = 0x05
+CMD_SET_ZOOM_RATIO    = 0x06
+CMD_GET_ZOOM_RATIO    = 0x07
+CMD_IMG_NUM_RESPONSE  = 0x11
+CMD_FILE_IMG_TRANSFER = 0x12
+CMD_ACK_ZOOM_RATIO    = 0x13
 
 
 __all__ = ["ImageStreamBridge", "ImageBridgeCore"]
@@ -272,6 +275,24 @@ class ImageStreamBridge:
         elif cmd_id == CMD_SET_GIMBAL:
             self.log("[BRIDGE] Set_Gimbal received (reserved)")
 
+        elif cmd_id == CMD_SET_ZOOM_RATIO:
+            if len(cmd_payload) < 4:
+                self.log("[BRIDGE] Set_Zoomratio: missing float zoom_ratio")
+                return
+            (zoom_ratio,) = struct.unpack("<f", cmd_payload[:4])
+            self.set_zoom_scale(zoom_ratio)
+            with self._lock:
+                applied = self._zoom_scale
+            self.log(f"[BRIDGE] Set_Zoomratio -> request={zoom_ratio:.3f}, applied={applied:.3f}")
+            self._send_zoom_ratio_ack(conn, applied)
+
+        elif cmd_id == CMD_GET_ZOOM_RATIO:
+            _expect_uint8_one(cmd_payload, "Get_Zoomratio")
+            with self._lock:
+                applied = self._zoom_scale
+            self.log(f"[BRIDGE] Get_Zoomratio -> {applied:.3f}")
+            self._send_zoom_ratio_ack(conn, applied)
+
         else:
             self.log(f"[BRIDGE] unknown cmd_id: 0x{cmd_id:02X}")
 
@@ -433,6 +454,17 @@ class ImageStreamBridge:
                 return
             self._zoom_scale = value
         self.log(f"[BRIDGE] zoom scale -> {self._zoom_scale:.2f}x")
+
+    def _send_zoom_ratio_ack(self, conn: socket.socket, zoom_ratio: float) -> None:
+        ts_sec, ts_nsec = int(time.time()), time.time_ns() % 1_000_000_000
+        data = struct.pack("<f", float(zoom_ratio))
+        full = struct.pack("<IIB", ts_sec, ts_nsec, CMD_ACK_ZOOM_RATIO) + data
+        header = struct.pack("<I", len(full))
+        try:
+            conn.sendall(header + full)
+            self.log(f"[BRIDGE] Ack_Zoomratio sent: {zoom_ratio:.3f}")
+        except Exception as e:
+            self.log(f"[BRIDGE] send Ack_Zoomratio failed: {e}")
 
     def _apply_zoom_to_jpeg(self, jpeg: bytes) -> bytes:
         zoom = self._zoom_scale

@@ -6,7 +6,7 @@ Unreal 기반 MORAI Sim Air(MRO)와 외부 소프트웨어 사이에서 이미�
 
 - **Image Stream Module (ImageStreamBridge)**
   - UDP JPEG 수신 → 실시간 프리뷰 및 저장
-  - TCP `MroCameraControl`: `Req_Capture`(최신 프레임을 `SaveFile/000.jpg` 순환 저장), `Set_Count`, `Get_ImgNum`, `Req_SendImg` 지원
+  - TCP `MroCameraControl`: `Req_Capture`(최신 프레임을 `SaveFile/000.jpg` 순환 저장), `Set_Count`, `Get_ImgNum`, `Req_SendImg`, `Set_Zoomratio`/`Get_Zoomratio`(응답 `Ack_Zoomratio`) 지원
   - `./SaveFile/000.jpg`(실시간 캡처) 또는 `./PreDefinedImageSet/000.jpg`(사전 이미지) 중 UI에서 선택 가능
   - GUI 프리뷰 스냅샷 저장: `./SaveFile/preview_<timestamp>.jpg`
   - 짐벌 TCP 제어에서 전달된 디지털 줌 배율을 반영해 `Req_SendImg` JPEG를 중앙 크롭 후 리사이즈(광학 줌 대신 화상 확대)
@@ -121,6 +121,25 @@ pyinstaller --noconfirm --clean --name MroUnifiedBridge \
 ### UDP (Generator Forward)
 - **10706 SensorGimbalCtrl**: `<uint16 sensor_type><uint16 sensor_id><float64 pos_x><float64 pos_y><float64 pos_z><float32 roll_deg><float32 pitch_deg><float32 yaw_deg>` (little-endian)
 - **10707 SensorPowerCtrl**: `<uint16 sensor_type><uint16 sensor_id><uint8 power_on>`
+
+### TCP `MroCameraControl` Command Set
+- Frame: `<uint32 payload_len>` prefix + payload (`payload_len` bytes)
+- Payload header: `<uint32 ts_sec><uint32 ts_nsec><uint8 cmd_id>` (little-endian)
+
+| Cmd ID | 이름 | Payload 구조 | 비고 |
+| ------ | ---- | ------------ | ---- |
+| `0x01` | Req_Capture | `<uint8 capture=1>` | 최신 이미지(UDP 수신본)를 SaveFile 디렉터리에 저장하고 파일 번호를 +1. |
+| `0x02` | Set_Gimbal | `<float x, y, z, roll, pitch, yaw>` | 예약 기능(현재 미사용). |
+| `0x03` | Set_Count | `<uint32 count_num>` | 다음 저장될 이미지 번호를 설정(000~999 순환). |
+| `0x04` | Get_ImgNum | `<uint8 get_flag=1>` | 마지막으로 저장된 이미지 번호 질의. `Img_Num_Response`(0x11) 반환. |
+| `0x05` | Req_SendImg | `<uint32 img_num>` | 지정 번호 이미지를 TCP 전송. `File_ImgTransfer`(0x12) 응답. |
+| `0x06` | Set_Zoomratio | `<float zoom_ratio>` | 디지털 줌 배율 설정. 적용된 배율은 `Ack_Zoomratio`(0x13)로 회신. |
+| `0x07` | Get_Zoomratio | `<uint8 get_flag=1>` | 현재 줌 배율 질의. `Ack_Zoomratio` 응답. |
+| `0x11` | Img_Num_Response | `<uint32 ack_uuid><uint32 img_num>` | 마지막 저장 번호 응답(기존 동작 유지). |
+| `0x12` | File_ImgTransfer | `<uint32 ack_uuid><uint32 img_num><uint32 data_size><byte[] data>` | JPEG 바이너리 응답(줌 1.0 초과 시 중앙 크롭 후 리사이즈). |
+| `0x13` | Ack_Zoomratio | `<float zoom_ratio>` | Set/Get 요청에 대한 현재 줌 배율 회신. |
+
+> `zoom_ratio` 는 디지털 확대 배율(1.0 = 원본)이며, Pillow 가 사용 가능하면 JPEG 중앙부를 crop 후 원 해상도로 리사이즈하여 적용합니다.
 
 ### TCP `GimbalControl` Command Set
 - Framing: `<uint32 payload_len>` prefix + payload (`payload_len` bytes)
