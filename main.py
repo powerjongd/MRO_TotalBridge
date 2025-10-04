@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 
 from utils.helpers import has_display, get_logger
 from utils.settings import ConfigManager, AppConfig
+from utils.observers import ObservableFloat
 from core.image_stream_bridge import ImageStreamBridge
 from core.gimbal_control import GimbalControl
 from core.udp_relay import UdpRelay
@@ -203,11 +204,20 @@ def main() -> None:
         status_cb=make_status_cb(log, "BRIDGE"),
         settings=cfg_dict.get("bridge", {}),
     )
+
+    gimbal_cfg = cfg_dict.get("gimbal", {})
+    try:
+        initial_zoom = float(gimbal_cfg.get("zoom_scale", 1.0))
+    except (TypeError, ValueError):
+        initial_zoom = 1.0
+    zoom_state = ObservableFloat(initial_zoom)
+    zoom_state.subscribe(bridge.set_zoom_scale)
+
     gimbal = GimbalControl(
         log_cb=gimbal_log,
         status_cb=make_status_cb(log, "GIMBAL"),
-        settings=cfg_dict.get("gimbal", {}),
-        zoom_update_cb=bridge.set_zoom_scale,
+        settings=gimbal_cfg,
+        zoom_update_cb=zoom_state.set,
     )
     relay = UdpRelay(
         log_cb=relay_log,
@@ -292,7 +302,14 @@ def main() -> None:
             log.info("[MAIN] GUI mode")
             from ui.main_window import run_gui
             # UI에 dict를 넘겨 변경 사항을 반영하게 함 (팝업에서 저장/적용 시 cfg_dict를 수정)
-            run_gui(cfg=cfg_dict, bridge=bridge, gimbal=gimbal, relay=relay, log=log)
+            run_gui(
+                cfg=cfg_dict,
+                bridge=bridge,
+                gimbal=gimbal,
+                relay=relay,
+                log=log,
+                zoom_state=zoom_state,
+            )
             shutdown()
         else:
             log.info("[MAIN] Headless mode (Ctrl+C to stop)")

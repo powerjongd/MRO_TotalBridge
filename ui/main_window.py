@@ -10,9 +10,11 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 try:
-    from typing import Optional, Dict, Any
+    from typing import Optional, Dict, Any, Callable
 except Exception:
-    Optional = Dict = Any = object  # type: ignore
+    Optional = Dict = Any = Callable = object  # type: ignore
+
+from utils.observers import ObservableFloat
 
 
 
@@ -25,7 +27,15 @@ class MainWindow(tk.Tk):
     - 주기적 상태 표시 업데이트
     """
 
-    def __init__(self, cfg, bridge, gimbal, relay, log):
+    def __init__(
+        self,
+        cfg,
+        bridge,
+        gimbal,
+        relay,
+        log,
+        zoom_state: Optional[ObservableFloat] = None,
+    ):
         super().__init__()
         self.title("Unified Bridge")
         self.geometry("1000x700")
@@ -35,13 +45,23 @@ class MainWindow(tk.Tk):
         self.gimbal = gimbal
         self.relay = relay
         self.log = log
+        self.zoom_state = zoom_state
+        self._zoom_unsubscribe: Optional[Callable[[], None]] = None
 
         # 프리뷰 상태 변수
         self._last_photo = None
         self._last_img_ts = 0.0
         self._preview_paused = False
 
+        self.bridge_status_var = tk.StringVar(value="Image Stream Module: Stopped (Realtime)")
+        self.gimbal_status_var = tk.StringVar(value="Gimbal: Deactivated")
+        self.relay_status_var = tk.StringVar(value="Relay: Deactivated")
+        self.preview_info_var = tk.StringVar(value="Last: - | Size: -")
+        self.zoom_var = tk.StringVar(value="Zoom: 1.00x")
+
         self._build_layout()
+        self._bind_events()
+        self._init_zoom_subscription()
 
         # ✅ 브릿지에 프리뷰 콜백 등록 (GUI 모드에서만)
         try:
@@ -67,19 +87,19 @@ class MainWindow(tk.Tk):
         self.btn_bridge = ttk.Button(top, text="Image Stream Module Settings", command=self.open_bridge_window)
         self.btn_bridge.grid(row=0, column=1, padx=(0, 16), pady=4, sticky="w")
 
-        self.lbl_bridge = ttk.Label(top, text="Image Stream Module: Stopped (Realtime)")
+        self.lbl_bridge = ttk.Label(top, textvariable=self.bridge_status_var)
         self.lbl_bridge.grid(row=0, column=2, padx=(0, 16), sticky="w")
 
         self.btn_gimbal = ttk.Button(top, text="Gimbal Controls", command=self.open_gimbal_window)
         self.btn_gimbal.grid(row=1, column=0, padx=(0, 8), pady=4, sticky="w")
 
-        self.lbl_gimbal = ttk.Label(top, text="Gimbal: Deactivated")
+        self.lbl_gimbal = ttk.Label(top, textvariable=self.gimbal_status_var)
         self.lbl_gimbal.grid(row=1, column=2, padx=(0, 16), sticky="w")
 
         self.btn_relay = ttk.Button(top, text="Gazebo Relay Settings", command=self.open_relay_window)
         self.btn_relay.grid(row=2, column=0, padx=(0, 8), pady=4, sticky="w")
 
-        self.lbl_relay = ttk.Label(top, text="Relay: Deactivated")
+        self.lbl_relay = ttk.Label(top, textvariable=self.relay_status_var)
         self.lbl_relay.grid(row=2, column=2, padx=(0, 16), sticky="w")
 
         # ───────── Preview 영역 ─────────
@@ -94,8 +114,10 @@ class MainWindow(tk.Tk):
         right.pack(side=tk.RIGHT, fill=tk.Y)
         right.pack_propagate(False)
 
-        self.lbl_preview_info = ttk.Label(right, text="Last: - | Size: -", anchor="w")
-        self.lbl_preview_info.pack(fill=tk.X, pady=(0, 6))
+        self.lbl_preview_info = ttk.Label(right, textvariable=self.preview_info_var, anchor="w")
+        self.lbl_preview_info.pack(fill=tk.X, pady=(0, 2))
+
+        ttk.Label(right, textvariable=self.zoom_var, anchor="w").pack(fill=tk.X, pady=(0, 6))
 
         btns = ttk.Frame(right)
         btns.pack(fill=tk.X, pady=6)
@@ -105,6 +127,29 @@ class MainWindow(tk.Tk):
         self.log_text = tk.Text(right, height=20, wrap="word")
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=(8,0))
         self.log_text.insert("end", "Logs will appear in console.\n")
+
+    def _init_zoom_subscription(self) -> None:
+        if not self.zoom_state:
+            return
+
+        def _callback(value: float) -> None:
+            self._queue_zoom_update(value)
+
+        self._zoom_unsubscribe = self.zoom_state.subscribe(_callback)
+
+    def _queue_zoom_update(self, value: float) -> None:
+        def _apply() -> None:
+            self._update_zoom_label(value)
+
+        # Tkinter calls must run on the main thread
+        self.after(0, _apply)
+
+    def _update_zoom_label(self, value: float) -> None:
+        try:
+            zoom = float(value)
+        except Exception:
+            zoom = 1.0
+        self.zoom_var.set(f"Zoom: {zoom:.2f}x")
 
     def on_preview(self, jpeg_bytes: bytes):
         """
@@ -131,7 +176,7 @@ class MainWindow(tk.Tk):
 
                 kb = len(jpeg_bytes) / 1024.0
                 tstr = time.strftime("%H:%M:%S", time.localtime(self._last_img_ts))
-                self.lbl_preview_info.configure(text=f"Last: {tstr} | Size: {kb:.1f} KB")
+                self.preview_info_var.set(f"Last: {tstr} | Size: {kb:.1f} KB")
             except Exception as e:
                 self.preview_label.configure(text=f"Preview error: {e}", image="")
                 self.preview_label.image = None
@@ -193,6 +238,9 @@ class MainWindow(tk.Tk):
                 act = st.get("activated", False)
                 mode = st.get("control_mode", "IDLE")
                 self._set_gimbal_status(f"{'Activated' if act else 'Deactivated'} ({mode})")
+                zoom_val = st.get("zoom_scale")
+                if isinstance(zoom_val, (int, float)):
+                    self._update_zoom_label(float(zoom_val))
             else:
                 self._set_gimbal_status("Unknown")
 
@@ -211,13 +259,13 @@ class MainWindow(tk.Tk):
             display = f"{text} ({mode.capitalize()})"
         else:
             display = text
-        self.lbl_bridge.configure(text=f"Image Stream Module: {display}")
+        self.bridge_status_var.set(f"Image Stream Module: {display}")
 
     def _set_gimbal_status(self, text: str) -> None:
-        self.lbl_gimbal.configure(text=f"Gimbal: {text}")
+        self.gimbal_status_var.set(f"Gimbal: {text}")
 
     def _set_relay_status(self, text: str) -> None:
-        self.lbl_relay.configure(text=f"Relay: {text}")
+        self.relay_status_var.set(f"Relay: {text}")
 
     # ---------------- 버튼 동작 ----------------
 
@@ -260,12 +308,24 @@ class MainWindow(tk.Tk):
     # ---------------- 종료 ----------------
 
     def on_close(self) -> None:
+        if self._zoom_unsubscribe:
+            try:
+                self._zoom_unsubscribe()
+            except Exception:
+                pass
         try:
             self.destroy()
         except Exception:
             pass
 
 
-def run_gui(cfg: dict, bridge, gimbal, relay, log: logging.Logger) -> None:
-    app = MainWindow(cfg, bridge, gimbal, relay, log)
+def run_gui(
+    cfg: dict,
+    bridge,
+    gimbal,
+    relay,
+    log: logging.Logger,
+    zoom_state: Optional[ObservableFloat] = None,
+) -> None:
+    app = MainWindow(cfg, bridge, gimbal, relay, log, zoom_state=zoom_state)
     app.mainloop()

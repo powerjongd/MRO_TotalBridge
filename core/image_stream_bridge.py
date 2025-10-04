@@ -19,16 +19,19 @@ except Exception:
 
 
 # ---- Command IDs (MroCameraControl) ----
-CMD_REQ_CAPTURE       = 0x01
-CMD_SET_GIMBAL        = 0x02  # 예약
-CMD_SET_COUNT         = 0x03
-CMD_GET_IMG_NUM       = 0x04
-CMD_REQ_SEND_IMG      = 0x05
-CMD_SET_ZOOM_RATIO    = 0x06
-CMD_GET_ZOOM_RATIO    = 0x07
-CMD_IMG_NUM_RESPONSE  = 0x11
-CMD_FILE_IMG_TRANSFER = 0x12
-CMD_ACK_ZOOM_RATIO    = 0x13
+from network.image_stream_icd import (
+    CMD_REQ_CAPTURE,
+    CMD_SET_GIMBAL,
+    CMD_SET_COUNT,
+    CMD_GET_IMG_NUM,
+    CMD_REQ_SEND_IMG,
+    CMD_SET_ZOOM_RATIO,
+    CMD_GET_ZOOM_RATIO,
+    CMD_IMG_NUM_RESPONSE,
+    CMD_FILE_IMG_TRANSFER,
+    CMD_ACK_ZOOM_RATIO,
+    COMMAND_NAMES,
+)
 
 
 __all__ = ["ImageStreamBridge", "ImageBridgeCore"]
@@ -238,19 +241,21 @@ class ImageStreamBridge:
         ts_sec, ts_nsec, cmd_id = struct.unpack("<IIB", payload[:9])
         cmd_payload = payload[9:]
 
-        def _expect_uint8_one(p: bytes, cmd_name: str) -> bool:
+        cmd_name = COMMAND_NAMES.get(cmd_id, f"0x{cmd_id:02X}")
+
+        def _expect_uint8_one(p: bytes, name: str) -> bool:
             """uint8==1 규격을 검증. 없거나 값이 1이 아니면 경고 로그."""
             if len(p) < 1:
-                self.log(f"[BRIDGE] {cmd_name}: missing uint8 payload; treating as 1 for backward-compat")
+                self.log(f"[BRIDGE] {name}: missing uint8 payload; treating as 1 for backward-compat")
                 return True  # 하위호환을 위해 허용
             (flag,) = struct.unpack("<B", p[:1])
             if flag != 1:
-                self.log(f"[BRIDGE] {cmd_name}: expected uint8==1, got {flag}; ignoring but continuing")
+                self.log(f"[BRIDGE] {name}: expected uint8==1, got {flag}; ignoring but continuing")
             return True
 
         if cmd_id == CMD_REQ_CAPTURE:
             # 기대 페이로드: uint8==1 (1바이트)
-            _expect_uint8_one(cmd_payload, "Req_Capture")
+            _expect_uint8_one(cmd_payload, cmd_name)
             self._handle_req_capture()
 
         elif cmd_id == CMD_SET_COUNT:
@@ -258,11 +263,11 @@ class ImageStreamBridge:
                 (count_num,) = struct.unpack("<I", cmd_payload[:4])
                 self._handle_set_count(count_num)
             else:
-                self.log("[BRIDGE] Set_Count: missing uint32 count_num")
+                self.log(f"[BRIDGE] {cmd_name}: missing uint32 count_num")
 
         elif cmd_id == CMD_GET_IMG_NUM:
             # 기대 페이로드: uint8==1 (1바이트)
-            _expect_uint8_one(cmd_payload, "Get_ImgNum")
+            _expect_uint8_one(cmd_payload, cmd_name)
             self._handle_get_img_num(conn)
 
         elif cmd_id == CMD_REQ_SEND_IMG:
@@ -270,31 +275,31 @@ class ImageStreamBridge:
                 (img_num,) = struct.unpack("<I", cmd_payload[:4])
                 self._handle_req_send_img(conn, img_num)
             else:
-                self.log("[BRIDGE] Req_SendImg: missing uint32 img_num")
+                self.log(f"[BRIDGE] {cmd_name}: missing uint32 img_num")
 
         elif cmd_id == CMD_SET_GIMBAL:
-            self.log("[BRIDGE] Set_Gimbal received (reserved)")
+            self.log(f"[BRIDGE] {cmd_name} received (reserved)")
 
         elif cmd_id == CMD_SET_ZOOM_RATIO:
             if len(cmd_payload) < 4:
-                self.log("[BRIDGE] Set_Zoomratio: missing float zoom_ratio")
+                self.log(f"[BRIDGE] {cmd_name}: missing float zoom_ratio")
                 return
             (zoom_ratio,) = struct.unpack("<f", cmd_payload[:4])
             self.set_zoom_scale(zoom_ratio)
             with self._lock:
                 applied = self._zoom_scale
-            self.log(f"[BRIDGE] Set_Zoomratio -> request={zoom_ratio:.3f}, applied={applied:.3f}")
+            self.log(f"[BRIDGE] {cmd_name} -> request={zoom_ratio:.3f}, applied={applied:.3f}")
             self._send_zoom_ratio_ack(conn, applied)
 
         elif cmd_id == CMD_GET_ZOOM_RATIO:
-            _expect_uint8_one(cmd_payload, "Get_Zoomratio")
+            _expect_uint8_one(cmd_payload, cmd_name)
             with self._lock:
                 applied = self._zoom_scale
-            self.log(f"[BRIDGE] Get_Zoomratio -> {applied:.3f}")
+            self.log(f"[BRIDGE] {cmd_name} -> {applied:.3f}")
             self._send_zoom_ratio_ack(conn, applied)
 
         else:
-            self.log(f"[BRIDGE] unknown cmd_id: 0x{cmd_id:02X}")
+            self.log(f"[BRIDGE] unknown cmd_id: {cmd_name}")
 
     def _handle_req_capture(self) -> None:
         with self._lock:
