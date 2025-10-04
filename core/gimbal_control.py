@@ -7,7 +7,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Callable, Optional, Dict, Any, List, Tuple
+from typing import Callable, Optional, Dict, Any, List, Tuple, Set
 
 from pymavlink import mavutil
 try:
@@ -65,11 +65,26 @@ def _quat_to_euler_deg(qx: float, qy: float, qz: float, qw: float):
     return roll, pitch, yaw
 
 
+TCP_CMD_SET_TARGET = 0x01
+TCP_CMD_SET_ZOOM = 0x02
+TCP_CMD_GET_STATUS = 0x80
+TCP_CMD_STATUS = 0x81
+
+
 class GimbalControl:
-    def __init__(self, log_cb, status_cb, settings: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        log_cb,
+        status_cb,
+        settings: Dict[str, Any],
+        *,
+        zoom_update_cb: Optional[Callable[[float], None]] = None,
+    ) -> None:
         self.log = log_cb
         self.status_cb = status_cb
         self.s = dict(settings)
+
+        self._zoom_update_cb = zoom_update_cb
 
         self.tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.tx_sock.settimeout(0.2)
@@ -84,6 +99,7 @@ class GimbalControl:
         self.rpy_tgt = self.rpy_cur[:]
         self.max_rate_dps = float(self.s.get("max_rate_dps", 60.0))
         self.power_on = bool(self.s.get("power_on", True))
+        self.zoom_scale = max(1.0, float(self.s.get("zoom_scale", 1.0)))
 
         self.sensor_type = int(self.s.get("sensor_type", 0))
         self.sensor_id   = int(self.s.get("sensor_id", 0))
@@ -92,10 +108,17 @@ class GimbalControl:
         self.mav_sys_id  = int(self.s.get("mav_sysid", 1))
         self.mav_comp_id = int(self.s.get("mav_compid", 154))
 
+        self.rx_ip = self.s.get("bind_ip", "0.0.0.0")
+        self.rx_port = int(self.s.get("bind_port", 16060))
+
         self.stop_ev = threading.Event()
         self.ctrl_thread = None
         self.mav_rx_thread = None
         self.mav_tx_thread = None
+        self._tcp_thread: Optional[threading.Thread] = None
+        self._tcp_sock: Optional[socket.socket] = None
+        self._tcp_clients: Set[socket.socket] = set()
+        self._tcp_stop = threading.Event()
 
         self.mav: Optional[mavutil.mavfile] = None
         self.serial_port = self.s.get("serial_port", "")
@@ -107,6 +130,12 @@ class GimbalControl:
         self._last_ts = time.time()
         self._rpy_rate = [0.0, 0.0, 0.0]
 
+        if self._zoom_update_cb:
+            try:
+                self._zoom_update_cb(self.zoom_scale)
+            except Exception as exc:
+                self.log(f"[GIMBAL] zoom callback init error: {exc}")
+
     # -------- lifecycle --------
     def start(self) -> None:
         self.stop_ev.clear()
@@ -114,6 +143,7 @@ class GimbalControl:
         self.ctrl_thread.start()
         if self.serial_port:
             self._open_serial()
+        self._start_tcp()
         self._emit_status("RUNNING")
         self.log("[GIMBAL] started")
 
@@ -121,6 +151,7 @@ class GimbalControl:
         self.stop_ev.set()
         try: self.tx_sock.close()
         except Exception: pass
+        self._stop_tcp()
         try:
             if self.mav: self.mav.close()
         except Exception: pass
@@ -128,6 +159,8 @@ class GimbalControl:
         self.log("[GIMBAL] stopped")
 
     def update_settings(self, settings: Dict[str, Any]) -> None:
+        restart_tcp = False
+        new_zoom: Optional[float] = None
         with self._lock:
             self.s.update(settings)
             self.sensor_type = int(self.s.get("sensor_type", self.sensor_type))
@@ -137,10 +170,28 @@ class GimbalControl:
                         float(self.s.get("pos_y", self.pos[1])),
                         float(self.s.get("pos_z", self.pos[2]))]
             self.power_on = bool(self.s.get("power_on", self.power_on))
+            if "zoom_scale" in self.s:
+                new_zoom = max(1.0, float(self.s.get("zoom_scale", self.zoom_scale)))
             # ✅ 시스템/컴포넌트 ID 반영
             if "mav_sysid" in self.s:  self.mav_sys_id  = int(self.s["mav_sysid"])
             if "mav_compid" in self.s: self.mav_comp_id = int(self.s["mav_compid"])
+            if "bind_ip" in self.s:
+                new_ip = self.s.get("bind_ip", self.rx_ip)
+                if new_ip != self.rx_ip:
+                    self.rx_ip = new_ip
+                    restart_tcp = True
+            if "bind_port" in self.s:
+                new_port = int(self.s.get("bind_port", self.rx_port))
+                if new_port != self.rx_port:
+                    self.rx_port = new_port
+                    restart_tcp = True
         self.log("[GIMBAL] settings updated")
+        if restart_tcp:
+            self.log("[GIMBAL] restarting TCP listener due to bind change")
+            self._stop_tcp()
+            self._start_tcp()
+        if new_zoom is not None:
+            self._set_zoom_scale(new_zoom)
 
     # -------- public controls --------
     def set_target_pose(self, x, y, z, roll_deg, pitch_deg, yaw_deg) -> None:
@@ -167,6 +218,39 @@ class GimbalControl:
             self.log(f"[GIMBAL] POWER {'ON' if on else 'OFF'} sent")
         except Exception as e:
             self.log(f"[GIMBAL] power send error: {e}")
+
+    def send_udp_preset(
+        self,
+        sensor_type: int,
+        sensor_id: int,
+        pos_x: float,
+        pos_y: float,
+        pos_z: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+        *,
+        ip: Optional[str] = None,
+        port: Optional[int] = None,
+    ) -> None:
+        """Send a one-shot gimbal control packet for a specific sensor preset."""
+
+        target_ip = ip or self.s.get("generator_ip", "127.0.0.1")
+        target_port = int(port or self.s.get("generator_port", 15020))
+        pkt = self._pack_gimbal_ctrl(
+            int(sensor_type),
+            int(sensor_id),
+            [float(pos_x), float(pos_y), float(pos_z)],
+            [float(roll_deg), float(pitch_deg), float(yaw_deg)],
+        )
+        try:
+            self.tx_sock.sendto(pkt, (target_ip, target_port))
+            self.log(
+                f"[GIMBAL] preset UDP sent -> sensor={sensor_type}/{sensor_id}, "
+                f"target={target_ip}:{target_port}"
+            )
+        except Exception as exc:
+            self.log(f"[GIMBAL] preset UDP send error: {exc}")
 
     def set_mav_ids(self, sys_id: int, comp_id: int) -> None:
         with self._lock:
@@ -221,7 +305,184 @@ class GimbalControl:
                 "hb_rx_ok": self.hb_rx_ok,
                 "mav_sysid": self.mav_sys_id,
                 "mav_compid": self.mav_comp_id,
+                "zoom_scale": self.zoom_scale,
+                "tcp_bind": f"{self.rx_ip}:{self.rx_port}",
             }
+
+    # -------- TCP control server --------
+    def _start_tcp(self) -> None:
+        self._tcp_stop.clear()
+        try:
+            self._open_tcp()
+        except Exception as exc:
+            self.log(f"[GIMBAL] TCP listen failed: {exc}")
+            return
+        self._tcp_thread = threading.Thread(target=self._tcp_accept_loop, daemon=True)
+        self._tcp_thread.start()
+
+    def _stop_tcp(self) -> None:
+        self._tcp_stop.set()
+        try:
+            if self._tcp_sock:
+                try:
+                    wake = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    wake.settimeout(0.2)
+                    wake.connect((("127.0.0.1" if self.rx_ip in ("0.0.0.0", "") else self.rx_ip), self.rx_port))
+                    wake.close()
+                except Exception:
+                    pass
+                self._tcp_sock.close()
+        except Exception:
+            pass
+        self._tcp_sock = None
+        for conn in list(self._tcp_clients):
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._tcp_clients.clear()
+
+    def _open_tcp(self) -> None:
+        self._tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._tcp_sock.bind((self.rx_ip, self.rx_port))
+        self._tcp_sock.listen(5)
+        self.log(f"[GIMBAL] TCP listening: {self.rx_ip}:{self.rx_port}")
+
+    def _tcp_accept_loop(self) -> None:
+        while not self._tcp_stop.is_set():
+            try:
+                conn, addr = self._tcp_sock.accept()
+            except OSError:
+                break
+            except Exception as exc:
+                self.log(f"[GIMBAL] TCP accept error: {exc}")
+                time.sleep(0.1)
+                continue
+            self._tcp_clients.add(conn)
+            self.log(f"[GIMBAL] TCP client connected: {addr}")
+            t = threading.Thread(target=self._handle_tcp_client, args=(conn, addr), daemon=True)
+            t.start()
+
+    def _handle_tcp_client(self, conn: socket.socket, addr) -> None:
+        try:
+            while not self._tcp_stop.is_set():
+                header = self._recv_all(conn, 4)
+                if not header:
+                    break
+                (payload_len,) = struct.unpack("<I", header)
+                payload = self._recv_all(conn, payload_len)
+                if not payload:
+                    break
+                self._process_tcp_command(payload, conn)
+        except Exception as exc:
+            self.log(f"[GIMBAL] TCP client error from {addr}: {exc}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._tcp_clients.discard(conn)
+            self.log(f"[GIMBAL] TCP client disconnected: {addr}")
+
+    @staticmethod
+    def _recv_all(conn: socket.socket, n: int) -> Optional[bytes]:
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = conn.recv(n - len(buf))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _process_tcp_command(self, payload: bytes, conn: socket.socket) -> None:
+        if len(payload) < 9:
+            self.log("[GIMBAL] TCP payload too short")
+            return
+        ts_sec, ts_nsec, cmd_id = struct.unpack("<IIB", payload[:9])
+        body = payload[9:]
+        if cmd_id == TCP_CMD_SET_TARGET:
+            fmt = "<hh3d3f"
+            if len(body) != struct.calcsize(fmt):
+                self.log("[GIMBAL] TCP SET_TARGET malformed payload")
+                return
+            sensor_type, sensor_id, px, py, pz, r, p, y = struct.unpack(fmt, body)
+            with self._lock:
+                self.sensor_type = int(sensor_type)
+                self.sensor_id = int(sensor_id)
+                self.pos[:] = [px, py, pz]
+                self.rpy_tgt[:] = [r, p, y]
+                self.s["sensor_type"] = self.sensor_type
+                self.s["sensor_id"] = self.sensor_id
+                self.s["pos_x"], self.s["pos_y"], self.s["pos_z"] = self.pos
+                self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = self.rpy_tgt
+            self.log(
+                f"[GIMBAL] TCP target -> sensor={sensor_type}/{sensor_id} "
+                f"xyz=({px:.2f},{py:.2f},{pz:.2f}) rpy=({r:.2f},{p:.2f},{y:.2f})"
+            )
+            self._send_status_message(conn)
+        elif cmd_id == TCP_CMD_SET_ZOOM:
+            if len(body) < 4:
+                self.log("[GIMBAL] TCP SET_ZOOM missing float")
+                return
+            (zoom_val,) = struct.unpack("<f", body[:4])
+            self._set_zoom_scale(float(zoom_val))
+            self.log(f"[GIMBAL] TCP zoom scale -> {self.zoom_scale:.2f}")
+            self._send_status_message(conn)
+        elif cmd_id == TCP_CMD_GET_STATUS:
+            self._send_status_message(conn)
+        else:
+            self.log(f"[GIMBAL] TCP unknown cmd: 0x{cmd_id:02X}")
+
+    def _send_status_message(self, conn: socket.socket) -> None:
+        with self._lock:
+            sensor_type = self.sensor_type
+            sensor_id = self.sensor_id
+            px, py, pz = self.pos
+            r_cur, p_cur, y_cur = self.rpy_cur
+            r_tgt, p_tgt, y_tgt = self.rpy_tgt
+            zoom = self.zoom_scale
+            max_rate = self.max_rate_dps
+        payload = struct.pack(
+            "<hh3d3f3ff",
+            sensor_type,
+            sensor_id,
+            px,
+            py,
+            pz,
+            r_cur,
+            p_cur,
+            y_cur,
+            r_tgt,
+            p_tgt,
+            y_tgt,
+            zoom,
+            max_rate,
+        )
+        ts_sec = int(time.time())
+        ts_nsec = time.time_ns() % 1_000_000_000
+        full = struct.pack("<IIB", ts_sec, ts_nsec, TCP_CMD_STATUS) + payload
+        header = struct.pack("<I", len(full))
+        try:
+            conn.sendall(header + full)
+        except Exception as exc:
+            self.log(f"[GIMBAL] TCP send status failed: {exc}")
+
+    def _set_zoom_scale(self, value: float) -> None:
+        zoom = max(1.0, float(value))
+        with self._lock:
+            if abs(zoom - self.zoom_scale) < 1e-3:
+                return
+            self.zoom_scale = zoom
+            self.s["zoom_scale"] = self.zoom_scale
+        if self._zoom_update_cb:
+            try:
+                self._zoom_update_cb(self.zoom_scale)
+            except Exception as exc:
+                self.log(f"[GIMBAL] zoom callback error: {exc}")
+
+    def set_zoom_scale(self, value: float) -> None:
+        self._set_zoom_scale(value)
 
     # -------- control loop & ICD send --------
     def _control_loop(self) -> None:

@@ -352,6 +352,12 @@ class GimbalControlsWindow(tk.Toplevel):
         ttk.Entry(box, textvariable=self.v_preset_name, width=24).grid(row=1, column=1, sticky="we", padx=4, pady=2)
         ttk.Button(box, text="Save to Preset", command=self.on_save_preset).grid(row=1, column=2, sticky="w", padx=4, pady=2)
         ttk.Button(box, text="Clear Preset", command=self.on_clear_preset).grid(row=1, column=3, sticky="w", padx=4, pady=2)
+
+        ttk.Button(
+            box,
+            text="Apply All Presets",
+            command=self.on_apply_all_presets,
+        ).grid(row=2, column=0, columnspan=4, sticky="e", padx=4, pady=(2, 4))
         return row + 1
 
     def _build_sensor_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
@@ -561,6 +567,26 @@ class GimbalControlsWindow(tk.Toplevel):
         gimbal_cfg["presets"] = {"version": 2, "slots": bundle_dict["presets"]}
         gimbal_cfg["selected_preset"] = bundle_dict["selected_preset"]
 
+    def _send_udp_preset(self, idx: int, preset: SensorPreset, target_ip: str, target_port: int) -> None:
+        data = preset.data
+        name = preset.name.strip() or self._default_preset_name(idx)
+        try:
+            self.gimbal.send_udp_preset(
+                data.sensor_type,
+                data.sensor_id,
+                data.pos_x,
+                data.pos_y,
+                data.pos_z,
+                data.init_roll_deg,
+                data.init_pitch_deg,
+                data.init_yaw_deg,
+                ip=target_ip,
+                port=target_port,
+            )
+            self.log.info("Preset %s (#%d) UDP sent to %s:%s", name, idx + 1, target_ip, target_port)
+        except Exception as exc:
+            self.log.exception("Failed to send preset %s (#%d) over UDP: %s", name, idx + 1, exc)
+
     def _apply_runtime(self, values: Dict[str, Any]) -> None:
         try:
             if hasattr(self.gimbal, "update_settings"):
@@ -666,6 +692,48 @@ class GimbalControlsWindow(tk.Toplevel):
         self._update_preset_labels()
         self._write_back_state()
         messagebox.showinfo("Cleared", f"Preset {idx + 1} cleared.")
+
+    def on_apply_all_presets(self) -> None:
+        saved_presets = [
+            (idx, preset)
+            for idx, preset in enumerate(self.bundle.presets)
+            if preset is not None
+        ]
+        if not saved_presets:
+            messagebox.showinfo("Apply All Presets", "There are no saved presets to send.")
+            return
+
+        if not hasattr(self.gimbal, "send_udp_preset"):
+            messagebox.showerror(
+                "Error",
+                "Current gimbal backend does not support broadcasting presets over UDP.",
+            )
+            return
+
+        try:
+            target_ip = _as_str(self._var_get(self.v_gen_ip, self.bundle.network.ip), self.bundle.network.ip)
+            target_port = _as_int(self._var_get(self.v_gen_port, self.bundle.network.port), self.bundle.network.port)
+        except Exception as exc:
+            messagebox.showerror("Error", f"Invalid network target:\n{exc}")
+            return
+
+        # Persist the latest network settings so future sends stay in sync.
+        self.bundle.network.ip = target_ip
+        self.bundle.network.port = target_port
+        self._write_back_state()
+
+        delay_ms = 0
+        for idx, preset in saved_presets:
+            self.after(
+                delay_ms,
+                lambda i=idx, p=preset, tip=target_ip, tport=target_port: self._send_udp_preset(i, p, tip, tport),
+            )
+            delay_ms += 100
+
+        messagebox.showinfo(
+            "Apply All Presets",
+            f"Queued {len(saved_presets)} preset UDP message(s) to MORAI.",
+        )
 
     def on_apply_pose(self) -> None:
         try:
