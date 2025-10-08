@@ -9,7 +9,15 @@ import struct
 import threading
 import time
 import datetime
-from typing import Callable, Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any, Tuple
+
+try:
+    from typing import TYPE_CHECKING
+except Exception:  # pragma: no cover - fallback for very old Python
+    TYPE_CHECKING = False  # type: ignore
+
+if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
+    from core.gimbal_control import GimbalControl
 
 try:
     from PIL import Image  # 미리보기 썸네일 생성에 사용될 수 있음(옵션)
@@ -19,16 +27,19 @@ except Exception:
 
 
 # ---- Command IDs (MroCameraControl) ----
-CMD_REQ_CAPTURE       = 0x01
-CMD_SET_GIMBAL        = 0x02  # 예약
-CMD_SET_COUNT         = 0x03
-CMD_GET_IMG_NUM       = 0x04
-CMD_REQ_SEND_IMG      = 0x05
-CMD_SET_ZOOM_RATIO    = 0x06
-CMD_GET_ZOOM_RATIO    = 0x07
-CMD_IMG_NUM_RESPONSE  = 0x11
-CMD_FILE_IMG_TRANSFER = 0x12
-CMD_ACK_ZOOM_RATIO    = 0x13
+from network.image_stream_icd import (
+    CMD_REQ_CAPTURE,
+    CMD_SET_GIMBAL,
+    CMD_SET_COUNT,
+    CMD_GET_IMG_NUM,
+    CMD_REQ_SEND_IMG,
+    CMD_SET_ZOOM_RATIO,
+    CMD_GET_ZOOM_RATIO,
+    CMD_IMG_NUM_RESPONSE,
+    CMD_FILE_IMG_TRANSFER,
+    CMD_ACK_ZOOM_RATIO,
+    COMMAND_NAMES,
+)
 
 
 __all__ = ["ImageStreamBridge", "ImageBridgeCore"]
@@ -54,6 +65,8 @@ class ImageStreamBridge:
         preview_cb: Optional[Callable[[bytes], None]],
         status_cb: Optional[Callable[[str], None]],
         settings: Dict[str, Any],
+        *,
+        gimbal: Optional["GimbalControl"] = None,
     ) -> None:
         self.log = log_cb
         self.preview_cb = preview_cb
@@ -79,6 +92,9 @@ class ImageStreamBridge:
         self._predefined_numbers: list[int] = []
 
         self._zoom_scale = max(1.0, float(settings.get("zoom_scale", 1.0)))
+        self._gimbal_sensor_type = int(settings.get("gimbal_sensor_type", 0))
+        self._gimbal_sensor_id = int(settings.get("gimbal_sensor_id", 0))
+        self._gimbal: Optional["GimbalControl"] = gimbal
         self._logged_zoom_warn = False
 
 
@@ -161,6 +177,17 @@ class ImageStreamBridge:
         self.tcp_port = int(settings.get("tcp_port", self.tcp_port))
         self.udp_port = int(settings.get("udp_port", self.udp_port))
 
+        if "gimbal_sensor_type" in settings:
+            try:
+                self._gimbal_sensor_type = int(settings["gimbal_sensor_type"])
+            except Exception:
+                pass
+        if "gimbal_sensor_id" in settings:
+            try:
+                self._gimbal_sensor_id = int(settings["gimbal_sensor_id"])
+            except Exception:
+                pass
+
         legacy_images = settings.get("images")
         if "realtime_dir" in settings or legacy_images is not None:
             new_realtime = str(settings.get("realtime_dir", legacy_images or self.realtime_dir))
@@ -184,6 +211,13 @@ class ImageStreamBridge:
         self._prepare_dirs()
         self._sync_next_number()
         self.log("[BRIDGE] settings updated")
+
+    def attach_gimbal_controller(self, gimbal: Optional["GimbalControl"]) -> None:
+        self._gimbal = gimbal
+
+    def configure_gimbal_forwarding(self, sensor_type: int, sensor_id: int) -> None:
+        self._gimbal_sensor_type = int(sensor_type)
+        self._gimbal_sensor_id = int(sensor_id)
 
     # --------------- TCP Server ---------------
 
@@ -238,19 +272,21 @@ class ImageStreamBridge:
         ts_sec, ts_nsec, cmd_id = struct.unpack("<IIB", payload[:9])
         cmd_payload = payload[9:]
 
-        def _expect_uint8_one(p: bytes, cmd_name: str) -> bool:
+        cmd_name = COMMAND_NAMES.get(cmd_id, f"0x{cmd_id:02X}")
+
+        def _expect_uint8_one(p: bytes, name: str) -> bool:
             """uint8==1 규격을 검증. 없거나 값이 1이 아니면 경고 로그."""
             if len(p) < 1:
-                self.log(f"[BRIDGE] {cmd_name}: missing uint8 payload; treating as 1 for backward-compat")
+                self.log(f"[BRIDGE] {name}: missing uint8 payload; treating as 1 for backward-compat")
                 return True  # 하위호환을 위해 허용
             (flag,) = struct.unpack("<B", p[:1])
             if flag != 1:
-                self.log(f"[BRIDGE] {cmd_name}: expected uint8==1, got {flag}; ignoring but continuing")
+                self.log(f"[BRIDGE] {name}: expected uint8==1, got {flag}; ignoring but continuing")
             return True
 
         if cmd_id == CMD_REQ_CAPTURE:
             # 기대 페이로드: uint8==1 (1바이트)
-            _expect_uint8_one(cmd_payload, "Req_Capture")
+            _expect_uint8_one(cmd_payload, cmd_name)
             self._handle_req_capture()
 
         elif cmd_id == CMD_SET_COUNT:
@@ -258,11 +294,11 @@ class ImageStreamBridge:
                 (count_num,) = struct.unpack("<I", cmd_payload[:4])
                 self._handle_set_count(count_num)
             else:
-                self.log("[BRIDGE] Set_Count: missing uint32 count_num")
+                self.log(f"[BRIDGE] {cmd_name}: missing uint32 count_num")
 
         elif cmd_id == CMD_GET_IMG_NUM:
             # 기대 페이로드: uint8==1 (1바이트)
-            _expect_uint8_one(cmd_payload, "Get_ImgNum")
+            _expect_uint8_one(cmd_payload, cmd_name)
             self._handle_get_img_num(conn)
 
         elif cmd_id == CMD_REQ_SEND_IMG:
@@ -270,31 +306,31 @@ class ImageStreamBridge:
                 (img_num,) = struct.unpack("<I", cmd_payload[:4])
                 self._handle_req_send_img(conn, img_num)
             else:
-                self.log("[BRIDGE] Req_SendImg: missing uint32 img_num")
+                self.log(f"[BRIDGE] {cmd_name}: missing uint32 img_num")
 
         elif cmd_id == CMD_SET_GIMBAL:
-            self.log("[BRIDGE] Set_Gimbal received (reserved)")
+            self._handle_set_gimbal(cmd_payload)
 
         elif cmd_id == CMD_SET_ZOOM_RATIO:
             if len(cmd_payload) < 4:
-                self.log("[BRIDGE] Set_Zoomratio: missing float zoom_ratio")
+                self.log(f"[BRIDGE] {cmd_name}: missing float zoom_ratio")
                 return
             (zoom_ratio,) = struct.unpack("<f", cmd_payload[:4])
             self.set_zoom_scale(zoom_ratio)
             with self._lock:
                 applied = self._zoom_scale
-            self.log(f"[BRIDGE] Set_Zoomratio -> request={zoom_ratio:.3f}, applied={applied:.3f}")
+            self.log(f"[BRIDGE] {cmd_name} -> request={zoom_ratio:.3f}, applied={applied:.3f}")
             self._send_zoom_ratio_ack(conn, applied)
 
         elif cmd_id == CMD_GET_ZOOM_RATIO:
-            _expect_uint8_one(cmd_payload, "Get_Zoomratio")
+            _expect_uint8_one(cmd_payload, cmd_name)
             with self._lock:
                 applied = self._zoom_scale
-            self.log(f"[BRIDGE] Get_Zoomratio -> {applied:.3f}")
+            self.log(f"[BRIDGE] {cmd_name} -> {applied:.3f}")
             self._send_zoom_ratio_ack(conn, applied)
 
         else:
-            self.log(f"[BRIDGE] unknown cmd_id: 0x{cmd_id:02X}")
+            self.log(f"[BRIDGE] unknown cmd_id: {cmd_name}")
 
     def _handle_req_capture(self) -> None:
         with self._lock:
@@ -351,6 +387,57 @@ class ImageStreamBridge:
             self.log(f"[BRIDGE] File_ImgTransfer sent: num={img_num:03d}, size={len(img)}")
         except Exception as e:
             self.log(f"[BRIDGE] send File_ImgTransfer failed: {e}")
+
+    def _handle_set_gimbal(self, payload: bytes) -> None:
+        if not payload:
+            self.log("[BRIDGE] Set_Gimbal payload missing")
+            return
+
+        values: Optional[Tuple[float, float, float, float, float, float]] = None
+        if len(payload) >= struct.calcsize("<3d3f"):
+            try:
+                values = struct.unpack("<3d3f", payload[: struct.calcsize("<3d3f")])
+            except struct.error:
+                values = None
+        if values is None and len(payload) >= struct.calcsize("<6f"):
+            try:
+                values = struct.unpack("<6f", payload[: struct.calcsize("<6f")])
+            except struct.error:
+                values = None
+
+        if values is None:
+            self.log("[BRIDGE] Set_Gimbal malformed payload; expected <3d3f> or <6f>")
+            return
+
+        x, y, z, roll, pitch, yaw = values
+        sensor_type = self._gimbal_sensor_type
+        sensor_id = self._gimbal_sensor_id
+
+        gimbal = self._gimbal
+        if not gimbal:
+            self.log(
+                "[BRIDGE] Set_Gimbal ignored because no gimbal controller is attached"
+            )
+            return
+
+        try:
+            gimbal.apply_external_pose(
+                sensor_type,
+                sensor_id,
+                x,
+                y,
+                z,
+                roll,
+                pitch,
+                yaw,
+            )
+            self.log(
+                "[BRIDGE] Set_Gimbal forwarded to gimbal -> sensor=%d/%d "
+                "xyz=(%.2f,%.2f,%.2f) rpy=(%.2f,%.2f,%.2f)"
+                % (sensor_type, sensor_id, x, y, z, roll, pitch, yaw)
+            )
+        except Exception as exc:
+            self.log(f"[BRIDGE] forwarding Set_Gimbal failed: {exc}")
 
     # --------------- UDP Receiver (New ICD) ---------------
 

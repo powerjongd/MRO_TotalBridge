@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 
 from utils.helpers import has_display, get_logger
 from utils.settings import ConfigManager, AppConfig
+from utils.observers import ObservableFloat
 from core.image_stream_bridge import ImageStreamBridge
 from core.gimbal_control import GimbalControl
 from core.udp_relay import UdpRelay
@@ -145,6 +146,10 @@ def apply_cli_overrides(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
     if args.gen_port is not None:        g["generator_port"] = int(args.gen_port)
     if args.sensor_type is not None:     g["sensor_type"] = int(args.sensor_type)
     if args.sensor_id is not None:       g["sensor_id"] = int(args.sensor_id)
+    if args.sensor_type is not None:
+        b["gimbal_sensor_type"] = int(args.sensor_type)
+    if args.sensor_id is not None:
+        b["gimbal_sensor_id"] = int(args.sensor_id)
 
     # Relay
     r = cfg.setdefault("relay", {})
@@ -197,18 +202,29 @@ def main() -> None:
     gimbal_log = make_log_cb(log, "[GIMBAL]")
     relay_log  = make_log_cb(log, "[RELAY]")
 
+    gimbal_cfg = cfg_dict.get("gimbal", {})
+    try:
+        initial_zoom = float(gimbal_cfg.get("zoom_scale", 1.0))
+    except (TypeError, ValueError):
+        initial_zoom = 1.0
+    zoom_state = ObservableFloat(initial_zoom)
+
     bridge = ImageStreamBridge(
         log_cb=bridge_log,
         preview_cb=None,  # GUI 미리보기는 UI 쪽에서 연결
         status_cb=make_status_cb(log, "BRIDGE"),
         settings=cfg_dict.get("bridge", {}),
     )
+
+    zoom_state.subscribe(bridge.set_zoom_scale)
+
     gimbal = GimbalControl(
         log_cb=gimbal_log,
         status_cb=make_status_cb(log, "GIMBAL"),
-        settings=cfg_dict.get("gimbal", {}),
-        zoom_update_cb=bridge.set_zoom_scale,
+        settings=gimbal_cfg,
+        zoom_update_cb=zoom_state.set,
     )
+    bridge.attach_gimbal_controller(gimbal)
     relay = UdpRelay(
         log_cb=relay_log,
         status_cb=make_status_cb(log, "RELAY"),
@@ -292,7 +308,14 @@ def main() -> None:
             log.info("[MAIN] GUI mode")
             from ui.main_window import run_gui
             # UI에 dict를 넘겨 변경 사항을 반영하게 함 (팝업에서 저장/적용 시 cfg_dict를 수정)
-            run_gui(cfg=cfg_dict, bridge=bridge, gimbal=gimbal, relay=relay, log=log)
+            run_gui(
+                cfg=cfg_dict,
+                bridge=bridge,
+                gimbal=gimbal,
+                relay=relay,
+                log=log,
+                zoom_state=zoom_state,
+            )
             shutdown()
         else:
             log.info("[MAIN] Headless mode (Ctrl+C to stop)")

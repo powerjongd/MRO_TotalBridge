@@ -15,6 +15,7 @@ try:
 except ImportError:
     from serial.serialutil import SerialException
 
+from network import gazebo_relay_icd as relay_icd
 
 class UdpRelay:
     """
@@ -29,31 +30,7 @@ class UdpRelay:
       - 센서 Heartbeat 송신 스레드(OF/DS 각각 주기)
     """
 
-    # ───────────────── Gazebo → Bridge ICD ─────────────────
-    # idx | name                 | type      | offset | len
-    #  1  | header_type          | uint8     | 0      | 1
-    #  2  | msg_type             | int32     | 1-4    | 4   (예: 10705)
-    #  3  | msg_size             | uint32    | 5-8    | 4
-    #  4  | reserved             | uint8     | 9      | 1
-    #  5  | unique_id            | int32     | 10-13  | 4
-    #  6  | time_usec            | uint64    | 14-21  | 8
-    #  7  | position (x,y,z)     | double[3] | 22-45  | 24  (X fwd, Y left, Z up)
-    #  8  | orientation (w,x,y,z)| float[4]  | 46-61  | 16
-    #  9  | linear_accel (x,y,z) | float[3]  | 62-73  | 12
-    # 10  | angular_vel (x,y,z)  | float[3]  | 74-85  | 12
-    #
-    # 전체 길이(헤더+페이로드) = 86 바이트
-    GAZEBO_STRUCT_FMT = "<BiIBIQdddfffffff"  # 1+4+4+1 + 4 + 8 + 24 + 16 + 12 + 12 = 86
-    GAZEBO_STRUCT_SIZE = struct.calcsize(GAZEBO_STRUCT_FMT)  # 86
-
-    # ──────────────── Distance Sensor RAW UDP ICD v1 ────────────────
-    # 실제 운용: 39B 페이로드 '단독'으로 송신되며(헤더 없음), 10B헤더+39B형도 호환 지원
-    DIST_MSG_TYPE = 10708
-    DIST_HDR_FMT = "<BiIB"                               # header_type, msg_type, msg_size, reserved
-    DIST_HDR_SIZE = struct.calcsize(DIST_HDR_FMT)        # 10
-    DIST_PAYLOAD_FMT = "<I H H H B B B B f f f f f f B" # 39 bytes payload
-    DIST_PAYLOAD_SIZE = struct.calcsize(DIST_PAYLOAD_FMT)  # 39
-    DIST_TOTAL_MIN = DIST_HDR_SIZE + DIST_PAYLOAD_SIZE     # 49
+    # 자세한 ICD 정의는 :mod:`network.gazebo_relay_icd` 참조
 
     # MAVLink Heartbeat 기본(센서)
     # (값들은 UI에서 변경 가능)
@@ -357,7 +334,7 @@ class UdpRelay:
                     self.log(f"[RELAY] ext send error: {e}")
 
                 # 2) Optical Flow 가공 송신
-                if len(pkt) < self.GAZEBO_STRUCT_SIZE:
+                if len(pkt) < relay_icd.GAZEBO_STRUCT_SIZE:
                     continue
 
                 (
@@ -367,7 +344,10 @@ class UdpRelay:
                     qw, qx, qy, qz,
                     ax, ay, az,
                     wx, wy, wz
-                ) = struct.unpack(self.GAZEBO_STRUCT_FMT, pkt[:self.GAZEBO_STRUCT_SIZE])
+                ) = struct.unpack(
+                    relay_icd.GAZEBO_STRUCT_FMT,
+                    pkt[:relay_icd.GAZEBO_STRUCT_SIZE],
+                )
 
                 # Gazebo Z축: Up(+Z)
                 ground_distance = max(0.0, pz)
@@ -428,19 +408,19 @@ class UdpRelay:
                     continue
 
                 # 케이스 1: 39B 페이로드 단독
-                if len(pkt) == self.DIST_PAYLOAD_SIZE:
+                if len(pkt) == relay_icd.DIST_PAYLOAD_SIZE:
                     off = 0
 
                 # 케이스 2: 10B 헤더 + 39B 페이로드
-                elif len(pkt) >= (self.DIST_HDR_SIZE + self.DIST_PAYLOAD_SIZE):
+                elif len(pkt) >= (relay_icd.DIST_HDR_SIZE + relay_icd.DIST_PAYLOAD_SIZE):
                     try:
-                        hdr_type, msg_type, msg_size, reserved = struct.unpack_from(self.DIST_HDR_FMT, pkt, 0)
+                        hdr_type, msg_type, msg_size, reserved = struct.unpack_from(relay_icd.DIST_HDR_FMT, pkt, 0)
                     except struct.error:
                         continue
-                    if msg_type != self.DIST_MSG_TYPE or msg_size != self.DIST_PAYLOAD_SIZE:
+                    if msg_type != relay_icd.DIST_MSG_TYPE or msg_size != relay_icd.DIST_PAYLOAD_SIZE:
                         # 다른 타입이면 스킵
                         continue
-                    off = self.DIST_HDR_SIZE
+                    off = relay_icd.DIST_HDR_SIZE
                 else:
                     # 지원 길이 아님
                     continue
@@ -452,7 +432,7 @@ class UdpRelay:
                      type_, sid, orientation, covariance,
                      hfov, vfov,
                      qw, qx, qy, qz,
-                     sigq) = struct.unpack_from(self.DIST_PAYLOAD_FMT, pkt, off)
+                     sigq) = struct.unpack_from(relay_icd.DIST_PAYLOAD_FMT, pkt, off)
                 except struct.error:
                     continue
 

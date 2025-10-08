@@ -132,7 +132,7 @@ pyinstaller --noconfirm --clean --name MroUnifiedBridge \
 | Cmd ID | 이름 | Payload 구조 | 비고 |
 | ------ | ---- | ------------ | ---- |
 | `0x01` | Req_Capture | `<uint8 capture=1>` | 최신 이미지(UDP 수신본)를 SaveFile 디렉터리에 저장하고 파일 번호를 +1. |
-| `0x02` | Set_Gimbal | `<float x, y, z, roll, pitch, yaw>` | 예약 기능(현재 미사용). |
+| `0x02` | Set_Gimbal | `<float x, y, z, roll, pitch, yaw>` | 이미지 스트림 설정에 지정된 센서 유형/ID로 짐벌 제어 모듈에 전달되어 UDP SensorGimbalCtrl 패킷을 즉시 발사합니다. |
 | `0x03` | Set_Count | `<uint32 count_num>` | 다음 저장될 이미지 번호를 설정(000~999 순환). |
 | `0x04` | Get_ImgNum | `<uint8 get_flag=1>` | 마지막으로 저장된 이미지 번호 질의. `Img_Num_Response`(0x11) 반환. |
 | `0x05` | Req_SendImg | `<uint32 img_num>` | 지정 번호 이미지를 TCP 전송. `File_ImgTransfer`(0x12) 응답. |
