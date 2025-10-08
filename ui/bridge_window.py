@@ -6,7 +6,7 @@ import logging
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox, StringVar, IntVar
-from typing import Tuple
+from typing import Tuple, Optional
 
 from ui.gimbal_window import SENSOR_COMBO_VALUES
 
@@ -20,7 +20,15 @@ class BridgeSettingsWindow(tk.Toplevel):
     - 이미지 라이브러리 선택 (Realtime SaveFile / PreDefinedImageSet)
     - Save/Apply
     """
-    def __init__(self, master: tk.Misc, cfg: dict, bridge, gimbal, log: logging.Logger) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        cfg: dict,
+        bridge,
+        log: logging.Logger,
+        *,
+        gimbal: Optional[object] = None,
+    ) -> None:
         super().__init__(master)
         self.title("Image Stream Module Settings")
         self.resizable(False, False)

@@ -287,7 +287,13 @@ class MainWindow(tk.Tk):
     def open_bridge_window(self) -> None:
         try:
             from ui.bridge_window import BridgeSettingsWindow
-            BridgeSettingsWindow(self, self.cfg, self.bridge, self.gimbal, self.log)
+            BridgeSettingsWindow(
+                self,
+                self.cfg,
+                self.bridge,
+                self.log,
+                gimbal=self.gimbal,
+            )
         except Exception as e:
             messagebox.showerror("Error", f"Open Image Stream Module window failed:\n{e}")
 
