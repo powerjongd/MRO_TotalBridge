@@ -223,6 +223,49 @@ class GimbalControl:
         except Exception as exc:
             self.log(f"[GIMBAL] preset UDP send error: {exc}")
 
+    def get_generator_endpoint(self) -> Tuple[str, int]:
+        with self._lock:
+            ip = str(self.s.get("generator_ip", "127.0.0.1"))
+            port = int(self.s.get("generator_port", 15020))
+        return ip, port
+
+    def apply_external_pose(
+        self,
+        sensor_type: int,
+        sensor_id: int,
+        pos_x: float,
+        pos_y: float,
+        pos_z: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+    ) -> None:
+        """Handle an external Set_Gimbal request originating from the image stream module."""
+
+        sensor_type_i = int(sensor_type)
+        sensor_id_i = int(sensor_id)
+        with self._lock:
+            self.sensor_type = sensor_type_i
+            self.sensor_id = sensor_id_i
+            self.s["sensor_type"] = sensor_type_i
+            self.s["sensor_id"] = sensor_id_i
+
+        self.set_target_pose(pos_x, pos_y, pos_z, roll_deg, pitch_deg, yaw_deg)
+        self.send_udp_preset(
+            sensor_type_i,
+            sensor_id_i,
+            pos_x,
+            pos_y,
+            pos_z,
+            roll_deg,
+            pitch_deg,
+            yaw_deg,
+        )
+        self.log(
+            "[GIMBAL] external pose applied -> sensor=%d/%d xyz=(%.2f,%.2f,%.2f) rpy=(%.2f,%.2f,%.2f)"
+            % (sensor_type_i, sensor_id_i, pos_x, pos_y, pos_z, roll_deg, pitch_deg, yaw_deg)
+        )
+
     def set_mav_ids(self, sys_id: int, comp_id: int) -> None:
         with self._lock:
             self.mav_sys_id  = int(sys_id)

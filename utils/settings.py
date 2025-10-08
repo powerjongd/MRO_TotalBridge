@@ -196,6 +196,8 @@ class AppConfig:
         # req_capture / get_imgnum 페이로드 정책
         b.setdefault("use_1byte_payload_for_rcv", True)
         b.setdefault("zoom_scale", 1.0)
+        b.setdefault("gimbal_sensor_type", 0)
+        b.setdefault("gimbal_sensor_id", 0)
 
         # Gimbal 기본값
         g = self.gimbal

@@ -146,6 +146,10 @@ def apply_cli_overrides(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
     if args.gen_port is not None:        g["generator_port"] = int(args.gen_port)
     if args.sensor_type is not None:     g["sensor_type"] = int(args.sensor_type)
     if args.sensor_id is not None:       g["sensor_id"] = int(args.sensor_id)
+    if args.sensor_type is not None:
+        b["gimbal_sensor_type"] = int(args.sensor_type)
+    if args.sensor_id is not None:
+        b["gimbal_sensor_id"] = int(args.sensor_id)
 
     # Relay
     r = cfg.setdefault("relay", {})

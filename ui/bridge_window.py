@@ -6,6 +6,9 @@ import logging
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox, StringVar, IntVar
+from typing import Tuple, Optional
+
+from ui.gimbal_window import SENSOR_COMBO_VALUES
 
 from utils.settings import ConfigManager, AppConfig  # type: ignore
 
@@ -17,13 +20,22 @@ class BridgeSettingsWindow(tk.Toplevel):
     - 이미지 라이브러리 선택 (Realtime SaveFile / PreDefinedImageSet)
     - Save/Apply
     """
-    def __init__(self, master: tk.Misc, cfg: dict, bridge, log: logging.Logger) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        cfg: dict,
+        bridge,
+        log: logging.Logger,
+        *,
+        gimbal: Optional[object] = None,
+    ) -> None:
         super().__init__(master)
         self.title("Image Stream Module Settings")
         self.resizable(False, False)
 
         self.cfg = cfg
         self.bridge = bridge
+        self.gimbal = gimbal
         self.log = log
 
         bconf = cfg.get("bridge", {})
@@ -37,6 +49,11 @@ class BridgeSettingsWindow(tk.Toplevel):
         self.v_predefined_dir = StringVar(
             value=bconf.get("predefined_dir", "./PreDefinedImageSet")
         )
+        self.v_sensor_type = StringVar(value=self._sensor_combo_label(int(bconf.get("gimbal_sensor_type", 0))))
+        self.v_sensor_id = IntVar(value=int(bconf.get("gimbal_sensor_id", 0)))
+        forward_ip, forward_port = self._resolve_gimbal_endpoint()
+        self.v_forward_ip = StringVar(value=forward_ip)
+        self.v_forward_port = IntVar(value=forward_port)
 
         self._build_layout()
         self._bind_events()
@@ -59,9 +76,34 @@ class BridgeSettingsWindow(tk.Toplevel):
         ttk.Label(frm, text="UDP Port").grid(row=2, column=2, sticky="e", **pad)
         ttk.Entry(frm, textvariable=self.v_udp, width=10).grid(row=2, column=3, sticky="w", **pad)
 
-        ttk.Label(frm, text="Image Library Source").grid(row=3, column=0, columnspan=4, sticky="w", pady=(12, 0), padx=6)
+        gimbal_box = ttk.Labelframe(frm, text="Gimbal Forwarding")
+        gimbal_box.grid(row=3, column=0, columnspan=4, sticky="ew", padx=6, pady=(12, 0))
+        ttk.Label(gimbal_box, text="Sensor Type").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+        ttk.Combobox(
+            gimbal_box,
+            textvariable=self.v_sensor_type,
+            values=SENSOR_COMBO_VALUES,
+            state="readonly",
+            width=20,
+        ).grid(row=0, column=1, sticky="w", padx=4, pady=2)
+        ttk.Label(gimbal_box, text="Sensor ID").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+        ttk.Entry(gimbal_box, textvariable=self.v_sensor_id, width=8).grid(row=0, column=3, sticky="w", padx=4, pady=2)
+
+        ttk.Label(gimbal_box, text="Target IP").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+        ttk.Entry(gimbal_box, textvariable=self.v_forward_ip, width=18, state="readonly").grid(row=1, column=1, sticky="w", padx=4, pady=2)
+        ttk.Label(gimbal_box, text="Target Port").grid(row=1, column=2, sticky="e", padx=4, pady=2)
+        ttk.Entry(gimbal_box, textvariable=self.v_forward_port, width=8, state="readonly").grid(row=1, column=3, sticky="w", padx=4, pady=2)
+
+        ttk.Label(
+            gimbal_box,
+            text="IP/Port 변경은 Gimbal Controls 창에서 수행해주세요.",
+            foreground="#555555",
+            wraplength=320,
+        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=4, pady=(0, 4))
+
+        ttk.Label(frm, text="Image Library Source").grid(row=4, column=0, columnspan=4, sticky="w", pady=(12, 0), padx=6)
         mode_frame = ttk.Frame(frm)
-        mode_frame.grid(row=4, column=0, columnspan=4, sticky="w", padx=6)
+        mode_frame.grid(row=5, column=0, columnspan=4, sticky="w", padx=6)
         ttk.Radiobutton(
             mode_frame,
             text="Use Realtime ImageSet (SaveFile)",
@@ -75,17 +117,17 @@ class BridgeSettingsWindow(tk.Toplevel):
             variable=self.v_mode,
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        ttk.Label(frm, text="SaveFile Dir").grid(row=5, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_realtime_dir, width=30).grid(row=5, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="PreDefined Dir").grid(row=5, column=2, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_predefined_dir, width=30).grid(row=5, column=3, sticky="w", **pad)
+        ttk.Label(frm, text="SaveFile Dir").grid(row=6, column=0, sticky="e", **pad)
+        ttk.Entry(frm, textvariable=self.v_realtime_dir, width=30).grid(row=6, column=1, sticky="w", **pad)
+        ttk.Label(frm, text="PreDefined Dir").grid(row=6, column=2, sticky="e", **pad)
+        ttk.Entry(frm, textvariable=self.v_predefined_dir, width=30).grid(row=6, column=3, sticky="w", **pad)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 8))
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=7, column=0, columnspan=4, sticky="ew", pady=(8, 8))
         self.lbl_status = ttk.Label(frm, text="Status: -")
-        self.lbl_status.grid(row=7, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status.grid(row=8, column=0, columnspan=4, sticky="w", **pad)
 
         btns = ttk.Frame(frm)
-        btns.grid(row=8, column=0, columnspan=4, sticky="e", **pad)
+        btns.grid(row=9, column=0, columnspan=4, sticky="e", **pad)
         ttk.Button(btns, text="Save", command=self.on_save).grid(row=0, column=0, padx=6)
         ttk.Button(btns, text="Apply & Close", command=self.on_apply_close).grid(row=0, column=1, padx=6)
 
@@ -104,6 +146,7 @@ class BridgeSettingsWindow(tk.Toplevel):
         udp = self.v_udp.get()
         mode = self.v_mode.get() or "realtime"
         active_dir = self.v_realtime_dir.get() if mode == "realtime" else self.v_predefined_dir.get()
+        self._refresh_gimbal_endpoint()
         self.lbl_status.configure(
             text=(
                 f"Status: {'Running' if running else 'Stopped'} | {ip} / TCP:{tcp} UDP:{udp}"
@@ -135,6 +178,12 @@ class BridgeSettingsWindow(tk.Toplevel):
                 except Exception as e:
                     raise ValueError(f"Failed to create directory {p}: {e}")
 
+        sensor_type = self._sensor_code_from_combo(self.v_sensor_type.get())
+        try:
+            sensor_id = int(self.v_sensor_id.get())
+        except Exception:
+            raise ValueError("Sensor ID must be an integer value.")
+
         return {
             "ip": ip,
             "tcp_port": tcp,
@@ -143,6 +192,8 @@ class BridgeSettingsWindow(tk.Toplevel):
             "predefined_dir": predefined_dir,
             "image_source_mode": mode,
             "images": realtime_dir,  # legacy 호환
+            "gimbal_sensor_type": sensor_type,
+            "gimbal_sensor_id": sensor_id,
         }
 
     def _apply_to_runtime(self) -> None:
@@ -150,6 +201,9 @@ class BridgeSettingsWindow(tk.Toplevel):
         self.cfg.setdefault("bridge", {}).update(values)
         try:
             self.bridge.update_settings(self.cfg["bridge"])
+            self.bridge.configure_gimbal_forwarding(
+                values["gimbal_sensor_type"], values["gimbal_sensor_id"]
+            )
             self._refresh_status()
         except Exception as e:
             messagebox.showerror("Error", f"Image Stream Module apply failed:\n{e}")
@@ -171,3 +225,31 @@ class BridgeSettingsWindow(tk.Toplevel):
     def on_apply_close(self) -> None:
         self._apply_to_runtime()
         self.destroy()
+
+    def _sensor_combo_label(self, code: int) -> str:
+        if 0 <= code < len(SENSOR_COMBO_VALUES):
+            return SENSOR_COMBO_VALUES[code]
+        return SENSOR_COMBO_VALUES[0]
+
+    def _sensor_code_from_combo(self, combo: str) -> int:
+        try:
+            token = (combo or "0").split(":", 1)[0]
+            return int(token)
+        except Exception:
+            return 0
+
+    def _resolve_gimbal_endpoint(self) -> Tuple[str, int]:
+        if self.gimbal is not None:
+            try:
+                return self.gimbal.get_generator_endpoint()
+            except Exception:
+                pass
+        gimbal_cfg = self.cfg.get("gimbal", {})
+        ip = str(gimbal_cfg.get("generator_ip", "127.0.0.1"))
+        port = int(gimbal_cfg.get("generator_port", 15020))
+        return ip, port
+
+    def _refresh_gimbal_endpoint(self) -> None:
+        ip, port = self._resolve_gimbal_endpoint()
+        self.v_forward_ip.set(ip)
+        self.v_forward_port.set(port)

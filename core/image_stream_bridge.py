@@ -164,6 +164,17 @@ class ImageStreamBridge:
         self.tcp_port = int(settings.get("tcp_port", self.tcp_port))
         self.udp_port = int(settings.get("udp_port", self.udp_port))
 
+        if "gimbal_sensor_type" in settings:
+            try:
+                self._gimbal_sensor_type = int(settings["gimbal_sensor_type"])
+            except Exception:
+                pass
+        if "gimbal_sensor_id" in settings:
+            try:
+                self._gimbal_sensor_id = int(settings["gimbal_sensor_id"])
+            except Exception:
+                pass
+
         legacy_images = settings.get("images")
         if "realtime_dir" in settings or legacy_images is not None:
             new_realtime = str(settings.get("realtime_dir", legacy_images or self.realtime_dir))
@@ -187,6 +198,13 @@ class ImageStreamBridge:
         self._prepare_dirs()
         self._sync_next_number()
         self.log("[BRIDGE] settings updated")
+
+    def attach_gimbal_controller(self, gimbal: Optional["GimbalControl"]) -> None:
+        self._gimbal = gimbal
+
+    def configure_gimbal_forwarding(self, sensor_type: int, sensor_id: int) -> None:
+        self._gimbal_sensor_type = int(sensor_type)
+        self._gimbal_sensor_id = int(sensor_id)
 
     # --------------- TCP Server ---------------
 
@@ -356,6 +374,57 @@ class ImageStreamBridge:
             self.log(f"[BRIDGE] File_ImgTransfer sent: num={img_num:03d}, size={len(img)}")
         except Exception as e:
             self.log(f"[BRIDGE] send File_ImgTransfer failed: {e}")
+
+    def _handle_set_gimbal(self, payload: bytes) -> None:
+        if not payload:
+            self.log("[BRIDGE] Set_Gimbal payload missing")
+            return
+
+        values: Optional[Tuple[float, float, float, float, float, float]] = None
+        if len(payload) >= struct.calcsize("<3d3f"):
+            try:
+                values = struct.unpack("<3d3f", payload[: struct.calcsize("<3d3f")])
+            except struct.error:
+                values = None
+        if values is None and len(payload) >= struct.calcsize("<6f"):
+            try:
+                values = struct.unpack("<6f", payload[: struct.calcsize("<6f")])
+            except struct.error:
+                values = None
+
+        if values is None:
+            self.log("[BRIDGE] Set_Gimbal malformed payload; expected <3d3f> or <6f>")
+            return
+
+        x, y, z, roll, pitch, yaw = values
+        sensor_type = self._gimbal_sensor_type
+        sensor_id = self._gimbal_sensor_id
+
+        gimbal = self._gimbal
+        if not gimbal:
+            self.log(
+                "[BRIDGE] Set_Gimbal ignored because no gimbal controller is attached"
+            )
+            return
+
+        try:
+            gimbal.apply_external_pose(
+                sensor_type,
+                sensor_id,
+                x,
+                y,
+                z,
+                roll,
+                pitch,
+                yaw,
+            )
+            self.log(
+                "[BRIDGE] Set_Gimbal forwarded to gimbal -> sensor=%d/%d "
+                "xyz=(%.2f,%.2f,%.2f) rpy=(%.2f,%.2f,%.2f)"
+                % (sensor_type, sensor_id, x, y, z, roll, pitch, yaw)
+            )
+        except Exception as exc:
+            self.log(f"[BRIDGE] forwarding Set_Gimbal failed: {exc}")
 
     # --------------- UDP Receiver (New ICD) ---------------
 
