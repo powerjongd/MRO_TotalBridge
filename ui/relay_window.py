@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from typing import Dict, Any
 
 from serial.tools import list_ports
@@ -52,6 +53,7 @@ class RelaySettingsWindow(tk.Toplevel):
         self.v_serial_port = tk.StringVar(value=rconf.get("serial_port", ""))
         self.v_baud        = tk.IntVar(value=int(rconf.get("serial_baud", 115200)))
         self.v_flow_id     = tk.IntVar(value=int(rconf.get("flow_sensor_id", 0)))
+        self.v_log_path    = tk.StringVar(value=rconf.get("gazebo_log_path", ""))
 
         # --- Auto-start
         self.v_autostart = tk.BooleanVar(value=bool(rconf.get("autostart", False)))
@@ -209,25 +211,35 @@ class RelaySettingsWindow(tk.Toplevel):
 
         ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=26, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
+        # --- Gazebo Logging ---
+        ttk.Label(frm, text="Gazebo Logging").grid(row=27, column=0, columnspan=4, sticky="w", **pad)
+        ttk.Label(frm, text="Log File").grid(row=28, column=0, sticky="e", **pad)
+        ttk.Entry(frm, textvariable=self.v_log_path, width=32).grid(row=28, column=1, columnspan=2, sticky="we", **pad)
+        ttk.Button(frm, text="Browse...", command=self.on_browse_log).grid(row=28, column=3, sticky="w", **pad)
+
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=29, column=0, columnspan=4, sticky="ew", pady=(6,6))
+
         # --- Control
         ctrl = ttk.Frame(frm)
-        ctrl.grid(row=27, column=0, columnspan=4, sticky="e", **pad)
+        ctrl.grid(row=30, column=0, columnspan=4, sticky="e", **pad)
         ttk.Button(ctrl, text="Start Relay", command=self.on_start).grid(row=0, column=0, padx=6)
         ttk.Button(ctrl, text="Stop Relay",  command=self.on_stop).grid(row=0, column=1, padx=6)
 
         # Save/Apply
         save = ttk.Frame(frm)
-        save.grid(row=28, column=0, columnspan=4, sticky="e", **pad)
+        save.grid(row=31, column=0, columnspan=4, sticky="e", **pad)
         ttk.Button(save, text="Save", command=self.on_save).grid(row=0, column=0, padx=6)
         ttk.Button(save, text="Apply & Close", command=self.on_apply_close).grid(row=0, column=1, padx=6)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=29, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=32, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
-        # --- Status (2 lines)
+        # --- Status (3 lines)
         self.lbl_status1 = ttk.Label(frm, text="Status: -")
-        self.lbl_status1.grid(row=30, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status1.grid(row=33, column=0, columnspan=4, sticky="w", **pad)
         self.lbl_status2 = ttk.Label(frm, text="-")
-        self.lbl_status2.grid(row=31, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status2.grid(row=34, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status3 = ttk.Label(frm, text="-")
+        self.lbl_status3.grid(row=35, column=0, columnspan=4, sticky="w", **pad)
 
     # ---------------- Helpers ----------------
     def _enum_serial_ports(self):
@@ -250,6 +262,7 @@ class RelaySettingsWindow(tk.Toplevel):
             "serial_port": self.v_serial_port.get().strip(),
             "serial_baud": int(self.v_baud.get()),
             "flow_sensor_id": int(self.v_flow_id.get()),
+            "gazebo_log_path": self.v_log_path.get().strip(),
             # Autostart
             "autostart": bool(self.v_autostart.get()),
             # OF scale & quality
@@ -287,6 +300,24 @@ class RelaySettingsWindow(tk.Toplevel):
         self.relay.update_settings(v)
 
     # ---------------- Actions ----------------
+    def on_browse_log(self) -> None:
+        try:
+            current = self.v_log_path.get().strip()
+        except Exception:
+            current = ""
+        initial_dir = os.path.dirname(current) if current else ""
+        initial_file = os.path.basename(current) if current else ""
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Select Gazebo log file",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            initialfile=initial_file or None,
+            initialdir=initial_dir or None,
+        )
+        if path:
+            self.v_log_path.set(path)
+
     def on_refresh_ports(self) -> None:
         try:
             self.cb_ports["values"] = self._enum_serial_ports()
@@ -348,6 +379,10 @@ class RelaySettingsWindow(tk.Toplevel):
             gz = st.get("gazebo_listen", "-")
             ext = st.get("ext_dst", "-")
             dup = st.get("dist_udp", "-")
+            log_active = bool(st.get("gazebo_logging_active", False))
+            log_path = st.get("gazebo_log_path", "") or ""
+            log_count = st.get("gazebo_logged_count")
+            log_error = st.get("gazebo_log_error")
 
             line1 = (
                 f"Status: {'Running' if act else 'Stopped'} | "
@@ -355,8 +390,22 @@ class RelaySettingsWindow(tk.Toplevel):
                 f"OF q={q} h={h:.2f} (age {of_age:.1f}s)"
             )
             line2 = f"GZ={gz} → EXT={ext} | UDPdist={dup} | COM={serial}"
+            if log_active and log_path:
+                disp = os.path.basename(log_path) or log_path
+                if isinstance(log_count, (int, float)):
+                    log_line = f"Log: Recording ({int(log_count)}) → {disp}"
+                else:
+                    log_line = f"Log: Recording → {disp}"
+            elif log_error:
+                log_line = f"Log: Error ({log_error})"
+            elif log_path:
+                disp = os.path.basename(log_path) or log_path
+                log_line = f"Log: Ready → {disp}"
+            else:
+                log_line = "Log: Disabled"
             self.lbl_status1.configure(text=line1)
             self.lbl_status2.configure(text=line2)
+            self.lbl_status3.configure(text=log_line)
         except Exception:
             pass
         self.after(1000, self._refresh_status_periodic)

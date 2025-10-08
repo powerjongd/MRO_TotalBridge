@@ -3,6 +3,7 @@
 from __future__ import annotations
 from PIL import Image, ImageTk
 import io
+import os
 import time
 
 import logging
@@ -56,6 +57,7 @@ class MainWindow(tk.Tk):
         self.bridge_status_var = tk.StringVar(value="Image Stream Module: Stopped (Realtime)")
         self.gimbal_status_var = tk.StringVar(value="Gimbal: Deactivated")
         self.relay_status_var = tk.StringVar(value="Relay: Deactivated")
+        self.relay_log_status_var = tk.StringVar(value="Gazebo Logging: Idle")
         self.preview_info_var = tk.StringVar(value="Last: - | Size: -")
         self.zoom_var = tk.StringVar(value="Zoom: 1.00x")
 
@@ -101,6 +103,8 @@ class MainWindow(tk.Tk):
 
         self.lbl_relay = ttk.Label(top, textvariable=self.relay_status_var)
         self.lbl_relay.grid(row=2, column=2, padx=(0, 16), sticky="w")
+        self.lbl_relay_log = ttk.Label(top, textvariable=self.relay_log_status_var)
+        self.lbl_relay_log.grid(row=2, column=3, padx=(0, 0), sticky="w")
 
         # ───────── Preview 영역 ─────────
         mid = ttk.Frame(root, padding=8)
@@ -244,9 +248,43 @@ class MainWindow(tk.Tk):
             else:
                 self._set_gimbal_status("Unknown")
 
-            # Relay 상태
-            act_relay = bool(self.cfg.get("relay", {}).get("activated", False))
+            # Relay 상태 + Gazebo 로깅
+            relay_cfg = self.cfg.setdefault("relay", {})
+            relay_status = {}
+            try:
+                if hasattr(self.relay, "get_status"):
+                    relay_status = self.relay.get_status() or {}
+            except Exception:
+                relay_status = {}
+
+            act_relay = bool(relay_status.get("activated", relay_cfg.get("activated", False)))
+            relay_cfg["activated"] = act_relay
             self._set_relay_status("Activated" if act_relay else "Deactivated")
+
+            if "gazebo_log_path" in relay_status and relay_status["gazebo_log_path"] is not None:
+                relay_cfg["gazebo_log_path"] = relay_status["gazebo_log_path"]
+            log_path = str(relay_cfg.get("gazebo_log_path", "") or "")
+            log_active = bool(relay_status.get("gazebo_logging_active", False))
+            relay_cfg["gazebo_logging_active"] = log_active
+            log_count_raw = relay_status.get("gazebo_logged_count")
+            relay_cfg["gazebo_logged_count"] = log_count_raw
+            log_error = relay_status.get("gazebo_log_error")
+
+            if log_active and log_path:
+                display_path = os.path.basename(log_path) or log_path
+                if isinstance(log_count_raw, (int, float)):
+                    count_disp = int(log_count_raw)
+                    text = f"Gazebo Logging: Recording ({count_disp}) → {display_path}"
+                else:
+                    text = f"Gazebo Logging: Recording → {display_path}"
+            elif log_error:
+                text = f"Gazebo Logging: Error ({log_error})"
+            elif log_path:
+                display_path = os.path.basename(log_path) or log_path
+                text = f"Gazebo Logging: Ready → {display_path}"
+            else:
+                text = "Gazebo Logging: Disabled"
+            self.relay_log_status_var.set(text)
 
         except Exception as e:
             self.log.error("[UI] status refresh error: %s", e)

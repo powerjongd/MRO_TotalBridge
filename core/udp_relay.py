@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import socket
 import struct
 import threading
@@ -53,6 +54,16 @@ class UdpRelay:
         # ---- 런타임 상태값 (UI 폴링용) ----
         self._lock = threading.Lock()
         self.running = False
+
+        # Gazebo 로그 상태
+        self.gazebo_log_path = str(self.s.get("gazebo_log_path", "")).strip()
+        self._gazebo_log_file: Optional[Any] = None
+        self._gazebo_log_lock = threading.Lock()
+        self._gazebo_log_active = False
+        self._gazebo_log_count = 0
+        self._gazebo_log_error = ""
+        self._gazebo_log_last_ts = 0.0
+        self._gazebo_log_start_ts = 0.0
 
         # 거리 센서 현재값
         self.current_distance_m: float = 0.0
@@ -117,6 +128,7 @@ class UdpRelay:
 
     # ------------- 설정 업데이트 -------------
     def update_settings(self, s: Dict[str, Any]) -> None:
+        log_path_changed = False
         with self._lock:
             self.s.update(s)
             # 스케일/품질
@@ -148,7 +160,17 @@ class UdpRelay:
             self.hb_ds_stat    = int(self.s.get("hb_ds_system_status", self.hb_ds_stat))
             # Distance 모드
             self.distance_mode = str(self.s.get("distance_mode", self.distance_mode)).lower()
+            new_log_path = str(self.s.get("gazebo_log_path", self.gazebo_log_path)).strip()
+            if new_log_path != self.gazebo_log_path:
+                log_path_changed = True
+                self.gazebo_log_path = new_log_path
+            self.s["gazebo_log_path"] = self.gazebo_log_path
         self.log("[RELAY] settings updated")
+        if log_path_changed:
+            if self.running:
+                self._open_gazebo_log(reset_counter=True)
+            else:
+                self._close_gazebo_log()
 
     # ------------- 라이프사이클 -------------
     def start(self) -> None:
@@ -209,6 +231,9 @@ class UdpRelay:
         # 공용 시리얼 오픈
         self._open_serial_shared()
 
+        # Gazebo 로그 오픈
+        self._open_gazebo_log(reset_counter=True)
+
         # 스레드 가동
         self.th_gazebo = threading.Thread(target=self._gazebo_loop, daemon=True)
         self.th_gazebo.start()
@@ -267,13 +292,15 @@ class UdpRelay:
             pass
         self.mav_ser = None
 
+        self._close_gazebo_log()
+
         self._emit_status("STOPPED")
         self.log("[RELAY] stopped")
 
     # ------------- 상태 -------------
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
-            return {
+            status = {
                 "activated": self.running,
                 "distance_m": self.current_distance_m,
                 "distance_age_s": (time.time() - self.last_distance_update) if self.last_distance_update else -1.0,
@@ -285,6 +312,15 @@ class UdpRelay:
                 "ext_dst": f"{self.s.get('ext_udp_ip','127.0.0.1')}:{int(self.s.get('ext_udp_port',9091))}",
                 "dist_udp": f"{self.s.get('distance_udp_listen_ip','0.0.0.0')}:{int(self.s.get('distance_udp_listen_port',14650))}",
             }
+        with self._gazebo_log_lock:
+            status.update({
+                "gazebo_log_path": self.gazebo_log_path,
+                "gazebo_logging_active": bool(self.running and self._gazebo_log_file is not None),
+                "gazebo_logged_count": self._gazebo_log_count,
+                "gazebo_log_error": self._gazebo_log_error,
+                "gazebo_log_last_write_ts": self._gazebo_log_last_ts if self._gazebo_log_last_ts else None,
+            })
+        return status
 
     # ------------- 내부 유틸 -------------
     def _open_serial_shared(self) -> None:
@@ -308,6 +344,108 @@ class UdpRelay:
                 self.status_cb(text)
         except Exception:
             pass
+
+    def _open_gazebo_log(self, reset_counter: bool = True) -> None:
+        # 최신 설정 적용
+        self.gazebo_log_path = str(self.s.get("gazebo_log_path", self.gazebo_log_path)).strip()
+        path = self.gazebo_log_path
+        with self._gazebo_log_lock:
+            if self._gazebo_log_file:
+                try:
+                    self._gazebo_log_file.close()
+                except Exception:
+                    pass
+                self._gazebo_log_file = None
+            if reset_counter:
+                self._gazebo_log_count = 0
+            if not path:
+                self._gazebo_log_active = False
+                self._gazebo_log_error = ""
+                return
+            try:
+                directory = os.path.dirname(path)
+                if directory:
+                    os.makedirs(directory, exist_ok=True)
+                self._gazebo_log_file = open(path, "a", encoding="utf-8")
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                self._gazebo_log_file.write(f"# --- Gazebo relay session started {ts} ---\n")
+                self._gazebo_log_file.flush()
+                self._gazebo_log_active = True
+                self._gazebo_log_error = ""
+                self._gazebo_log_start_ts = time.time()
+                self._gazebo_log_last_ts = self._gazebo_log_start_ts
+            except Exception as e:
+                self._gazebo_log_error = str(e)
+                self._gazebo_log_active = False
+                self._gazebo_log_file = None
+                self.log(f"[RELAY] Gazebo log open error: {e}")
+
+    def _close_gazebo_log(self) -> None:
+        with self._gazebo_log_lock:
+            if self._gazebo_log_file:
+                try:
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                    self._gazebo_log_file.write(f"# --- Gazebo relay session stopped {ts} ---\n")
+                    self._gazebo_log_file.flush()
+                except Exception:
+                    pass
+                try:
+                    self._gazebo_log_file.close()
+                except Exception:
+                    pass
+            self._gazebo_log_file = None
+            self._gazebo_log_active = False
+
+    def _write_gazebo_log(
+        self,
+        time_usec: int,
+        px: float,
+        py: float,
+        pz: float,
+        qw: float,
+        qx: float,
+        qy: float,
+        qz: float,
+        ax: float,
+        ay: float,
+        az: float,
+        wx: float,
+        wy: float,
+        wz: float,
+    ) -> None:
+        with self._gazebo_log_lock:
+            fh = self._gazebo_log_file
+            if not fh:
+                return
+            try:
+                now = time.time()
+                ts_local = time.localtime(now)
+                ts_ms = int((now - math.floor(now)) * 1000)
+                prefix = time.strftime("%Y-%m-%d %H:%M:%S", ts_local)
+                line = (
+                    f"{prefix}.{ts_ms:03d}\t"
+                    f"time_usec={int(time_usec)}\t"
+                    f"pos=({px:.4f},{py:.4f},{pz:.4f})\t"
+                    f"quat=({qw:.4f},{qx:.4f},{qy:.4f},{qz:.4f})\t"
+                    f"accel=({ax:.4f},{ay:.4f},{az:.4f})\t"
+                    f"gyro=({wx:.4f},{wy:.4f},{wz:.4f})\n"
+                )
+                fh.write(line)
+                fh.flush()
+                self._gazebo_log_count += 1
+                self._gazebo_log_last_ts = now
+                self._gazebo_log_active = True
+                self._gazebo_log_error = ""
+            except Exception as e:
+                self._gazebo_log_error = str(e)
+                self._gazebo_log_active = False
+                try:
+                    if fh:
+                        fh.close()
+                except Exception:
+                    pass
+                self._gazebo_log_file = None
+                self.log(f"[RELAY] Gazebo log write error: {e}")
 
     # ------------- Gazebo 루프 -------------
     def _gazebo_loop(self) -> None:
@@ -351,6 +489,24 @@ class UdpRelay:
 
                 # Gazebo Z축: Up(+Z)
                 ground_distance = max(0.0, pz)
+
+                # 로그 파일 기록
+                self._write_gazebo_log(
+                    time_usec=time_usec,
+                    px=px,
+                    py=py,
+                    pz=pz,
+                    qw=qw,
+                    qx=qx,
+                    qy=qy,
+                    qz=qz,
+                    ax=ax,
+                    ay=ay,
+                    az=az,
+                    wx=wx,
+                    wy=wy,
+                    wz=wz,
+                )
 
                 # 작은 각도 근사: flow_comp_m ≈ angular_rate * ground_distance
                 flow_comp_m_x = wy * ground_distance   # +Y rate → +X flow(m/s) (가정)

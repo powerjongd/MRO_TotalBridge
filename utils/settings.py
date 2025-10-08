@@ -283,6 +283,11 @@ class AppConfig:
         r.setdefault("hb_ds_base_mode", 0)
         r.setdefault("hb_ds_custom_mode", 0)
         r.setdefault("hb_ds_system_status", 4)
+        if "gazebo_log_path" not in r:
+            r["gazebo_log_path"] = os.path.join(get_default_save_dir(), "gazebo_messages.txt")
+        log_dir = os.path.dirname(r.get("gazebo_log_path", ""))
+        if log_dir:
+            ensure_dir(log_dir)
 
     # ---------- 편의 메서드 ----------
 
