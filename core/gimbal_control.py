@@ -7,7 +7,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Callable, Optional, Dict, Any, List, Set
+from typing import Callable, Optional, Dict, Any, List, Set, Tuple
 
 from pymavlink import mavutil
 try:
@@ -82,6 +82,9 @@ class GimbalControl:
         self.rx_ip = self.s.get("bind_ip", "0.0.0.0")
         self.rx_port = int(self.s.get("bind_port", 16060))
 
+        self.debug_dump_packets = bool(self.s.get("debug_dump_packets", False))
+        self.s["debug_dump_packets"] = self.debug_dump_packets
+
         self.stop_ev = threading.Event()
         self.ctrl_thread = None
         self.mav_rx_thread = None
@@ -100,6 +103,7 @@ class GimbalControl:
         self._last_rpy = self.rpy_cur[:]
         self._last_ts = time.time()
         self._rpy_rate = [0.0, 0.0, 0.0]
+        self._last_sent_snapshot: Optional[Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float]]] = None
 
         if self._zoom_update_cb:
             try:
@@ -156,6 +160,10 @@ class GimbalControl:
                 if new_port != self.rx_port:
                     self.rx_port = new_port
                     restart_tcp = True
+            if "debug_dump_packets" in settings:
+                self.debug_dump_packets = bool(self.s.get("debug_dump_packets", self.debug_dump_packets))
+                self.s["debug_dump_packets"] = self.debug_dump_packets
+            self._last_sent_snapshot = None
         self.log("[GIMBAL] settings updated")
         if restart_tcp:
             self.log("[GIMBAL] restarting TCP listener due to bind change")
@@ -169,6 +177,7 @@ class GimbalControl:
         with self._lock:
             self.pos[:] = [x, y, z]
             self.rpy_tgt[:] = [roll_deg, pitch_deg, yaw_deg]
+            self._last_sent_snapshot = None
         self.log(f"[GIMBAL] target pose set → xyz=({x:.2f},{y:.2f},{z:.2f}), rpy=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f})")
 
     def set_max_rate(self, rate_dps: float) -> None:
@@ -220,6 +229,8 @@ class GimbalControl:
                 f"[GIMBAL] preset UDP sent -> sensor={sensor_type}/{sensor_id}, "
                 f"target={target_ip}:{target_port}"
             )
+            if self.debug_dump_packets:
+                self._dump_packet_bytes("PRESET", pkt)
         except Exception as exc:
             self.log(f"[GIMBAL] preset UDP send error: {exc}")
 
@@ -514,12 +525,31 @@ class GimbalControl:
                     self._rpy_rate[i] = (self.rpy_cur[i] - self._last_rpy[i]) / dt
                     self._last_rpy[i] = self.rpy_cur[i]
 
-                pkt = self._pack_gimbal_ctrl(self.sensor_type, self.sensor_id, self.pos, self.rpy_cur)
-                try:
-                    self.tx_sock.sendto(pkt, (self.s.get("generator_ip", "127.0.0.1"),
-                                              int(self.s.get("generator_port", 15020))))
-                except Exception as e:
-                    self.log(f"[GIMBAL] send 10706 error: {e}")
+                snapshot = (
+                    int(self.sensor_type),
+                    int(self.sensor_id),
+                    (float(self.pos[0]), float(self.pos[1]), float(self.pos[2])),
+                    (float(self.rpy_cur[0]), float(self.rpy_cur[1]), float(self.rpy_cur[2])),
+                )
+                should_send = (
+                    self._last_sent_snapshot is None
+                    or self._has_pose_delta(self._last_sent_snapshot, snapshot)
+                )
+                if should_send:
+                    pkt = self._pack_gimbal_ctrl(self.sensor_type, self.sensor_id, self.pos, self.rpy_cur)
+                    try:
+                        self.tx_sock.sendto(
+                            pkt,
+                            (
+                                self.s.get("generator_ip", "127.0.0.1"),
+                                int(self.s.get("generator_port", 15020)),
+                            ),
+                        )
+                        self._last_sent_snapshot = snapshot
+                        if self.debug_dump_packets:
+                            self._dump_packet_bytes("CTRL", pkt)
+                    except Exception as e:
+                        self.log(f"[GIMBAL] send 10706 error: {e}")
 
             time.sleep(max(0.0, period - (time.time() - t0)))
 
@@ -608,19 +638,53 @@ class GimbalControl:
             self.log(f"[GIMBAL] PARAM_VALUE(read) error: {e}")
 
     # -------- packers (ICD) --------
+    def _has_pose_delta(
+        self,
+        prev: Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float]],
+        curr: Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float]],
+    ) -> bool:
+        if prev[0] != curr[0] or prev[1] != curr[1]:
+            return True
+        pos_prev, pos_curr = prev[2], curr[2]
+        rpy_prev, rpy_curr = prev[3], curr[3]
+        for a, b in zip(pos_prev, pos_curr):
+            if abs(a - b) > 1e-6:
+                return True
+        for a, b in zip(rpy_prev, rpy_curr):
+            if abs(a - b) > 1e-3:
+                return True
+        return False
+
     def _pack_gimbal_ctrl(self, sensor_type: int, sensor_id: int, xyz: List[float], rpy_deg: List[float]) -> bytes:
-        header = struct.pack("<BiIB", 1, TYPE_GIMBAL_CTRL, 42, 0)
-        qx, qy, qz, qw = euler_to_quat(rpy_deg[0], rpy_deg[1], rpy_deg[2])
-        payload = struct.pack("<BBdddffff",
-                              sensor_type & 0xFF, sensor_id & 0xFF,
-                              float(xyz[0]), float(xyz[1]), float(xyz[2]),
-                              float(qx), float(qy), float(qz), float(qw))
+        qx, qy, qz, qw = euler_to_quat(float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2]))
+        payload = struct.pack(
+            "<BB3d4f",
+            sensor_type & 0xFF,
+            sensor_id & 0xFF,
+            float(xyz[0]),
+            float(xyz[1]),
+            float(xyz[2]),
+            float(qx),
+            float(qy),
+            float(qz),
+            float(qw),
+        )
+        header = struct.pack("<BiIB", 1, TYPE_GIMBAL_CTRL, len(payload), 0)
         return header + payload
 
     def _pack_power_ctrl(self, sensor_type: int, sensor_id: int, power_on: int) -> bytes:
-        header = struct.pack("<BiIB", 1, TYPE_POWER_CTRL, 3, 0)
-        payload = struct.pack("<BBB", sensor_type & 0xFF, sensor_id & 0xFF, power_on & 0xFF)
+        payload = struct.pack(
+            "<HHB",
+            sensor_type & 0xFFFF,
+            sensor_id & 0xFFFF,
+            power_on & 0xFF,
+        )
+        header = struct.pack("<BiIB", 1, TYPE_POWER_CTRL, len(payload), 0)
         return header + payload
+
+    def _dump_packet_bytes(self, label: str, pkt: bytes) -> None:
+        hex_str = " ".join(f"{b:02X}" for b in pkt)
+        self.log(f"[GIMBAL] {label} packet ({len(pkt)} bytes): {hex_str}")
 
     # -------- utils --------
     def _emit_status(self, text: str) -> None:

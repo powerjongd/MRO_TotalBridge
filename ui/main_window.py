@@ -7,15 +7,63 @@ import os
 import time
 
 import logging
+import threading
+from collections import deque
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 try:
-    from typing import Optional, Dict, Any, Callable
+    from typing import Optional, Dict, Any, Callable, Deque
 except Exception:
-    Optional = Dict = Any = Callable = object  # type: ignore
+    Optional = Dict = Any = Callable = Deque = object  # type: ignore
 
 from utils.observers import ObservableFloat
+
+
+class TkTextHandler(logging.Handler):
+    """Logging handler that forwards records to a Tk Text widget."""
+
+    def __init__(self, widget: tk.Text) -> None:
+        super().__init__()
+        self.widget = widget
+        self._buffer: Deque[str] = deque()
+        self._lock = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+        except Exception:
+            self.handleError(record)
+            return
+        with self._lock:
+            self._buffer.append(msg)
+        try:
+            self.widget.after(0, self._flush)
+        except tk.TclError:
+            # Widget destroyed; drop the buffered logs.
+            with self._lock:
+                self._buffer.clear()
+
+    def _flush(self) -> None:
+        with self._lock:
+            if not self._buffer:
+                return
+            lines = list(self._buffer)
+            self._buffer.clear()
+        try:
+            self.widget.configure(state="normal")
+            for line in lines:
+                self.widget.insert("end", line + "\n")
+            self.widget.see("end")
+            self.widget.configure(state="disabled")
+        except tk.TclError:
+            # Ignore widget update errors after destruction.
+            pass
+
+    def close(self) -> None:
+        with self._lock:
+            self._buffer.clear()
+        super().close()
 
 
 
@@ -128,9 +176,19 @@ class MainWindow(tk.Tk):
         ttk.Button(btns, text="Pause/Resume Preview", command=self.toggle_preview_pause).pack(fill=tk.X)
         ttk.Button(btns, text="Save Latest", command=self.save_latest_image).pack(fill=tk.X, pady=(6,0))
 
+        self._log_handler: Optional[logging.Handler] = None
+
         self.log_text = tk.Text(right, height=20, wrap="word")
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=(8,0))
-        self.log_text.insert("end", "Logs will appear in console.\n")
+        self.log_text.configure(state="disabled")
+
+        handler = TkTextHandler(self.log_text)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        try:
+            self.log.addHandler(handler)
+            self._log_handler = handler
+        except Exception:
+            handler.close()
 
     def _init_zoom_subscription(self) -> None:
         if not self.zoom_state:
@@ -351,6 +409,17 @@ class MainWindow(tk.Tk):
                 self._zoom_unsubscribe()
             except Exception:
                 pass
+        handler = getattr(self, "_log_handler", None)
+        if handler is not None:
+            try:
+                self.log.removeHandler(handler)
+            except Exception:
+                pass
+            try:
+                handler.close()
+            except Exception:
+                pass
+            self._log_handler = None
         try:
             self.destroy()
         except Exception:
