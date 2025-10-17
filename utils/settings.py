@@ -136,6 +136,7 @@ class AppConfig:
     bridge: Dict[str, Any] = field(default_factory=dict)
     gimbal: Dict[str, Any] = field(default_factory=dict)
     relay:  Dict[str, Any] = field(default_factory=dict)
+    rover:  Dict[str, Any] = field(default_factory=dict)
     # 기타 루트 레벨 키도 허용
     _extras: Dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -146,6 +147,7 @@ class AppConfig:
             "bridge": dict(self.bridge),
             "gimbal": dict(self.gimbal),
             "relay":  dict(self.relay),
+            "rover":  dict(self.rover),
         }
         # extras 병합 (충돌 없을 때만)
         for k, v in self._extras.items():
@@ -159,9 +161,10 @@ class AppConfig:
         bridge = dict(d.get("bridge", {}))
         gimbal = dict(d.get("gimbal", {}))
         relay  = dict(d.get("relay", {}))
+        rover  = dict(d.get("rover", {}))
         # 나머지 extras
-        extras = {k: v for k, v in d.items() if k not in ("bridge", "gimbal", "relay")}
-        ac = AppConfig(bridge=bridge, gimbal=gimbal, relay=relay, _extras=extras)
+        extras = {k: v for k, v in d.items() if k not in ("bridge", "gimbal", "relay", "rover")}
+        ac = AppConfig(bridge=bridge, gimbal=gimbal, relay=relay, rover=rover, _extras=extras)
         # 기본값 주입/마이그레이션
         ac._inject_defaults()
         return ac
@@ -283,11 +286,37 @@ class AppConfig:
         r.setdefault("hb_ds_base_mode", 0)
         r.setdefault("hb_ds_custom_mode", 0)
         r.setdefault("hb_ds_system_status", 4)
+        r.setdefault("enable_gazebo_logging", True)
         if "gazebo_log_path" not in r:
             r["gazebo_log_path"] = os.path.join(get_default_save_dir(), "gazebo_messages.txt")
         log_dir = os.path.dirname(r.get("gazebo_log_path", ""))
         if log_dir:
             ensure_dir(log_dir)
+
+        # Rover Relay 기본값
+        rv = self.rover
+        rv.setdefault("enabled", True)
+        rv.setdefault("autostart", False)
+        rv.setdefault("cmd_listen_ip", "0.0.0.0")
+        rv.setdefault("cmd_listen_port", 18100)
+        rv.setdefault("cmd_dest_ip", "127.0.0.1")
+        rv.setdefault("cmd_dest_port", 18101)
+        rv.setdefault(
+            "cmd_log_path",
+            os.path.join(get_default_save_dir(), "rover_command_messages.txt"),
+        )
+        rv.setdefault("feedback_listen_ip", "0.0.0.0")
+        rv.setdefault("feedback_listen_port", 18102)
+        rv.setdefault("feedback_dest_ip", "127.0.0.1")
+        rv.setdefault("feedback_dest_port", 18103)
+        rv.setdefault(
+            "feedback_log_path",
+            os.path.join(get_default_save_dir(), "rover_feedback_messages.txt"),
+        )
+        for key in ("cmd_log_path", "feedback_log_path"):
+            path = rv.get(key)
+            if path:
+                ensure_dir(os.path.dirname(path))
 
     # ---------- 편의 메서드 ----------
 

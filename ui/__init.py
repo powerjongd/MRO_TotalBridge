@@ -45,10 +45,16 @@ try:
 except Exception:  # pragma: no cover
     RelaySettingsWindow = None  # type: ignore
 
+try:
+    from .rover_relay_window import RoverRelaySettingsWindow  # noqa: F401
+except Exception:  # pragma: no cover
+    RoverRelaySettingsWindow = None  # type: ignore
+
 
 __all__ = [
     "is_ui_available",
     "MainWindow",
     "GimbalControlsWindow",
     "RelaySettingsWindow",
+    "RoverRelaySettingsWindow",
 ]

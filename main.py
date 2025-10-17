@@ -14,6 +14,7 @@ from utils.observers import ObservableFloat
 from core.image_stream_bridge import ImageStreamBridge
 from core.gimbal_control import GimbalControl
 from core.udp_relay import UdpRelay
+from core.rover_relay_logger import RoverRelayLogger
 
 
 #사용법
@@ -207,6 +208,7 @@ def main() -> None:
     bridge_log = make_log_cb(log, "[BRIDGE]")
     gimbal_log = make_log_cb(log, "[GIMBAL]")
     relay_log  = make_log_cb(log, "[RELAY]")
+    rover_log  = make_log_cb(log, "[ROVER]")
 
     bridge = ImageStreamBridge(
         log_cb=bridge_log,
@@ -234,6 +236,13 @@ def main() -> None:
         status_cb=make_status_cb(log, "RELAY"),
         settings=cfg_dict.get("relay", {}),
     )
+    rover = RoverRelayLogger(
+        log_cb=rover_log,
+        status_cb=make_status_cb(log, "ROVER"),
+        settings=cfg_dict.get("rover", {}),
+    )
+    relay.register_rover_logger(rover)
+    rover.register_relay(relay)
 
     # 6) 콘솔 HUD 설정
     def hud_enabled_default() -> bool:
@@ -291,6 +300,10 @@ def main() -> None:
         except Exception:
             pass
         try:
+            rover.stop()
+        except Exception:
+            pass
+        try:
             hud_stop.set()
         except Exception:
             pass
@@ -307,6 +320,11 @@ def main() -> None:
         bridge.start()
         gimbal.start()
         relay.start()
+        if cfg_dict.get("rover", {}).get("autostart", False):
+            try:
+                rover.start()
+            except Exception as e:
+                log.error("[MAIN] Rover relay autostart failed: %s", e)
 
         if gui_possible:
             log.info("[MAIN] GUI mode")
@@ -317,6 +335,7 @@ def main() -> None:
                 bridge=bridge,
                 gimbal=gimbal,
                 relay=relay,
+                rover=rover,
                 log=log,
                 zoom_state=zoom_state,
             )

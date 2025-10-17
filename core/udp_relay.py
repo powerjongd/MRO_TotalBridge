@@ -8,7 +8,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Callable, Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any, Tuple
 
 from pymavlink import mavutil
 try:
@@ -64,6 +64,11 @@ class UdpRelay:
         self._gazebo_log_error = ""
         self._gazebo_log_last_ts = 0.0
         self._gazebo_log_start_ts = 0.0
+        self._gazebo_logging_enabled = bool(self.s.get("enable_gazebo_logging", True))
+        self.s["enable_gazebo_logging"] = self._gazebo_logging_enabled
+        self._gazebo_log_block_reason = ""
+
+        self._rover_logger: Optional["RoverRelayLogger"] = None
 
         # 거리 센서 현재값
         self.current_distance_m: float = 0.0
@@ -129,6 +134,7 @@ class UdpRelay:
     # ------------- 설정 업데이트 -------------
     def update_settings(self, s: Dict[str, Any]) -> None:
         log_path_changed = False
+        logging_state_changed = False
         with self._lock:
             self.s.update(s)
             # 스케일/품질
@@ -165,8 +171,13 @@ class UdpRelay:
                 log_path_changed = True
                 self.gazebo_log_path = new_log_path
             self.s["gazebo_log_path"] = self.gazebo_log_path
+            new_enabled = bool(self.s.get("enable_gazebo_logging", self._gazebo_logging_enabled))
+            if new_enabled != self._gazebo_logging_enabled:
+                logging_state_changed = True
+                self._gazebo_logging_enabled = new_enabled
+            self.s["enable_gazebo_logging"] = self._gazebo_logging_enabled
         self.log("[RELAY] settings updated")
-        if log_path_changed:
+        if log_path_changed or logging_state_changed:
             if self.running:
                 self._open_gazebo_log(reset_counter=True)
             else:
@@ -319,6 +330,8 @@ class UdpRelay:
                 "gazebo_logged_count": self._gazebo_log_count,
                 "gazebo_log_error": self._gazebo_log_error,
                 "gazebo_log_last_write_ts": self._gazebo_log_last_ts if self._gazebo_log_last_ts else None,
+                "enable_gazebo_logging": self._gazebo_logging_enabled,
+                "gazebo_log_block_reason": self._gazebo_log_block_reason,
             })
         return status
 
@@ -345,11 +358,82 @@ class UdpRelay:
         except Exception:
             pass
 
+    def register_rover_logger(self, rover_logger: Optional["RoverRelayLogger"]) -> None:
+        self._rover_logger = rover_logger
+
+    def notify_rover_logging_changed(self) -> None:
+        if self.running:
+            self._open_gazebo_log(reset_counter=False)
+        else:
+            _, reason = self._should_enable_gazebo_log()
+            with self._gazebo_log_lock:
+                self._gazebo_log_block_reason = reason or ""
+                if reason:
+                    self._gazebo_log_error = reason
+                else:
+                    self._gazebo_log_error = ""
+
+    def is_gazebo_logging_active(self) -> bool:
+        with self._gazebo_log_lock:
+            return bool(self._gazebo_log_file)
+
+    def is_gazebo_logging_enabled(self) -> bool:
+        return bool(self._gazebo_logging_enabled)
+
+    def _is_rover_logging_active(self) -> bool:
+        rover = self._rover_logger
+        if rover is None:
+            return False
+        try:
+            return bool(rover.is_logging_active())
+        except Exception:
+            return False
+
+    def _should_enable_gazebo_log(self) -> Tuple[bool, Optional[str]]:
+        if not self._gazebo_logging_enabled:
+            return False, "Disabled by settings"
+        if self._is_rover_logging_active():
+            return False, "Disabled: Rover logging active"
+        return True, None
+
     def _open_gazebo_log(self, reset_counter: bool = True) -> None:
         # 최신 설정 적용
         self.gazebo_log_path = str(self.s.get("gazebo_log_path", self.gazebo_log_path)).strip()
         path = self.gazebo_log_path
+        allow, reason = self._should_enable_gazebo_log()
         with self._gazebo_log_lock:
+            if not allow:
+                if self._gazebo_log_file:
+                    try:
+                        self._gazebo_log_file.close()
+                    except Exception:
+                        pass
+                    self._gazebo_log_file = None
+                if reset_counter:
+                    self._gazebo_log_count = 0
+                self._gazebo_log_active = False
+                self._gazebo_log_error = reason or ""
+                self._gazebo_log_block_reason = reason or ""
+                return
+
+            self._gazebo_log_block_reason = ""
+            if not path:
+                if self._gazebo_log_file:
+                    try:
+                        self._gazebo_log_file.close()
+                    except Exception:
+                        pass
+                    self._gazebo_log_file = None
+                if reset_counter:
+                    self._gazebo_log_count = 0
+                self._gazebo_log_active = False
+                self._gazebo_log_error = ""
+                return
+
+            if self._gazebo_log_file and not reset_counter:
+                # 이미 열린 파일을 계속 사용
+                return
+
             if self._gazebo_log_file:
                 try:
                     self._gazebo_log_file.close()
@@ -358,10 +442,6 @@ class UdpRelay:
                 self._gazebo_log_file = None
             if reset_counter:
                 self._gazebo_log_count = 0
-            if not path:
-                self._gazebo_log_active = False
-                self._gazebo_log_error = ""
-                return
             try:
                 directory = os.path.dirname(path)
                 if directory:
@@ -395,6 +475,7 @@ class UdpRelay:
                     pass
             self._gazebo_log_file = None
             self._gazebo_log_active = False
+            self._gazebo_log_block_reason = ""
 
     def _write_gazebo_log(
         self,

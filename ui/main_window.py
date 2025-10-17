@@ -82,6 +82,7 @@ class MainWindow(tk.Tk):
         bridge,
         gimbal,
         relay,
+        rover,
         log,
         zoom_state: Optional[ObservableFloat] = None,
     ):
@@ -93,6 +94,7 @@ class MainWindow(tk.Tk):
         self.bridge = bridge
         self.gimbal = gimbal
         self.relay = relay
+        self.rover = rover
         self.log = log
         self.zoom_state = zoom_state
         self._zoom_unsubscribe: Optional[Callable[[], None]] = None
@@ -106,6 +108,7 @@ class MainWindow(tk.Tk):
         self.gimbal_status_var = tk.StringVar(value="Gimbal: Deactivated")
         self.relay_status_var = tk.StringVar(value="Relay: Deactivated")
         self.relay_log_status_var = tk.StringVar(value="Gazebo Logging: Idle")
+        self.rover_log_status_var = tk.StringVar(value="Rover Logging: Idle")
         self.preview_info_var = tk.StringVar(value="Last: - | Size: -")
         self.zoom_var = tk.StringVar(value="Zoom: 1.00x")
 
@@ -148,11 +151,15 @@ class MainWindow(tk.Tk):
 
         self.btn_relay = ttk.Button(top, text="Gazebo Relay Settings", command=self.open_relay_window)
         self.btn_relay.grid(row=2, column=0, padx=(0, 8), pady=4, sticky="w")
+        self.btn_rover = ttk.Button(top, text="Rover Relay Settings", command=self.open_rover_relay_window)
+        self.btn_rover.grid(row=2, column=1, padx=(0, 16), pady=4, sticky="w")
 
         self.lbl_relay = ttk.Label(top, textvariable=self.relay_status_var)
         self.lbl_relay.grid(row=2, column=2, padx=(0, 16), sticky="w")
         self.lbl_relay_log = ttk.Label(top, textvariable=self.relay_log_status_var)
-        self.lbl_relay_log.grid(row=2, column=3, padx=(0, 0), sticky="w")
+        self.lbl_relay_log.grid(row=2, column=3, padx=(0, 16), sticky="w")
+        self.lbl_rover_log = ttk.Label(top, textvariable=self.rover_log_status_var)
+        self.lbl_rover_log.grid(row=2, column=4, padx=(0, 0), sticky="w")
 
         # ───────── Preview 영역 ─────────
         mid = ttk.Frame(root, padding=8)
@@ -327,22 +334,93 @@ class MainWindow(tk.Tk):
             log_count_raw = relay_status.get("gazebo_logged_count")
             relay_cfg["gazebo_logged_count"] = log_count_raw
             log_error = relay_status.get("gazebo_log_error")
+            enable_log = bool(relay_status.get("enable_gazebo_logging", relay_cfg.get("enable_gazebo_logging", True)))
+            relay_cfg["enable_gazebo_logging"] = enable_log
+            block_reason = str(relay_status.get("gazebo_log_block_reason") or "")
+            relay_cfg["gazebo_log_block_reason"] = block_reason
 
-            if log_active and log_path:
+            if not enable_log:
+                text = "Gazebo Logging: Disabled (Settings)"
+            elif block_reason:
+                text = f"Gazebo Logging: Blocked ({block_reason})"
+            elif log_error:
+                text = f"Gazebo Logging: Error ({log_error})"
+            elif log_active and log_path:
                 display_path = os.path.basename(log_path) or log_path
                 if isinstance(log_count_raw, (int, float)):
                     count_disp = int(log_count_raw)
                     text = f"Gazebo Logging: Recording ({count_disp}) → {display_path}"
                 else:
                     text = f"Gazebo Logging: Recording → {display_path}"
-            elif log_error:
-                text = f"Gazebo Logging: Error ({log_error})"
             elif log_path:
                 display_path = os.path.basename(log_path) or log_path
                 text = f"Gazebo Logging: Ready → {display_path}"
             else:
                 text = "Gazebo Logging: Disabled"
             self.relay_log_status_var.set(text)
+
+            # Rover logging status
+            rover_cfg = self.cfg.setdefault("rover", {})
+            rover_status = {}
+            try:
+                if hasattr(self.rover, "get_status"):
+                    rover_status = self.rover.get_status() or {}
+            except Exception:
+                rover_status = {}
+
+            rover_active = bool(rover_status.get("activated", rover_cfg.get("activated", False)))
+            rover_cfg["activated"] = rover_active
+            rover_enabled = bool(rover_status.get("enabled", rover_cfg.get("enabled", True)))
+            rover_cfg["enabled"] = rover_enabled
+
+            if "cmd_log_path" in rover_status and rover_status["cmd_log_path"] is not None:
+                rover_cfg["cmd_log_path"] = rover_status["cmd_log_path"]
+            if "feedback_log_path" in rover_status and rover_status["feedback_log_path"] is not None:
+                rover_cfg["feedback_log_path"] = rover_status["feedback_log_path"]
+
+            cmd_path = str(rover_cfg.get("cmd_log_path", "") or "")
+            fb_path = str(rover_cfg.get("feedback_log_path", "") or "")
+            cmd_active = bool(rover_status.get("cmd_logging_active", False))
+            fb_active = bool(rover_status.get("feedback_logging_active", False))
+            cmd_count = rover_status.get("cmd_logged_count")
+            fb_count = rover_status.get("feedback_logged_count")
+            cmd_error = rover_status.get("cmd_log_error") or ""
+            fb_error = rover_status.get("feedback_log_error") or ""
+
+            if not rover_enabled:
+                rover_text = "Rover Logging: Disabled (Settings)"
+            elif cmd_active or fb_active:
+                parts = []
+                if cmd_active:
+                    if isinstance(cmd_count, (int, float)):
+                        parts.append(f"CMD {int(cmd_count)}")
+                    else:
+                        parts.append("CMD")
+                if fb_active:
+                    if isinstance(fb_count, (int, float)):
+                        parts.append(f"FB {int(fb_count)}")
+                    else:
+                        parts.append("FB")
+                rover_text = f"Rover Logging: Recording ({', '.join(parts)})"
+            elif cmd_error or fb_error:
+                errs = []
+                if cmd_error:
+                    errs.append(f"CMD {cmd_error}")
+                if fb_error:
+                    errs.append(f"FB {fb_error}")
+                rover_text = f"Rover Logging: Error ({'; '.join(errs)})"
+            elif rover_active and not (cmd_path or fb_path):
+                rover_text = "Rover Logging: Forwarding (no log path)"
+            elif cmd_path or fb_path:
+                targets = []
+                if cmd_path:
+                    targets.append(f"CMD→{os.path.basename(cmd_path) or cmd_path}")
+                if fb_path:
+                    targets.append(f"FB→{os.path.basename(fb_path) or fb_path}")
+                rover_text = f"Rover Logging: Ready ({', '.join(targets)})"
+            else:
+                rover_text = "Rover Logging: Idle"
+            self.rover_log_status_var.set(rover_text)
 
         except Exception as e:
             self.log.error("[UI] status refresh error: %s", e)
@@ -401,6 +479,13 @@ class MainWindow(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", f"Open Relay window failed:\n{e}")
 
+    def open_rover_relay_window(self) -> None:
+        try:
+            from ui.rover_relay_window import RoverRelaySettingsWindow
+            RoverRelaySettingsWindow(self, self.cfg, self.rover, self.relay, self.log)
+        except Exception as e:
+            messagebox.showerror("Error", f"Open Rover Relay window failed:\n{e}")
+
     # ---------------- 종료 ----------------
 
     def on_close(self) -> None:
@@ -431,8 +516,9 @@ def run_gui(
     bridge,
     gimbal,
     relay,
+    rover,
     log: logging.Logger,
     zoom_state: Optional[ObservableFloat] = None,
 ) -> None:
-    app = MainWindow(cfg, bridge, gimbal, relay, log, zoom_state=zoom_state)
+    app = MainWindow(cfg, bridge, gimbal, relay, rover, log, zoom_state=zoom_state)
     app.mainloop()
