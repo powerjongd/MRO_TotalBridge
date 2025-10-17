@@ -353,11 +353,10 @@ class GimbalControlsWindow(tk.Toplevel):
         ttk.Button(box, text="Save to Preset", command=self.on_save_preset).grid(row=1, column=2, sticky="w", padx=4, pady=2)
         ttk.Button(box, text="Clear Preset", command=self.on_clear_preset).grid(row=1, column=3, sticky="w", padx=4, pady=2)
 
-        ttk.Button(
-            box,
-            text="Apply All Presets",
-            command=self.on_apply_all_presets,
-        ).grid(row=2, column=0, columnspan=4, sticky="e", padx=4, pady=(2, 4))
+        btn_row = ttk.Frame(box)
+        btn_row.grid(row=2, column=0, columnspan=4, sticky="e", padx=4, pady=(2, 4))
+        ttk.Button(btn_row, text="Apply Selected Preset", command=self.on_apply_selected_preset).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_row, text="Apply All Presets", command=self.on_apply_all_presets).pack(side=tk.RIGHT)
         return row + 1
 
     def _build_sensor_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
@@ -654,7 +653,7 @@ class GimbalControlsWindow(tk.Toplevel):
         """Compatibility shim for legacy preset selection callbacks."""
 
         idx = max(0, min(MAX_SENSOR_PRESETS - 1, idx))
-        self._load_selected_preset(idx, apply_runtime=True)
+        self._load_selected_preset(idx, apply_runtime=False)
 
     def _load_selected_preset(self, idx: int, apply_runtime: bool) -> None:
         self.bundle.selected_index = idx
@@ -692,6 +691,52 @@ class GimbalControlsWindow(tk.Toplevel):
         self._update_preset_labels()
         self._write_back_state()
         messagebox.showinfo("Cleared", f"Preset {idx + 1} cleared.")
+
+    def on_apply_selected_preset(self) -> None:
+        idx = self.bundle.selected_index
+        if not hasattr(self.gimbal, "send_udp_preset"):
+            messagebox.showerror(
+                "Error",
+                "Current gimbal backend does not support broadcasting presets over UDP.",
+            )
+            return
+
+        try:
+            values = self._active_runtime_values()
+        except Exception as exc:
+            messagebox.showerror("Error", f"Invalid preset values:\n{exc}")
+            return
+
+        target_ip = self.bundle.network.ip
+        target_port = self.bundle.network.port
+
+        self._write_back_state()
+        self._apply_runtime(values)
+
+        try:
+            self.gimbal.send_udp_preset(
+                values["sensor_type"],
+                values["sensor_id"],
+                values["pos_x"],
+                values["pos_y"],
+                values["pos_z"],
+                values["init_roll_deg"],
+                values["init_pitch_deg"],
+                values["init_yaw_deg"],
+                ip=target_ip,
+                port=target_port,
+            )
+        except Exception as exc:
+            messagebox.showerror("Error", f"Failed to send preset:\n{exc}")
+            return
+
+        preset = self.bundle.get(idx)
+        name = preset.name.strip() if preset else ""
+        label = name or self._default_preset_name(idx)
+        messagebox.showinfo(
+            "Apply Preset",
+            f"Preset {idx + 1} ({label}) applied to {target_ip}:{target_port}.",
+        )
 
     def on_apply_all_presets(self) -> None:
         saved_presets = [

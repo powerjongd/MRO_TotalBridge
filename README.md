@@ -122,7 +122,7 @@ pyinstaller --noconfirm --clean --name MroUnifiedBridge \
 ## Sensor Control ICD
 
 ### UDP (Generator Forward)
-- **10706 SensorGimbalCtrl**: `<uint16 sensor_type><uint16 sensor_id><float64 pos_x><float64 pos_y><float64 pos_z><float32 roll_deg><float32 pitch_deg><float32 yaw_deg>` (little-endian)
+- **10706 SensorGimbalCtrl**: `<uint8 sensor_type><uint8 sensor_id><float64 pos_x><float64 pos_y><float64 pos_z><float32 quat_x><float32 quat_y><float32 quat_z><float32 quat_w>` (little-endian)
 - **10707 SensorPowerCtrl**: `<uint16 sensor_type><uint16 sensor_id><uint8 power_on>`
 
 ### TCP `MroCameraControl` Command Set
