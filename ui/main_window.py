@@ -223,21 +223,47 @@ class MainWindow(tk.Tk):
 
     def _on_gimbal_control_method_changed(self) -> None:
         method = str(self.gimbal_control_method_var.get()).lower()
-        if method not in ("tcp", "mavlink"):
-            method = "tcp"
-            self.gimbal_control_method_var.set(method)
         gimbal_cfg = self.cfg.setdefault("gimbal", {})
-        if gimbal_cfg.get("control_method") == method:
+        prev_method = str(gimbal_cfg.get("control_method", "tcp")).lower()
+        prev_valid = prev_method if prev_method in ("tcp", "mavlink") else "tcp"
+        if method not in ("tcp", "mavlink"):
+            self.gimbal_control_method_var.set(prev_valid)
             return
-        gimbal_cfg["control_method"] = method
+        if method == "mavlink":
+            serial_port = str(gimbal_cfg.get("serial_port", "") or "").strip()
+            if not serial_port:
+                messagebox.showerror(
+                    "Serial 필요",
+                    "MAVLink 제어를 사용하려면 먼저 시리얼 포트를 연결하세요.",
+                )
+                self.gimbal_control_method_var.set(prev_valid)
+                return
+        if prev_method == method:
+            return
         try:
             if hasattr(self.gimbal, "update_settings"):
                 self.gimbal.update_settings({"control_method": method})
+        except ValueError as exc:
+            try:
+                self.log.warning("[UI] MAVLink control activation blocked: %s", exc)
+            except Exception:
+                pass
+            messagebox.showerror(
+                "MAVLink 제어 실패",
+                "시리얼 포트가 설정되지 않아 MAVLink 제어를 활성화할 수 없습니다.",
+            )
+            self.gimbal_control_method_var.set(prev_valid)
+            return
+
         except Exception as exc:
             try:
                 self.log.error("[UI] Failed to apply gimbal control method: %s", exc)
             except Exception:
                 pass
+            messagebox.showerror("오류", f"제어 모드 변경 실패:\n{exc}")
+            self.gimbal_control_method_var.set(prev_valid)
+            return
+        gimbal_cfg["control_method"] = method
 
     def _init_zoom_subscription(self) -> None:
         if not self.zoom_state:
