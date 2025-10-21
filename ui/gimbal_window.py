@@ -874,7 +874,9 @@ class GimbalControlsWindow(tk.Toplevel):
         try:
             status = self.gimbal.get_status() if hasattr(self.gimbal, "get_status") else {}
             act = status.get("activated", True)
-            mode = status.get("control_mode", "CTRL")
+            method = str(status.get("control_method", "")).lower()
+            raw_mode = status.get("control_mode", "CTRL")
+            mode = method.upper() if method else str(raw_mode or "CTRL").upper()
             r = status.get("current_roll_deg", 0.0)
             p = status.get("current_pitch_deg", 0.0)
             y = status.get("current_yaw_deg", 0.0)
