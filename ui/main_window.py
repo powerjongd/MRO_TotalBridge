@@ -99,6 +99,13 @@ class MainWindow(tk.Tk):
         self.zoom_state = zoom_state
         self._zoom_unsubscribe: Optional[Callable[[], None]] = None
 
+        gimbal_cfg = self.cfg.setdefault("gimbal", {})
+        initial_method = str(gimbal_cfg.get("control_method", "tcp")).lower()
+        if initial_method not in ("tcp", "mavlink"):
+            initial_method = "tcp"
+        gimbal_cfg["control_method"] = initial_method
+        self.gimbal_control_method_var = tk.StringVar(value=initial_method)
+
         # 프리뷰 상태 변수
         self._last_photo = None
         self._last_img_ts = 0.0
@@ -145,6 +152,23 @@ class MainWindow(tk.Tk):
 
         self.btn_gimbal = ttk.Button(top, text="Gimbal Controls", command=self.open_gimbal_window)
         self.btn_gimbal.grid(row=1, column=0, padx=(0, 8), pady=4, sticky="w")
+
+        mode_frame = ttk.LabelFrame(top, text="Gimbal Control")
+        mode_frame.grid(row=1, column=1, padx=(0, 16), pady=4, sticky="w")
+        ttk.Radiobutton(
+            mode_frame,
+            text="TCP/IP",
+            value="tcp",
+            variable=self.gimbal_control_method_var,
+            command=self._on_gimbal_control_method_changed,
+        ).pack(side=tk.LEFT, padx=(4, 4))
+        ttk.Radiobutton(
+            mode_frame,
+            text="MAVLink",
+            value="mavlink",
+            variable=self.gimbal_control_method_var,
+            command=self._on_gimbal_control_method_changed,
+        ).pack(side=tk.LEFT, padx=(0, 4))
 
         self.lbl_gimbal = ttk.Label(top, textvariable=self.gimbal_status_var)
         self.lbl_gimbal.grid(row=1, column=2, padx=(0, 16), sticky="w")
@@ -196,6 +220,24 @@ class MainWindow(tk.Tk):
             self._log_handler = handler
         except Exception:
             handler.close()
+
+    def _on_gimbal_control_method_changed(self) -> None:
+        method = str(self.gimbal_control_method_var.get()).lower()
+        if method not in ("tcp", "mavlink"):
+            method = "tcp"
+            self.gimbal_control_method_var.set(method)
+        gimbal_cfg = self.cfg.setdefault("gimbal", {})
+        if gimbal_cfg.get("control_method") == method:
+            return
+        gimbal_cfg["control_method"] = method
+        try:
+            if hasattr(self.gimbal, "update_settings"):
+                self.gimbal.update_settings({"control_method": method})
+        except Exception as exc:
+            try:
+                self.log.error("[UI] Failed to apply gimbal control method: %s", exc)
+            except Exception:
+                pass
 
     def _init_zoom_subscription(self) -> None:
         if not self.zoom_state:
@@ -305,8 +347,21 @@ class MainWindow(tk.Tk):
             if hasattr(self.gimbal, "get_status"):
                 st = self.gimbal.get_status()
                 act = st.get("activated", False)
-                mode = st.get("control_mode", "IDLE")
-                self._set_gimbal_status(f"{'Activated' if act else 'Deactivated'} ({mode})")
+                method = str(st.get("control_method", "")).lower()
+                display_mode = st.get("control_mode")
+                if method:
+                    display = method.upper()
+                    if method in ("tcp", "mavlink") and self.gimbal_control_method_var.get() != method:
+                        self.gimbal_control_method_var.set(method)
+                    gimbal_cfg = self.cfg.setdefault("gimbal", {})
+                    if gimbal_cfg.get("control_method") != method:
+                        gimbal_cfg["control_method"] = method
+                else:
+                    display = str(display_mode or "IDLE").upper()
+                    cfg_method = str(self.cfg.get("gimbal", {}).get("control_method", "")).lower()
+                    if cfg_method in ("tcp", "mavlink") and self.gimbal_control_method_var.get() != cfg_method:
+                        self.gimbal_control_method_var.set(cfg_method)
+                self._set_gimbal_status(f"{'Activated' if act else 'Deactivated'} ({display})")
                 zoom_val = st.get("zoom_scale")
                 if isinstance(zoom_val, (int, float)):
                     self._update_zoom_label(float(zoom_val))

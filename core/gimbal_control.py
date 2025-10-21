@@ -55,6 +55,9 @@ class GimbalControl:
         self.status_cb = status_cb
         self.s = dict(settings)
 
+        self.control_method = self._normalize_control_method(self.s.get("control_method", "tcp"))
+        self.s["control_method"] = self.control_method
+
         self._zoom_update_cb = zoom_update_cb
 
         self.tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -93,6 +96,7 @@ class GimbalControl:
         self._tcp_sock: Optional[socket.socket] = None
         self._tcp_clients: Set[socket.socket] = set()
         self._tcp_stop = threading.Event()
+        self._mav_stop = threading.Event()
 
         self.mav: Optional[mavutil.mavfile] = None
         self.serial_port = self.s.get("serial_port", "")
@@ -112,13 +116,20 @@ class GimbalControl:
                 self.log(f"[GIMBAL] zoom callback init error: {exc}")
 
     # -------- lifecycle --------
+    @staticmethod
+    def _normalize_control_method(value: Any) -> str:
+        if isinstance(value, str):
+            lowered = value.lower()
+            if lowered in ("tcp", "mavlink"):
+                return lowered
+        return "tcp"
+
     def start(self) -> None:
         self.stop_ev.clear()
-        self.ctrl_thread = threading.Thread(target=self._control_loop, daemon=True)
-        self.ctrl_thread.start()
-        if self.serial_port:
-            self._open_serial()
-        self._start_tcp()
+        if not self.ctrl_thread or not self.ctrl_thread.is_alive():
+            self.ctrl_thread = threading.Thread(target=self._control_loop, daemon=True)
+            self.ctrl_thread.start()
+        self._apply_control_method_runtime(restart=True)
         self._emit_status("RUNNING")
         self.log("[GIMBAL] started")
 
@@ -127,14 +138,15 @@ class GimbalControl:
         try: self.tx_sock.close()
         except Exception: pass
         self._stop_tcp()
-        try:
-            if self.mav: self.mav.close()
-        except Exception: pass
+        self._stop_mavlink_threads()
         self._emit_status("STOPPED")
         self.log("[GIMBAL] stopped")
 
     def update_settings(self, settings: Dict[str, Any]) -> None:
         restart_tcp = False
+        method_changed = False
+        serial_changed = False
+        baud_changed = False
         new_zoom: Optional[float] = None
         with self._lock:
             self.s.update(settings)
@@ -164,15 +176,90 @@ class GimbalControl:
                 self.debug_dump_packets = bool(self.s.get("debug_dump_packets", self.debug_dump_packets))
                 self.s["debug_dump_packets"] = self.debug_dump_packets
             self._last_sent_snapshot = None
+            if "control_method" in settings:
+                new_method = self._normalize_control_method(settings.get("control_method", self.control_method))
+                if new_method != self.control_method:
+                    self.control_method = new_method
+                    self.s["control_method"] = self.control_method
+                    method_changed = True
+            if "serial_port" in settings or "serial_port" in self.s:
+                new_serial = str(self.s.get("serial_port", self.serial_port))
+                if new_serial != self.serial_port:
+                    self.serial_port = new_serial
+                    serial_changed = True
+            if "serial_baud" in settings or "serial_baud" in self.s:
+                try:
+                    new_baud = int(self.s.get("serial_baud", self.serial_baud))
+                except (TypeError, ValueError):
+                    new_baud = self.serial_baud
+                if new_baud != self.serial_baud:
+                    self.serial_baud = new_baud
+                    baud_changed = True
         self.log("[GIMBAL] settings updated")
-        if restart_tcp:
+        if method_changed:
+            self.log(f"[GIMBAL] control method -> {self.control_method.upper()}")
+        if restart_tcp and self.control_method == "tcp":
             self.log("[GIMBAL] restarting TCP listener due to bind change")
             self._stop_tcp()
-            self._start_tcp()
+        if self.control_method == "tcp":
+            if restart_tcp or method_changed:
+                self._start_tcp()
+            self._stop_mavlink_threads()
+        else:
+            if method_changed or serial_changed or baud_changed:
+                self._stop_mavlink_threads()
+            self._stop_tcp()
+            self._ensure_mavlink_running(force_restart=method_changed or serial_changed or baud_changed)
         if new_zoom is not None:
             self._set_zoom_scale(new_zoom)
 
     # -------- public controls --------
+
+    def _apply_control_method_runtime(self, restart: bool = False) -> None:
+        if self.control_method == "mavlink":
+            if restart:
+                self._stop_mavlink_threads()
+            self._stop_tcp()
+            self._ensure_mavlink_running(force_restart=restart)
+        else:
+            if restart:
+                self._stop_tcp()
+            self._start_tcp()
+            self._stop_mavlink_threads()
+
+    def _ensure_mavlink_running(self, force_restart: bool = False) -> None:
+        if self.control_method != "mavlink":
+            return
+        if not self.serial_port:
+            if force_restart:
+                self.log("[GIMBAL] MAVLink mode active but serial_port is empty; waiting for connection")
+            return
+        if force_restart:
+            self._stop_mavlink_threads()
+        if self.mav_rx_thread and self.mav_rx_thread.is_alive() and not self._mav_stop.is_set():
+            return
+        self._open_serial()
+
+    def _stop_mavlink_threads(self) -> None:
+        self._mav_stop.set()
+        mav = self.mav
+        self.mav = None
+        if mav:
+            try:
+                mav.close()
+            except Exception:
+                pass
+        for th in (self.mav_rx_thread, self.mav_tx_thread):
+            if th and th.is_alive():
+                try:
+                    th.join(timeout=0.5)
+                except Exception:
+                    pass
+        self.mav_rx_thread = None
+        self.mav_tx_thread = None
+        self._mav_stop.clear()
+        self.hb_rx_ok = False
+
     def set_target_pose(self, x, y, z, roll_deg, pitch_deg, yaw_deg) -> None:
         with self._lock:
             self.pos[:] = [x, y, z]
@@ -289,18 +376,22 @@ class GimbalControl:
     def open_serial(self, port: str, baud: int) -> None:
         self.serial_port = port
         self.serial_baud = int(baud)
-        self._open_serial()
+        if self.control_method == "mavlink":
+            self._ensure_mavlink_running(force_restart=True)
+        else:
+            self.log("[GIMBAL] Serial configured but control method is TCP; switch to MAVLink to activate")
 
     def _open_serial(self) -> None:
+        self._stop_mavlink_threads()
+        if not self.serial_port:
+            return
         try:
-            if self.mav:
-                try: self.mav.close()
-                except Exception: pass
             self.mav = mavutil.mavlink_connection(
                 self.serial_port, baud=self.serial_baud,
                 source_system=self.mav_sys_id, source_component=self.mav_comp_id
             )
             self.log(f"[GIMBAL] MAVLink serial: {self.serial_port} @ {self.serial_baud} (sys={self.mav_sys_id}, comp={self.mav_comp_id})")
+            self._mav_stop.clear()
             self.mav_rx_thread = threading.Thread(target=self._mav_rx_loop, daemon=True)
             self.mav_tx_thread = threading.Thread(target=self._mav_tx_loop, daemon=True)
             self.mav_rx_thread.start()
@@ -313,9 +404,11 @@ class GimbalControl:
     # -------- status --------
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
+            method_display = self.control_method.upper() if self.control_method else "CTRL"
             return {
                 "activated": True,
-                "control_mode": "CTRL",
+                "control_mode": method_display,
+                "control_method": self.control_method,
                 "current_roll_deg": self.rpy_cur[0],
                 "current_pitch_deg": self.rpy_cur[1],
                 "current_yaw_deg": self.rpy_cur[2],
@@ -336,6 +429,10 @@ class GimbalControl:
 
     # -------- TCP control server --------
     def _start_tcp(self) -> None:
+        if self.control_method != "tcp":
+            return
+        if self._tcp_thread and self._tcp_thread.is_alive() and self._tcp_sock:
+            return
         self._tcp_stop.clear()
         try:
             self._open_tcp()
@@ -366,6 +463,7 @@ class GimbalControl:
             except Exception:
                 pass
         self._tcp_clients.clear()
+        self._tcp_thread = None
 
     def _open_tcp(self) -> None:
         self._tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -555,7 +653,7 @@ class GimbalControl:
 
     # -------- MAVLink RX/TX --------
     def _mav_rx_loop(self) -> None:
-        while not self.stop_ev.is_set() and self.mav:
+        while not self.stop_ev.is_set() and not self._mav_stop.is_set() and self.mav:
             try:
                 m = self.mav.recv_match(blocking=True, timeout=0.2)
                 if not m:
@@ -588,7 +686,7 @@ class GimbalControl:
         period_status = 0.1
         last_status = 0.0
         t0 = time.time()
-        while not self.stop_ev.is_set() and self.mav:
+        while not self.stop_ev.is_set() and not self._mav_stop.is_set() and self.mav:
             now = time.time()
             try:
                 if now >= next_hb:
