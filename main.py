@@ -66,6 +66,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sensor-type", type=int, help="Sensor type code (0:Camera,1:GPS,2:LiDAR,3:RADAR,4:LRF,5:IMU).")
     p.add_argument("--sensor-id", type=int, help="Sensor ID.")
     p.add_argument(
+        "--gimbal-control-method",
+        type=str,
+        choices=["tcp", "mavlink"],
+        help="Select gimbal control transport (TCP or MAVLink).",
+    )
+    p.add_argument(
         "--show-gimbal-packets",
         action="store_true",
         help="Display the packed 10706 gimbal control bytes in the GUI log window.",
@@ -153,6 +159,8 @@ def apply_cli_overrides(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
     if args.sensor_type is not None:     g["sensor_type"] = int(args.sensor_type)
     if args.sensor_id is not None:       g["sensor_id"] = int(args.sensor_id)
     if args.show_gimbal_packets:         g["debug_dump_packets"] = True
+    if getattr(args, "gimbal_control_method", None) is not None:
+        g["control_method"] = str(args.gimbal_control_method).lower()
     if args.sensor_type is not None:
         b["gimbal_sensor_type"] = int(args.sensor_type)
     if args.sensor_id is not None:
@@ -218,6 +226,10 @@ def main() -> None:
     )
 
     gimbal_cfg = cfg_dict.get("gimbal", {})
+    method = str(gimbal_cfg.get("control_method", "tcp")).lower()
+    if method not in ("tcp", "mavlink"):
+        method = "tcp"
+    gimbal_cfg["control_method"] = method
     try:
         initial_zoom = float(gimbal_cfg.get("zoom_scale", 1.0))
     except (TypeError, ValueError):

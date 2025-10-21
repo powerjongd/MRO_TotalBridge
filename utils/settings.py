@@ -214,6 +214,7 @@ class AppConfig:
         g.setdefault("sim_power_port", 10707)      # power ctrl 포트 가정 시 명시 사용
         g.setdefault("bind_ip", "0.0.0.0")
         g.setdefault("bind_port", 16060)
+        g.setdefault("control_method", "tcp")
         # system/component id (MAVLink 상호작용용 UI에서 사용)
         g.setdefault("sys_id", 1)
         g.setdefault("comp_id", 154)
