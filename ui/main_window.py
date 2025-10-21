@@ -254,6 +254,7 @@ class MainWindow(tk.Tk):
             )
             self.gimbal_control_method_var.set(prev_valid)
             return
+
         except Exception as exc:
             try:
                 self.log.error("[UI] Failed to apply gimbal control method: %s", exc)

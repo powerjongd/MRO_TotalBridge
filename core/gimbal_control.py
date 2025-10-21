@@ -198,6 +198,7 @@ class GimbalControl:
                 self.debug_dump_packets = bool(self.s.get("debug_dump_packets", self.debug_dump_packets))
                 self.s["debug_dump_packets"] = self.debug_dump_packets
             self._last_sent_snapshot = None
+
             if requested_serial != self.serial_port:
                 self.serial_port = requested_serial
                 serial_changed = True
@@ -206,6 +207,7 @@ class GimbalControl:
                 self.serial_baud = requested_baud
                 baud_changed = True
             self.s["serial_baud"] = self.serial_baud
+
         self.log("[GIMBAL] settings updated")
         if method_changed:
             self.log(f"[GIMBAL] control method -> {self.control_method.upper()}")
@@ -244,6 +246,7 @@ class GimbalControl:
         if not self.serial_port:
             if force_restart:
                 self.log("[GIMBAL] MAVLink mode requested without a serial port; skipping activation")
+
             return
         if force_restart:
             self._stop_mavlink_threads()
@@ -390,6 +393,7 @@ class GimbalControl:
         self.s["serial_port"] = self.serial_port
         self.serial_baud = int(baud)
         self.s["serial_baud"] = self.serial_baud
+
         if self.control_method == "mavlink":
             self._ensure_mavlink_running(force_restart=True)
         else:
