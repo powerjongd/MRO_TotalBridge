@@ -301,7 +301,7 @@ class GimbalControlsWindow(tk.Toplevel):
         self.cur_x = tk.StringVar(value="-")
         self.cur_y = tk.StringVar(value="-")
         self.cur_z = tk.StringVar(value="-")
-        # Simulator axes: roll is provided by yaw_deg, pitch by roll_deg, yaw by pitch_deg
+        # Simulator axes match bridge storage: roll, pitch, yaw in the same order
         self.cur_roll = tk.StringVar(value="-")
         self.cur_pitch = tk.StringVar(value="-")
         self.cur_yaw = tk.StringVar(value="-")
@@ -391,11 +391,11 @@ class GimbalControlsWindow(tk.Toplevel):
             ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "x" else 2), sticky="e", **pad)
             ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "x" else 3), sticky="w", **pad)
         row += 1
-        for label, var in (("z", self.v_pos_z), ("Roll", self.v_yaw)):
+        for label, var in (("z", self.v_pos_z), ("Roll", self.v_roll)):
             ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "z" else 2), sticky="e", **pad)
             ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "z" else 3), sticky="w", **pad)
         row += 1
-        for label, var in (("Pitch", self.v_roll), ("Yaw", self.v_pitch)):
+        for label, var in (("Pitch", self.v_pitch), ("Yaw", self.v_yaw)):
             ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "Pitch" else 2), sticky="e", **pad)
             ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "Pitch" else 3), sticky="w", **pad)
 
@@ -729,14 +729,11 @@ class GimbalControlsWindow(tk.Toplevel):
         if z is not None:
             self.v_pos_z.set(z)
         if roll is not None:
-            # Stored yaw corresponds to simulator roll
-            self.v_yaw.set(roll)
+            self.v_roll.set(roll)
         if pitch is not None:
-            # Stored roll corresponds to simulator pitch
-            self.v_roll.set(pitch)
+            self.v_pitch.set(pitch)
         if yaw is not None:
-            # Stored pitch corresponds to simulator yaw
-            self.v_pitch.set(yaw)
+            self.v_yaw.set(yaw)
 
     def on_select_preset(self, idx: int) -> None:
         """Handle user selection of a preset radio button."""
@@ -983,9 +980,9 @@ class GimbalControlsWindow(tk.Toplevel):
             method = str(status.get("control_method", "")).lower()
             raw_mode = status.get("control_mode", "CTRL")
             mode = method.upper() if method else str(raw_mode or "CTRL").upper()
-            sim_pitch = status.get("current_roll_deg", 0.0)
-            sim_yaw = status.get("current_pitch_deg", 0.0)
-            sim_roll = status.get("current_yaw_deg", 0.0)
+            sim_roll = status.get("current_roll_deg", 0.0)
+            sim_pitch = status.get("current_pitch_deg", 0.0)
+            sim_yaw = status.get("current_yaw_deg", 0.0)
             x = status.get("current_x", 0.0)
             yx = status.get("current_y", 0.0)
             z = status.get("current_z", 0.0)

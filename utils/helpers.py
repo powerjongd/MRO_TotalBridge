@@ -51,15 +51,30 @@ def get_logger(name: str) -> logging.Logger:
     return log
 
 
+def wrap_angle_deg(angle: float) -> float:
+    """[-180°, 180°] 범위로 각도를 정규화."""
+
+    if not math.isfinite(angle):
+        return 0.0
+    wrapped = math.fmod(angle, 360.0)
+    if wrapped <= -180.0:
+        wrapped += 360.0
+    elif wrapped > 180.0:
+        wrapped -= 360.0
+    if wrapped == -0.0:
+        return 0.0
+    return wrapped
+
+
 def euler_to_quat(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Tuple[float, float, float, float]:
     """
     ZYX(roll=X, pitch=Y, yaw=Z) 회전 순서 기준 쿼터니언 변환.
-    입력: deg
+    입력 deg는 내부에서 [-180°, 180°]로 래핑되어 180° 이상 입력도 안정적으로 처리한다.
     반환: (x, y, z, w)
     """
-    r = math.radians(roll_deg)
-    p = math.radians(pitch_deg)
-    y = math.radians(yaw_deg)
+    r = math.radians(wrap_angle_deg(roll_deg))
+    p = math.radians(wrap_angle_deg(pitch_deg))
+    y = math.radians(wrap_angle_deg(yaw_deg))
 
     cr = math.cos(r * 0.5)
     sr = math.sin(r * 0.5)
@@ -72,7 +87,22 @@ def euler_to_quat(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Tuple[fl
     qx = cy * cp * sr - sy * sp * cr
     qy = sy * cp * sr + cy * sp * cr
     qz = sy * cp * cr - cy * sp * sr
-    return (qx, qy, qz, qw)
+
+    norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) or 1.0
+    qw /= norm
+    qx /= norm
+    qy /= norm
+    qz /= norm
+
+    def _zero_if_close(value: float) -> float:
+        return 0.0 if abs(value) < 1e-12 else value
+
+    return (
+        _zero_if_close(qx),
+        _zero_if_close(qy),
+        _zero_if_close(qz),
+        _zero_if_close(qw),
+    )
 
 
 def clamp(v: float, vmin: Optional[float], vmax: Optional[float]) -> float:

@@ -15,7 +15,7 @@ try:
 except ImportError:
     from serial.serialutil import SerialException
 
-from utils.helpers import euler_to_quat
+from utils.helpers import euler_to_quat, wrap_angle_deg
 from network.gimbal_icd import (
     TYPE_GIMBAL_CTRL,
     TYPE_POWER_CTRL,
@@ -803,6 +803,9 @@ class GimbalControl:
                         r, p, y = self.rpy_cur
                         wx_b, wy_b, wz_b = self._rpy_rate
                     r_sim, p_sim, y_sim = self._bridge_to_sim_rpy(r, p, y)
+                    r_sim = self._normalize_angle(r_sim)
+                    p_sim = self._normalize_angle(p_sim)
+                    y_sim = self._normalize_angle(y_sim)
                     qx, qy, qz, qw = euler_to_quat(r_sim, p_sim, y_sim)
                     wx, wy, wz = self._bridge_to_sim_rpy(wx_b, wy_b, wz_b)
                     time_boot_ms = int((now - t0) * 1000.0)
@@ -860,19 +863,30 @@ class GimbalControl:
         return False
 
     @staticmethod
-    def _bridge_to_sim_rpy(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Tuple[float, float, float]:
-        """Convert bridge roll/pitch/yaw (or axis rates) into the simulator axis order."""
-
-        return float(yaw_deg), float(roll_deg), float(pitch_deg)
+    def _normalize_angle(value: float) -> float:
+        return wrap_angle_deg(value)
 
     @staticmethod
-    def _sim_to_bridge_rpy(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Tuple[float, float, float]:
+    def _bridge_to_sim_rpy(
+        roll_deg: float, pitch_deg: float, yaw_deg: float
+    ) -> Tuple[float, float, float]:
+        """Convert bridge roll/pitch/yaw (or axis rates) into the simulator axis order."""
+
+        return float(roll_deg), float(pitch_deg), float(yaw_deg)
+
+    @staticmethod
+    def _sim_to_bridge_rpy(
+        roll_deg: float, pitch_deg: float, yaw_deg: float
+    ) -> Tuple[float, float, float]:
         """Convert simulator roll/pitch/yaw (or axis rates) into the bridge storage order."""
 
-        return float(pitch_deg), float(yaw_deg), float(roll_deg)
+        return float(roll_deg), float(pitch_deg), float(yaw_deg)
 
     def _pack_gimbal_ctrl(self, sensor_type: int, sensor_id: int, xyz: List[float], rpy_deg: List[float]) -> bytes:
         sim_roll, sim_pitch, sim_yaw = self._bridge_to_sim_rpy(float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2]))
+        sim_roll = self._normalize_angle(sim_roll)
+        sim_pitch = self._normalize_angle(sim_pitch)
+        sim_yaw = self._normalize_angle(sim_yaw)
         qx, qy, qz, qw = euler_to_quat(sim_roll, sim_pitch, sim_yaw)
         payload = struct.pack(
             "<BB3d4f",
