@@ -288,9 +288,10 @@ class GimbalControlsWindow(tk.Toplevel):
         self.cur_x = tk.StringVar(value="-")
         self.cur_y = tk.StringVar(value="-")
         self.cur_z = tk.StringVar(value="-")
-        self.cur_r = tk.StringVar(value="-")
-        self.cur_p = tk.StringVar(value="-")
-        self.cur_yw = tk.StringVar(value="-")
+        # Simulator axes: roll is provided by yaw_deg, pitch by roll_deg, yaw by pitch_deg
+        self.cur_roll = tk.StringVar(value="-")
+        self.cur_pitch = tk.StringVar(value="-")
+        self.cur_yaw = tk.StringVar(value="-")
         self.cur_wx = tk.StringVar(value="-")
         self.cur_wy = tk.StringVar(value="-")
         self.cur_wz = tk.StringVar(value="-")
@@ -369,19 +370,19 @@ class GimbalControlsWindow(tk.Toplevel):
         return row + 1
 
     def _build_pose_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
-        ttk.Label(parent, text="Target Pose (x,y,z,r,p,y) [m / deg]").grid(row=row, column=0, columnspan=4, sticky="w", **pad)
+        ttk.Label(parent, text="Target Pose (x, y, z, roll, pitch, yaw) [m / deg]").grid(row=row, column=0, columnspan=4, sticky="w", **pad)
         row += 1
         for label, var in (("x", self.v_pos_x), ("y", self.v_pos_y)):
             ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "x" else 2), sticky="e", **pad)
             ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "x" else 3), sticky="w", **pad)
         row += 1
-        for label, var in (("z", self.v_pos_z), ("roll", self.v_roll)):
+        for label, var in (("z", self.v_pos_z), ("Roll", self.v_yaw)):
             ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "z" else 2), sticky="e", **pad)
             ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "z" else 3), sticky="w", **pad)
         row += 1
-        for label, var in (("pitch", self.v_pitch), ("yaw", self.v_yaw)):
-            ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "pitch" else 2), sticky="e", **pad)
-            ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "pitch" else 3), sticky="w", **pad)
+        for label, var in (("Pitch", self.v_roll), ("Yaw", self.v_pitch)):
+            ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "Pitch" else 2), sticky="e", **pad)
+            ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "Pitch" else 3), sticky="w", **pad)
 
         btns_pose = ttk.Frame(parent)
         btns_pose.grid(row=row + 1, column=0, columnspan=4, sticky="e", **pad)
@@ -445,12 +446,12 @@ class GimbalControlsWindow(tk.Toplevel):
         ttk.Label(cur, textvariable=self.cur_y, width=10).grid(row=1, column=3, sticky="w")
         ttk.Label(cur, text="z").grid(row=1, column=4, sticky="e")
         ttk.Label(cur, textvariable=self.cur_z, width=10).grid(row=1, column=5, sticky="w")
-        ttk.Label(cur, text="roll").grid(row=2, column=0, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_r, width=10).grid(row=2, column=1, sticky="w")
-        ttk.Label(cur, text="pitch").grid(row=2, column=2, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_p, width=10).grid(row=2, column=3, sticky="w")
-        ttk.Label(cur, text="yaw").grid(row=2, column=4, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_yw, width=10).grid(row=2, column=5, sticky="w")
+        ttk.Label(cur, text="Roll").grid(row=2, column=0, sticky="e")
+        ttk.Label(cur, textvariable=self.cur_roll, width=10).grid(row=2, column=1, sticky="w")
+        ttk.Label(cur, text="Pitch").grid(row=2, column=2, sticky="e")
+        ttk.Label(cur, textvariable=self.cur_pitch, width=10).grid(row=2, column=3, sticky="w")
+        ttk.Label(cur, text="Yaw").grid(row=2, column=4, sticky="e")
+        ttk.Label(cur, textvariable=self.cur_yaw, width=10).grid(row=2, column=5, sticky="w")
         ttk.Label(cur, text="ωx/ωy/ωz").grid(row=3, column=0, sticky="e")
         ttk.Label(cur, textvariable=self.cur_wx, width=10).grid(row=3, column=1, sticky="w")
         ttk.Label(cur, textvariable=self.cur_wy, width=10).grid(row=3, column=3, sticky="w")
@@ -630,19 +631,22 @@ class GimbalControlsWindow(tk.Toplevel):
     # ------------------------------------------------------------------
     # Actions
 
-    def _set_tpl(self, x, y, z, r, p, yw):
+    def _set_tpl(self, x, y, z, roll, pitch, yaw):
         if x is not None:
             self.v_pos_x.set(x)
         if y is not None:
             self.v_pos_y.set(y)
         if z is not None:
             self.v_pos_z.set(z)
-        if r is not None:
-            self.v_roll.set(r)
-        if p is not None:
-            self.v_pitch.set(p)
-        if yw is not None:
-            self.v_yaw.set(yw)
+        if roll is not None:
+            # Stored yaw corresponds to simulator roll
+            self.v_yaw.set(roll)
+        if pitch is not None:
+            # Stored roll corresponds to simulator pitch
+            self.v_roll.set(pitch)
+        if yaw is not None:
+            # Stored pitch corresponds to simulator yaw
+            self.v_pitch.set(yaw)
 
     def on_select_preset(self, idx: int) -> None:
         """Handle user selection of a preset radio button."""
@@ -809,7 +813,13 @@ class GimbalControlsWindow(tk.Toplevel):
 
     def on_apply_power(self) -> None:
         try:
-            on = bool(self._var_get(self.v_power_on, True))
+            values = self._active_runtime_values()
+            self._write_back_state()
+            on = bool(values.get("power_on", True))
+            if hasattr(self.gimbal, "update_settings"):
+                self.gimbal.update_settings(values)
+            if hasattr(self.gimbal, "set_power"):
+                self.gimbal.set_power(on)
             if hasattr(self.gimbal, "send_power"):
                 self.gimbal.send_power(on)
             messagebox.showinfo("OK", f"Power {'ON' if on else 'OFF'} applied.")
@@ -877,9 +887,9 @@ class GimbalControlsWindow(tk.Toplevel):
             method = str(status.get("control_method", "")).lower()
             raw_mode = status.get("control_mode", "CTRL")
             mode = method.upper() if method else str(raw_mode or "CTRL").upper()
-            r = status.get("current_roll_deg", 0.0)
-            p = status.get("current_pitch_deg", 0.0)
-            y = status.get("current_yaw_deg", 0.0)
+            sim_pitch = status.get("current_roll_deg", 0.0)
+            sim_yaw = status.get("current_pitch_deg", 0.0)
+            sim_roll = status.get("current_yaw_deg", 0.0)
             x = status.get("current_x", 0.0)
             yx = status.get("current_y", 0.0)
             z = status.get("current_z", 0.0)
@@ -895,9 +905,9 @@ class GimbalControlsWindow(tk.Toplevel):
             self.cur_x.set(f"{x:.2f}")
             self.cur_y.set(f"{yx:.2f}")
             self.cur_z.set(f"{z:.2f}")
-            self.cur_r.set(f"{r:.1f}")
-            self.cur_p.set(f"{p:.1f}")
-            self.cur_yw.set(f"{y:.1f}")
+            self.cur_roll.set(f"{sim_roll:.1f}")
+            self.cur_pitch.set(f"{sim_pitch:.1f}")
+            self.cur_yaw.set(f"{sim_yaw:.1f}")
             self.cur_wx.set(f"{wx:.2f}")
             self.cur_wy.set(f"{wy:.2f}")
             self.cur_wz.set(f"{wz:.2f}")

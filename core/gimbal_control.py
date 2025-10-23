@@ -292,11 +292,22 @@ class GimbalControl:
         self.log(f"[GIMBAL] power state updated (no send) -> {'ON' if on else 'OFF'}")
 
     def send_power(self, on: bool) -> None:
-        pkt = self._pack_power_ctrl(self.sensor_type, self.sensor_id, int(bool(on)))
+        flag = int(bool(on))
+        with self._lock:
+            self.power_on = bool(flag)
+            sensor_type = int(self.sensor_type)
+            sensor_id = int(self.sensor_id)
+            target_ip = str(self.s.get("generator_ip", "127.0.0.1"))
+            target_port = int(self.s.get("generator_port", 15020))
+        pkt = self._pack_power_ctrl(sensor_type, sensor_id, flag)
         try:
-            self.tx_sock.sendto(pkt, (self.s.get("generator_ip", "127.0.0.1"),
-                                      int(self.s.get("generator_port", 15020))))
-            self.log(f"[GIMBAL] POWER {'ON' if on else 'OFF'} sent")
+            self.tx_sock.sendto(pkt, (target_ip, target_port))
+            self.log(
+                f"[GIMBAL] POWER {'ON' if on else 'OFF'} sent -> "
+                f"sensor={sensor_type}/{sensor_id} target={target_ip}:{target_port}"
+            )
+            if self.debug_dump_packets:
+                self._dump_packet_bytes("POWER", pkt)
         except Exception as e:
             self.log(f"[GIMBAL] power send error: {e}")
 
@@ -362,19 +373,21 @@ class GimbalControl:
             self.s["sensor_type"] = sensor_type_i
             self.s["sensor_id"] = sensor_id_i
 
-        self.set_target_pose(pos_x, pos_y, pos_z, roll_deg, pitch_deg, yaw_deg)
+        br_roll, br_pitch, br_yaw = self._sim_to_bridge_rpy(roll_deg, pitch_deg, yaw_deg)
+
+        self.set_target_pose(pos_x, pos_y, pos_z, br_roll, br_pitch, br_yaw)
         self.send_udp_preset(
             sensor_type_i,
             sensor_id_i,
             pos_x,
             pos_y,
             pos_z,
-            roll_deg,
-            pitch_deg,
-            yaw_deg,
+            br_roll,
+            br_pitch,
+            br_yaw,
         )
         self.log(
-            "[GIMBAL] external pose applied -> sensor=%d/%d xyz=(%.2f,%.2f,%.2f) rpy=(%.2f,%.2f,%.2f)"
+            "[GIMBAL] external pose applied -> sensor=%d/%d xyz=(%.2f,%.2f,%.2f) sim_rpy=(%.2f,%.2f,%.2f)"
             % (sensor_type_i, sensor_id_i, pos_x, pos_y, pos_z, roll_deg, pitch_deg, yaw_deg)
         )
 
@@ -547,7 +560,8 @@ class GimbalControl:
             if len(body) != struct.calcsize(fmt):
                 self.log("[GIMBAL] TCP SET_TARGET malformed payload")
                 return
-            sensor_type, sensor_id, px, py, pz, r, p, y = struct.unpack(fmt, body)
+            sensor_type, sensor_id, px, py, pz, r_sim, p_sim, y_sim = struct.unpack(fmt, body)
+            r, p, y = self._sim_to_bridge_rpy(r_sim, p_sim, y_sim)
             with self._lock:
                 self.sensor_type = int(sensor_type)
                 self.sensor_id = int(sensor_id)
@@ -559,7 +573,7 @@ class GimbalControl:
                 self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = self.rpy_tgt
             self.log(
                 f"[GIMBAL] TCP target -> sensor={sensor_type}/{sensor_id} "
-                f"xyz=({px:.2f},{py:.2f},{pz:.2f}) rpy=({r:.2f},{p:.2f},{y:.2f})"
+                f"xyz=({px:.2f},{py:.2f},{pz:.2f}) sim_rpy=({r_sim:.2f},{p_sim:.2f},{y_sim:.2f})"
             )
             self._send_status_message(conn)
         elif cmd_id == TCP_CMD_SET_ZOOM:
@@ -584,6 +598,8 @@ class GimbalControl:
             r_tgt, p_tgt, y_tgt = self.rpy_tgt
             zoom = self.zoom_scale
             max_rate = self.max_rate_dps
+        r_cur_sim, p_cur_sim, y_cur_sim = self._bridge_to_sim_rpy(r_cur, p_cur, y_cur)
+        r_tgt_sim, p_tgt_sim, y_tgt_sim = self._bridge_to_sim_rpy(r_tgt, p_tgt, y_tgt)
         payload = struct.pack(
             "<hh3d3f3ff",
             sensor_type,
@@ -591,12 +607,12 @@ class GimbalControl:
             px,
             py,
             pz,
-            r_cur,
-            p_cur,
-            y_cur,
-            r_tgt,
-            p_tgt,
-            y_tgt,
+            r_cur_sim,
+            p_cur_sim,
+            y_cur_sim,
+            r_tgt_sim,
+            p_tgt_sim,
+            y_tgt_sim,
             zoom,
             max_rate,
         )
@@ -686,10 +702,13 @@ class GimbalControl:
                     avx = getattr(m, "angular_velocity_x", float("nan"))
                     # mode b: q 유효 → 목표 각도 설정
                     if not any(math.isnan(v) for v in q):
-                        r, p, y = _quat_to_euler_deg(q[0], q[1], q[2], q[3])
+                        r_sim, p_sim, y_sim = _quat_to_euler_deg(q[0], q[1], q[2], q[3])
+                        r, p, y = self._sim_to_bridge_rpy(r_sim, p_sim, y_sim)
                         with self._lock:
                             self.rpy_tgt[:] = [r, p, y]
-                        self.log(f"[GIMBAL] RX target RPY=({r:.1f},{p:.1f},{y:.1f})")
+                        self.log(
+                            f"[GIMBAL] RX target SIM_RPY=({r_sim:.1f},{p_sim:.1f},{y_sim:.1f})"
+                        )
                 elif t == "PARAM_REQUEST_LIST":
                     self._send_param_list()
                 elif t == "PARAM_REQUEST_READ":
@@ -715,8 +734,10 @@ class GimbalControl:
                 if now - last_status >= period_status:
                     with self._lock:
                         r, p, y = self.rpy_cur
-                        qx, qy, qz, qw = euler_to_quat(r, p, y)
-                        wx, wy, wz = self._rpy_rate
+                        wx_b, wy_b, wz_b = self._rpy_rate
+                    r_sim, p_sim, y_sim = self._bridge_to_sim_rpy(r, p, y)
+                    qx, qy, qz, qw = euler_to_quat(r_sim, p_sim, y_sim)
+                    wx, wy, wz = self._bridge_to_sim_rpy(wx_b, wy_b, wz_b)
                     time_boot_ms = int((now - t0) * 1000.0)
                     self.mav.mav.gimbal_device_attitude_status_send(
                         self.mav_sys_id, self.mav_comp_id,
@@ -771,8 +792,21 @@ class GimbalControl:
                 return True
         return False
 
+    @staticmethod
+    def _bridge_to_sim_rpy(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Tuple[float, float, float]:
+        """Convert bridge roll/pitch/yaw (or axis rates) into the simulator axis order."""
+
+        return float(yaw_deg), float(roll_deg), float(pitch_deg)
+
+    @staticmethod
+    def _sim_to_bridge_rpy(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Tuple[float, float, float]:
+        """Convert simulator roll/pitch/yaw (or axis rates) into the bridge storage order."""
+
+        return float(pitch_deg), float(yaw_deg), float(roll_deg)
+
     def _pack_gimbal_ctrl(self, sensor_type: int, sensor_id: int, xyz: List[float], rpy_deg: List[float]) -> bytes:
-        qx, qy, qz, qw = euler_to_quat(float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2]))
+        sim_roll, sim_pitch, sim_yaw = self._bridge_to_sim_rpy(float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2]))
+        qx, qy, qz, qw = euler_to_quat(sim_roll, sim_pitch, sim_yaw)
         payload = struct.pack(
             "<BB3d4f",
             sensor_type & 0xFF,
@@ -790,9 +824,9 @@ class GimbalControl:
 
     def _pack_power_ctrl(self, sensor_type: int, sensor_id: int, power_on: int) -> bytes:
         payload = struct.pack(
-            "<HHB",
-            sensor_type & 0xFFFF,
-            sensor_id & 0xFFFF,
+            "<BBB",
+            sensor_type & 0xFF,
+            sensor_id & 0xFF,
             power_on & 0xFF,
         )
         header = struct.pack("<BiIB", 1, TYPE_POWER_CTRL, len(payload), 0)
