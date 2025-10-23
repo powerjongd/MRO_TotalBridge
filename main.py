@@ -44,6 +44,12 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--no-console-hud", action="store_true", help="Disable periodic console HUD.")
     p.add_argument("--hud-interval", type=float, default=1.0, help="Console HUD interval seconds (default: 1.0)")
 
+    # console logging toggle
+    log_group = p.add_mutually_exclusive_group()
+    log_group.add_argument("--console-log", dest="console_log", action="store_true", help="Force-enable console log output.")
+    log_group.add_argument("--no-console-log", dest="console_log", action="store_false", help="Disable console log output.")
+    p.set_defaults(console_log=None)
+
     # Bridge overrides
     p.add_argument("--bridge-ip", type=str, help="Bridge bind IP (TCP/UDP).")
     p.add_argument("--bridge-tcp", type=int, help="Bridge TCP port.")
@@ -149,6 +155,8 @@ def apply_cli_overrides(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
         b["predefined_dir"] = args.predefined_dir
     if args.image_source_mode is not None:
         b["image_source_mode"] = args.image_source_mode
+    if getattr(args, "console_log", None) is not None:
+        b["console_echo"] = bool(args.console_log)
 
     # Gimbal
     g = cfg.setdefault("gimbal", {})
@@ -176,7 +184,13 @@ def apply_cli_overrides(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
     if args.relay_proc_port is not None: r["dst_proc_port"] = int(args.relay_proc_port)
 
 
-def make_log_cb(logger, prefix: str):
+def make_log_cb(logger, prefix: str, enabled: bool):
+    if not enabled:
+        def _noop(*_args, **_kwargs) -> None:
+            return None
+
+        return _noop
+
     def _log(msg: str, *args, **kwargs) -> None:
         """Proxy logger that enforces a prefix while supporting %-style args."""
 
@@ -189,9 +203,13 @@ def make_log_cb(logger, prefix: str):
     return _log
 
 
-def make_status_cb(logger, name: str):
-    def _status(s: str):
+def make_status_cb(logger, name: str, enabled: bool):
+    if not enabled:
+        return lambda *_args, **_kwargs: None
+
+    def _status(s: str) -> None:
         logger.info("[%s][STATUS] %s", name, s)
+
     return _status
 
 
@@ -214,15 +232,17 @@ def main() -> None:
     gui_possible = has_display() and (not args.no_gui)
     headless = not gui_possible
 
+    console_enabled = bool(cfg_dict.get("bridge", {}).get("console_echo", True))
+
     # 4) 헤드리스면 Bridge IP/TCP/UDP 없을 때 콘솔에서 입력
     if headless:
         prompt_if_missing_headless(args, cfg_dict, log)
 
     # 5) 인스턴스 생성
-    bridge_log = make_log_cb(log, "[BRIDGE]")
-    gimbal_log = make_log_cb(log, "[GIMBAL]")
-    relay_log  = make_log_cb(log, "[RELAY]")
-    rover_log  = make_log_cb(log, "[ROVER]")
+    bridge_log = make_log_cb(log, "[BRIDGE]", console_enabled)
+    gimbal_log = make_log_cb(log, "[GIMBAL]", console_enabled)
+    relay_log  = make_log_cb(log, "[RELAY]", console_enabled)
+    rover_log  = make_log_cb(log, "[ROVER]", console_enabled)
 
     gimbal_cfg = cfg_dict.get("gimbal", {})
     method = str(gimbal_cfg.get("control_method", "tcp")).lower()
@@ -240,7 +260,7 @@ def main() -> None:
     bridge = ImageStreamBridge(
         log_cb=bridge_log,
         preview_cb=None,  # GUI 미리보기는 UI 쪽에서 연결
-        status_cb=make_status_cb(log, "BRIDGE"),
+        status_cb=make_status_cb(log, "BRIDGE", console_enabled),
         settings=bridge_cfg,
         zoom_update_cb=zoom_state.set,
     )
@@ -249,7 +269,7 @@ def main() -> None:
 
     gimbal = GimbalControl(
         log_cb=gimbal_log,
-        status_cb=make_status_cb(log, "GIMBAL"),
+        status_cb=make_status_cb(log, "GIMBAL", console_enabled),
         settings=gimbal_cfg,
         zoom_update_cb=zoom_state.set,
     )
@@ -266,12 +286,12 @@ def main() -> None:
     bridge.configure_gimbal_forwarding(sensor_type, sensor_id)
     relay = UdpRelay(
         log_cb=relay_log,
-        status_cb=make_status_cb(log, "RELAY"),
+        status_cb=make_status_cb(log, "RELAY", console_enabled),
         settings=cfg_dict.get("relay", {}),
     )
     rover = RoverRelayLogger(
         log_cb=rover_log,
-        status_cb=make_status_cb(log, "ROVER"),
+        status_cb=make_status_cb(log, "ROVER", console_enabled),
         settings=cfg_dict.get("rover", {}),
     )
     relay.register_rover_logger(rover)

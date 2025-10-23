@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+import queue
 import socket
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from .log_parsers import UNIFIED_CSV_HEADER, RoverFeedbackCsvFormatter
+
+
+CSV_LOG_WORKER_SLEEP = 0.02
 
 
 class RoverRelayLogger:
@@ -46,6 +50,14 @@ class RoverRelayLogger:
         self._feedback_logged_count = 0
         self._feedback_last_ts = 0.0
         self._feedback_log_error = ""
+        self._feedback_log_closing = False
+        self._feedback_log_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._feedback_log_worker = threading.Thread(
+            target=self._feedback_log_writer_loop,
+            name="rover-csv-writer",
+            daemon=True,
+        )
+        self._feedback_log_worker.start()
 
         self._relay: Optional["UdpRelay"] = None
         self._feedback_formatter = RoverFeedbackCsvFormatter()
@@ -234,16 +246,24 @@ class RoverRelayLogger:
             header=UNIFIED_CSV_HEADER,
             reset_counter=reset_counter,
         )
+        self._feedback_log_closing = False
         if reset_counter:
             self._feedback_formatter.reset()
 
     def _close_logs(self) -> None:
+        with self._feedback_log_lock:
+            closing = bool(self._feedback_log_file)
+            if closing:
+                self._feedback_log_closing = True
+        if closing:
+            self._feedback_log_queue.join()
         self._close_stream_log(
             kind="feedback",
             file_attr="_feedback_log_file",
             lock=self._feedback_log_lock,
             error_attr="_feedback_log_error",
         )
+        self._feedback_log_closing = False
 
     def _open_stream_log(
         self,
@@ -376,26 +396,56 @@ class RoverRelayLogger:
             return
         with lock:
             fh = getattr(self, file_attr)
-            if fh is None:
+            if fh is None or self._feedback_log_closing:
                 return
+        try:
+            row = self._feedback_formatter.format_packet(data)
+        except ValueError as e:
+            with lock:
+                setattr(self, error_attr, str(e))
+            return
+        self._feedback_log_queue.put(row)
+
+    def _feedback_log_writer_loop(self) -> None:
+        while True:
             try:
-                row = self._feedback_formatter.format_packet(data)
-                fh.write(row + "\n")
-                fh.flush()
-                now = time.time()
-                setattr(self, counter_attr, getattr(self, counter_attr) + 1)
-                setattr(self, last_ts_attr, now)
-                setattr(self, error_attr, "")
-            except ValueError as e:
-                setattr(self, error_attr, str(e))
-            except Exception as e:
-                setattr(self, error_attr, str(e))
+                item = self._feedback_log_queue.get()
+            except Exception:
+                return
+            should_break = item is None
+            try:
+                if should_break:
+                    break
+                line = str(item)
+                with self._feedback_log_lock:
+                    fh = self._feedback_log_file
+                if not fh:
+                    continue
                 try:
-                    fh.close()
-                except Exception:
-                    pass
-                setattr(self, file_attr, None)
-                self._log_status(f"feedback log write error: {e}")
+                    fh.write(line + "\n")
+                    fh.flush()
+                except Exception as exc:  # noqa: BLE001
+                    with self._feedback_log_lock:
+                        self._feedback_log_error = str(exc)
+                        current = self._feedback_log_file
+                        self._feedback_log_file = None
+                    if current:
+                        try:
+                            current.close()
+                        except Exception:
+                            pass
+                    self._log_status(f"feedback log write error: {exc}")
+                else:
+                    now = time.time()
+                    with self._feedback_log_lock:
+                        self._feedback_logged_count += 1
+                        self._feedback_last_ts = now
+                        self._feedback_log_error = ""
+            finally:
+                self._feedback_log_queue.task_done()
+            if should_break:
+                break
+            time.sleep(CSV_LOG_WORKER_SLEEP)
 
 
 # 타입 힌트를 위한 순환 참조 방지

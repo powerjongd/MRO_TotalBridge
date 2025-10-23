@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import queue
 import socket
 import struct
 import threading
@@ -18,6 +19,9 @@ except ImportError:
 
 from network import gazebo_relay_icd as relay_icd
 from .log_parsers import UNIFIED_CSV_HEADER, format_drone_csv_row
+
+
+CSV_LOG_WORKER_SLEEP = 0.02
 
 class UdpRelay:
     """
@@ -71,6 +75,14 @@ class UdpRelay:
         self._gazebo_logging_enabled = bool(self.s.get("enable_gazebo_logging", True))
         self.s["enable_gazebo_logging"] = self._gazebo_logging_enabled
         self._gazebo_log_block_reason = ""
+        self._gazebo_log_closing = False
+        self._gazebo_log_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._gazebo_log_writer = threading.Thread(
+            target=self._gazebo_log_worker_loop,
+            name="gazebo-csv-writer",
+            daemon=True,
+        )
+        self._gazebo_log_writer.start()
 
         self._rover_logger: Optional["RoverRelayLogger"] = None
 
@@ -507,6 +519,7 @@ class UdpRelay:
                 self._gazebo_log_active = False
                 self._gazebo_log_error = reason or ""
                 self._gazebo_log_block_reason = reason or ""
+                self._gazebo_log_closing = False
                 return
 
             self._gazebo_log_block_reason = ""
@@ -521,10 +534,12 @@ class UdpRelay:
                     self._gazebo_log_count = 0
                 self._gazebo_log_active = False
                 self._gazebo_log_error = ""
+                self._gazebo_log_closing = False
                 return
 
             if self._gazebo_log_file and not reset_counter:
                 # 이미 열린 파일을 계속 사용
+                self._gazebo_log_closing = False
                 return
 
             if self._gazebo_log_file:
@@ -548,26 +563,38 @@ class UdpRelay:
                 self._gazebo_log_error = ""
                 self._gazebo_log_start_ts = time.time()
                 self._gazebo_log_last_ts = self._gazebo_log_start_ts
+                self._gazebo_log_closing = False
             except Exception as e:
                 self._gazebo_log_error = str(e)
                 self._gazebo_log_active = False
                 self._gazebo_log_file = None
+                self._gazebo_log_closing = False
                 self.log(f"[RELAY] Gazebo log open error: {e}")
 
     def _close_gazebo_log(self) -> None:
         with self._gazebo_log_lock:
-            if self._gazebo_log_file:
+            closing = bool(self._gazebo_log_file)
+            if closing:
+                self._gazebo_log_closing = True
+            else:
+                self._gazebo_log_closing = False
+        if closing:
+            self._gazebo_log_queue.join()
+        with self._gazebo_log_lock:
+            fh = self._gazebo_log_file
+            if fh:
                 try:
-                    self._gazebo_log_file.flush()
+                    fh.flush()
                 except Exception:
                     pass
                 try:
-                    self._gazebo_log_file.close()
+                    fh.close()
                 except Exception:
                     pass
             self._gazebo_log_file = None
             self._gazebo_log_active = False
             self._gazebo_log_block_reason = ""
+            self._gazebo_log_closing = False
 
     def _write_gazebo_log(
         self,
@@ -578,36 +605,63 @@ class UdpRelay:
         angular_velocity: tuple[float, float, float],
     ) -> None:
         with self._gazebo_log_lock:
-            fh = self._gazebo_log_file
-            if not fh:
+            if self._gazebo_log_file is None or self._gazebo_log_closing:
                 return
+        try:
+            row = format_drone_csv_row(
+                time_usec=time_usec,
+                position=position,
+                orientation_wxyz=orientation_wxyz,
+                angular_velocity=angular_velocity,
+            )
+        except ValueError as e:
+            with self._gazebo_log_lock:
+                self._gazebo_log_error = str(e)
+            return
+        self._gazebo_log_queue.put(row)
+
+    def _gazebo_log_worker_loop(self) -> None:
+        while True:
             try:
-                row = format_drone_csv_row(
-                    time_usec=time_usec,
-                    position=position,
-                    orientation_wxyz=orientation_wxyz,
-                    angular_velocity=angular_velocity,
-                )
-                fh.write(row + "\n")
-                fh.flush()
-                now = time.time()
-                self._gazebo_log_count += 1
-                self._gazebo_log_last_ts = now
-                self._gazebo_log_active = True
-                self._gazebo_log_error = ""
-            except ValueError as e:
-                self._gazebo_log_error = str(e)
+                item = self._gazebo_log_queue.get()
+            except Exception:
                 return
-            except Exception as e:
-                self._gazebo_log_error = str(e)
-                self._gazebo_log_active = False
+            should_break = item is None
+            try:
+                if should_break:
+                    break
+                line = str(item)
+                with self._gazebo_log_lock:
+                    fh = self._gazebo_log_file
+                if not fh:
+                    continue
                 try:
-                    if fh:
-                        fh.close()
-                except Exception:
-                    pass
-                self._gazebo_log_file = None
-                self.log(f"[RELAY] Gazebo log write error: {e}")
+                    fh.write(line + "\n")
+                    fh.flush()
+                except Exception as exc:  # noqa: BLE001
+                    with self._gazebo_log_lock:
+                        self._gazebo_log_error = str(exc)
+                        self._gazebo_log_active = False
+                        current = self._gazebo_log_file
+                        self._gazebo_log_file = None
+                    if current:
+                        try:
+                            current.close()
+                        except Exception:
+                            pass
+                    self.log(f"[RELAY] Gazebo log write error: {exc}")
+                else:
+                    now = time.time()
+                    with self._gazebo_log_lock:
+                        self._gazebo_log_count += 1
+                        self._gazebo_log_last_ts = now
+                        self._gazebo_log_active = True
+                        self._gazebo_log_error = ""
+            finally:
+                self._gazebo_log_queue.task_done()
+            if should_break:
+                break
+            time.sleep(CSV_LOG_WORKER_SLEEP)
 
     # ------------- Gazebo 루프 -------------
     def _gazebo_loop(self) -> None:
