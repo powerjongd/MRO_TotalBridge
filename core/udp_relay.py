@@ -699,8 +699,12 @@ class UdpRelay:
                 break
             try:
                 size, _ = sock.recvfrom_into(view)
-            except OSError:
-                break
+            except OSError as exc:
+                if self.stop_ev.is_set():
+                    break
+                self.log(f"[RELAY] gazebo recv error: {exc}")
+                time.sleep(0.01)
+                continue
             except Exception as e:
                 self.log(f"[RELAY] gazebo loop error: {e}")
                 continue
@@ -849,8 +853,12 @@ class UdpRelay:
                     rx_cnt = 0
                     last_log = time.time()
 
-            except OSError:
-                break
+            except OSError as exc:
+                if self.stop_ev.is_set():
+                    break
+                self.log(f"[RELAY] distance raw udp recv error: {exc}")
+                time.sleep(0.01)
+                continue
             except Exception as e:
                 self.log(f"[RELAY] distance raw udp error: {e}")
 
