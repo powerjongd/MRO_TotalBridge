@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from .log_parsers import UNIFIED_CSV_HEADER, RoverFeedbackCsvFormatter
 
 
-CSV_LOG_WORKER_SLEEP = 0.02
+_FEEDBACK_LOG_RESET = object()
 
 
 class RoverRelayLogger:
@@ -43,6 +43,7 @@ class RoverRelayLogger:
 
         # Runtime handles/state
         self._feedback_sock: Optional[socket.socket] = None
+        self._feedback_tx_sock: Optional[socket.socket] = None
         self._feedback_dest: Optional[Tuple[str, int]] = None
         self._feedback_thread: Optional[threading.Thread] = None
         self._feedback_log_file: Optional[Any] = None
@@ -51,7 +52,7 @@ class RoverRelayLogger:
         self._feedback_last_ts = 0.0
         self._feedback_log_error = ""
         self._feedback_log_closing = False
-        self._feedback_log_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._feedback_log_queue: "queue.Queue[object]" = queue.Queue()
         self._feedback_log_worker = threading.Thread(
             target=self._feedback_log_writer_loop,
             name="rover-csv-writer",
@@ -60,7 +61,6 @@ class RoverRelayLogger:
         self._feedback_log_worker.start()
 
         self._relay: Optional["UdpRelay"] = None
-        self._feedback_formatter = RoverFeedbackCsvFormatter()
 
         self._load_settings()
 
@@ -125,6 +125,14 @@ class RoverRelayLogger:
             except Exception:
                 pass
             self._feedback_sock = None
+
+        tx_sock = self._feedback_tx_sock
+        if tx_sock is not None:
+            try:
+                tx_sock.close()
+            except Exception:
+                pass
+            self._feedback_tx_sock = None
 
         thread = self._feedback_thread
         if thread is not None and thread.is_alive():
@@ -220,11 +228,37 @@ class RoverRelayLogger:
     def _prepare_feedback_socket(self) -> None:
         if self._feedback_sock:
             return
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024)
+        except OSError:
+            pass
         sock.bind((self.feedback_listen_ip, self.feedback_listen_port))
         self._feedback_sock = sock
-        self._feedback_dest = self._tuple_or_none(self.feedback_dest_ip, self.feedback_dest_port)
+
+        dest = self._tuple_or_none(self.feedback_dest_ip, self.feedback_dest_port)
+        self._feedback_dest = dest
+
+        tx_sock: Optional[socket.socket] = None
+        if dest:
+            tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                tx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2 * 1024 * 1024)
+            except OSError:
+                pass
+            try:
+                tx_sock.connect(dest)
+            except OSError as exc:
+                self._log_status(f"feedback dest connect error: {exc}")
+                try:
+                    tx_sock.close()
+                except Exception:
+                    pass
+                tx_sock = None
+        self._feedback_tx_sock = tx_sock
+
         self._feedback_logged_count = 0
         self._feedback_last_ts = 0.0
         self._feedback_log_error = ""
@@ -248,7 +282,17 @@ class RoverRelayLogger:
         )
         self._feedback_log_closing = False
         if reset_counter:
-            self._feedback_formatter.reset()
+            self._request_feedback_log_reset()
+
+    def _request_feedback_log_reset(self) -> None:
+        """Notify the log writer to discard cached rover velocity state."""
+
+        try:
+            self._feedback_log_queue.put_nowait(_FEEDBACK_LOG_RESET)
+        except queue.Full:
+            # Dropping the reset is safe; the worker keeps previous state until
+            # more packets arrive, which only affects fallback velocity smoothing.
+            pass
 
     def _close_logs(self) -> None:
         with self._feedback_log_lock:
@@ -333,23 +377,22 @@ class RoverRelayLogger:
                 setattr(self, file_attr, None)
 
     def _feedback_loop(self) -> None:
-        sock_attr, dest_attr, lock, file_attr, counter_attr, last_ts_attr, error_attr, path_attr = (
+        sock_attr, lock, file_attr, error_attr = (
             "_feedback_sock",
-            "_feedback_dest",
             self._feedback_log_lock,
             "_feedback_log_file",
-            "_feedback_logged_count",
-            "_feedback_last_ts",
             "_feedback_log_error",
-            "feedback_log_path",
         )
+
+        buffer = bytearray(65535)
+        view = memoryview(buffer)
 
         while not self._stop_ev.is_set():
             sock = getattr(self, sock_attr)
             if sock is None:
                 break
             try:
-                data, _ = sock.recvfrom(65535)
+                size, _ = sock.recvfrom_into(view)
             except OSError:
                 break
             except Exception as e:  # noqa: BLE001
@@ -358,65 +401,75 @@ class RoverRelayLogger:
                     setattr(self, error_attr, str(e))
                 continue
 
-            if not data:
+            if size <= 0:
                 continue
 
-            dest = getattr(self, dest_attr)
-            if dest:
+            payload_view = view[:size]
+
+            tx_sock = self._feedback_tx_sock
+            if tx_sock is not None:
                 try:
-                    sock.sendto(data, dest)
+                    tx_sock.send(payload_view)
                 except Exception as e:  # noqa: BLE001
                     self._log_status(f"feedback send error: {e}")
                     with lock:
                         setattr(self, error_attr, str(e))
 
-            self._write_feedback_log(
-                data,
+            self._queue_feedback_log(
+                payload_view,
                 lock=lock,
                 file_attr=file_attr,
-                counter_attr=counter_attr,
-                last_ts_attr=last_ts_attr,
                 error_attr=error_attr,
-                path_attr=path_attr,
             )
 
-    def _write_feedback_log(
+    def _queue_feedback_log(
         self,
-        data: bytes,
+        payload_view: memoryview,
         *,
         lock: threading.Lock,
         file_attr: str,
-        counter_attr: str,
-        last_ts_attr: str,
         error_attr: str,
-        path_attr: str,
     ) -> None:
-        path = getattr(self, path_attr)
-        if not path:
-            return
         with lock:
             fh = getattr(self, file_attr)
-            if fh is None or self._feedback_log_closing:
-                return
-        try:
-            row = self._feedback_formatter.format_packet(data)
-        except ValueError as e:
-            with lock:
-                setattr(self, error_attr, str(e))
+            active = fh is not None and not self._feedback_log_closing
+        if not active:
             return
-        self._feedback_log_queue.put(row)
+        try:
+            packet = bytes(payload_view)
+        except MemoryError:
+            with lock:
+                setattr(self, error_attr, "feedback log buffer allocation failed")
+            return
+        self._feedback_log_queue.put(packet)
 
     def _feedback_log_writer_loop(self) -> None:
+        formatter = RoverFeedbackCsvFormatter()
         while True:
             try:
                 item = self._feedback_log_queue.get()
             except Exception:
                 return
-            should_break = item is None
             try:
-                if should_break:
+                if item is None:
                     break
-                line = str(item)
+                if item is _FEEDBACK_LOG_RESET:
+                    formatter.reset()
+                    continue
+                if isinstance(item, memoryview):
+                    payload = item.tobytes()
+                elif isinstance(item, bytes):
+                    payload = item
+                elif isinstance(item, bytearray):
+                    payload = bytes(item)
+                else:
+                    payload = bytes(item)
+                try:
+                    line = formatter.format_packet(payload)
+                except ValueError as exc:
+                    with self._feedback_log_lock:
+                        self._feedback_log_error = str(exc)
+                    continue
                 with self._feedback_log_lock:
                     fh = self._feedback_log_file
                 if not fh:
@@ -443,9 +496,6 @@ class RoverRelayLogger:
                         self._feedback_log_error = ""
             finally:
                 self._feedback_log_queue.task_done()
-            if should_break:
-                break
-            time.sleep(CSV_LOG_WORKER_SLEEP)
 
 
 # 타입 힌트를 위한 순환 참조 방지
