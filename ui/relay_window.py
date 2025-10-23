@@ -344,7 +344,7 @@ class RelaySettingsWindow(tk.Toplevel):
     def on_open_serial(self) -> None:
         try:
             self._apply_to_runtime()
-            self.relay._open_serial_shared()
+            self.relay._open_serial_shared(force=True)
             messagebox.showinfo("OK", f"Serial open attempted on {self.v_serial_port.get()} @ {self.v_baud.get()}")
         except Exception as e:
             messagebox.showerror("Error", f"Open serial failed:\n{e}")
