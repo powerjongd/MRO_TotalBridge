@@ -224,15 +224,6 @@ def main() -> None:
     relay_log  = make_log_cb(log, "[RELAY]")
     rover_log  = make_log_cb(log, "[ROVER]")
 
-    bridge_cfg = cfg_dict.get("bridge", {})
-
-    bridge = ImageStreamBridge(
-        log_cb=bridge_log,
-        preview_cb=None,  # GUI 미리보기는 UI 쪽에서 연결
-        status_cb=make_status_cb(log, "BRIDGE"),
-        settings=bridge_cfg,
-    )
-
     gimbal_cfg = cfg_dict.get("gimbal", {})
     method = str(gimbal_cfg.get("control_method", "tcp")).lower()
     if method not in ("tcp", "mavlink"):
@@ -243,6 +234,17 @@ def main() -> None:
     except (TypeError, ValueError):
         initial_zoom = 1.0
     zoom_state = ObservableFloat(initial_zoom)
+
+    bridge_cfg = cfg_dict.get("bridge", {})
+
+    bridge = ImageStreamBridge(
+        log_cb=bridge_log,
+        preview_cb=None,  # GUI 미리보기는 UI 쪽에서 연결
+        status_cb=make_status_cb(log, "BRIDGE"),
+        settings=bridge_cfg,
+        zoom_update_cb=zoom_state.set,
+    )
+
     zoom_state.subscribe(bridge.set_zoom_scale)
 
     gimbal = GimbalControl(
@@ -252,7 +254,6 @@ def main() -> None:
         zoom_update_cb=zoom_state.set,
     )
 
-    bridge.register_zoom_update_callback(zoom_state.set)
     bridge.attach_gimbal_controller(gimbal)
     try:
         sensor_type = int(bridge_cfg.get("gimbal_sensor_type", 0))

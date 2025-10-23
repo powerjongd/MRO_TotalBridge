@@ -10,7 +10,7 @@ import struct
 import threading
 import time
 import datetime
-from typing import Callable, Optional, Dict, Any, Tuple
+from typing import Callable, Optional, Dict, Any, Tuple, List
 
 try:
     from PIL import Image  # 미리보기 썸네일 생성에 사용될 수 있음(옵션)
@@ -58,6 +58,7 @@ class ImageStreamBridge:
         preview_cb: Optional[Callable[[bytes], None]],
         status_cb: Optional[Callable[[str], None]],
         settings: Dict[str, Any],
+        zoom_update_cb: Optional[Callable[[float], None]] = None,
     ) -> None:
         self.log = log_cb
         self.preview_cb = preview_cb
@@ -95,7 +96,8 @@ class ImageStreamBridge:
         except Exception:
             self._gimbal_sensor_id = 0
 
-        self._zoom_update_cb: Optional[Callable[[float], None]] = None
+        self._zoom_cb_lock = threading.Lock()
+        self._zoom_callbacks: List[Callable[[float], None]] = []
 
 
         # runtime
@@ -119,6 +121,9 @@ class ImageStreamBridge:
             "received_at": None,   # datetime or None
             "saved_path": None,    # 마지막으로 디스크에 쓴 파일 경로
         }
+
+        if zoom_update_cb is not None:
+            self.register_zoom_update_callback(zoom_update_cb)
 
         self._prepare_dirs()
         self._sync_next_number()
@@ -220,15 +225,31 @@ class ImageStreamBridge:
         self._gimbal_sensor_type = int(sensor_type)
         self._gimbal_sensor_id = int(sensor_id)
 
-    def register_zoom_update_callback(self, callback: Optional[Callable[[float], None]]) -> None:
-        """Connects a callback invoked whenever the applied zoom scale changes."""
+    def register_zoom_update_callback(
+        self, callback: Optional[Callable[[float], None]]
+    ) -> Callable[[], None]:
+        """Register *callback* to be invoked when the zoom scale changes.
 
-        self._zoom_update_cb = callback
-        if callback:
-            try:
-                callback(self._zoom_scale)
-            except Exception:
-                pass
+        Returns an unsubscribe function. If *callback* is ``None`` a no-op
+        unsubscribe is returned for convenience.
+        """
+
+        if callback is None:
+            return lambda: None
+
+        with self._zoom_cb_lock:
+            self._zoom_callbacks.append(callback)
+
+        try:
+            callback(self._zoom_scale)
+        except Exception:
+            pass
+
+        def _unsubscribe() -> None:
+            with self._zoom_cb_lock:
+                self._zoom_callbacks = [cb for cb in self._zoom_callbacks if cb is not callback]
+
+        return _unsubscribe
 
     # --------------- TCP Server ---------------
 
@@ -584,8 +605,9 @@ class ImageStreamBridge:
         self.log(f"[BRIDGE] zoom scale -> {self._zoom_scale:.2f}x")
         if latest_raw:
             self._publish_zoomed_frame(latest_raw, update_timestamp=False)
-        cb = self._zoom_update_cb
-        if cb:
+        with self._zoom_cb_lock:
+            callbacks = list(self._zoom_callbacks)
+        for cb in callbacks:
             try:
                 cb(self._zoom_scale)
             except Exception:

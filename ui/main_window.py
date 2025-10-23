@@ -387,11 +387,12 @@ class MainWindow(tk.Tk):
                 text="Stop Image Stream Module" if running else "Start Image Stream Module"
             )
 
-            bridge_zoom = bridge_status.get("zoom_scale")
-            if isinstance(bridge_zoom, (int, float)):
-                zoom_value = float(bridge_zoom)
-                if (not self.zoom_state) or abs(zoom_value - self._current_zoom_value) > 1e-3:
-                    self._update_zoom_label(zoom_value)
+            if not self.zoom_state:
+                bridge_zoom = bridge_status.get("zoom_scale")
+                if isinstance(bridge_zoom, (int, float)):
+                    zoom_value = float(bridge_zoom)
+                    if abs(zoom_value - self._current_zoom_value) > 1e-3:
+                        self._update_zoom_label(zoom_value)
 
             # Gimbal 상태
             if hasattr(self.gimbal, "get_status"):
@@ -412,9 +413,10 @@ class MainWindow(tk.Tk):
                     if cfg_method in ("tcp", "mavlink") and self.gimbal_control_method_var.get() != cfg_method:
                         self.gimbal_control_method_var.set(cfg_method)
                 self._set_gimbal_status(f"{'Activated' if act else 'Deactivated'} ({display})")
-                zoom_val = st.get("zoom_scale")
-                if isinstance(zoom_val, (int, float)):
-                    self._update_zoom_label(float(zoom_val))
+                if not self.zoom_state:
+                    zoom_val = st.get("zoom_scale")
+                    if isinstance(zoom_val, (int, float)):
+                        self._update_zoom_label(float(zoom_val))
             else:
                 self._set_gimbal_status("Unknown")
 
