@@ -882,7 +882,11 @@ class GimbalControl:
     ) -> Tuple[float, float, float]:
         """Convert bridge roll/pitch/yaw (or axis rates) into the simulator axis order."""
 
-        return float(roll_deg), float(pitch_deg), float(yaw_deg)
+        # Unreal Engine's FRotator stores angles as (Pitch, Yaw, Roll).  The generator reads
+        # our quaternion using that ordering, so the value we label as "roll" in the bridge
+        # must be written into the simulator's *yaw* slot, pitch into roll, and yaw into
+        # pitch to make the round-trip (bridge → quaternion → Unreal) match the UI labels.
+        return float(pitch_deg), float(yaw_deg), float(roll_deg)
 
     @staticmethod
     def _sim_to_bridge_rpy(
@@ -890,7 +894,10 @@ class GimbalControl:
     ) -> Tuple[float, float, float]:
         """Convert simulator roll/pitch/yaw (or axis rates) into the bridge storage order."""
 
-        return float(roll_deg), float(pitch_deg), float(yaw_deg)
+        # Inverse of :meth:`_bridge_to_sim_rpy`.  Values coming back from the simulator (or
+        # from MAVLink quaternions expanded with the Unreal convention) arrive as
+        # (Pitch, Yaw, Roll).  Map them back to the bridge's (roll, pitch, yaw).
+        return float(yaw_deg), float(roll_deg), float(pitch_deg)
 
     def _pack_gimbal_ctrl(self, sensor_type: int, sensor_id: int, xyz: List[float], rpy_deg: List[float]) -> bytes:
         sim_roll, sim_pitch, sim_yaw = self._bridge_to_sim_rpy(float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2]))

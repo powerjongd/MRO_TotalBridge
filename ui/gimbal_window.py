@@ -301,7 +301,8 @@ class GimbalControlsWindow(tk.Toplevel):
         self.cur_x = tk.StringVar(value="-")
         self.cur_y = tk.StringVar(value="-")
         self.cur_z = tk.StringVar(value="-")
-        # Simulator axes match bridge storage: roll, pitch, yaw in the same order
+        # Bridge keeps roll/pitch/yaw in its own order; conversions to simulator axes
+        # happen inside the controller before quaternions are emitted.
         self.cur_roll = tk.StringVar(value="-")
         self.cur_pitch = tk.StringVar(value="-")
         self.cur_yaw = tk.StringVar(value="-")
