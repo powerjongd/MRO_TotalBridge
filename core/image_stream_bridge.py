@@ -87,6 +87,14 @@ class ImageStreamBridge:
         self._zoom_requires_processing = self._zoom_scale > 1.0001
         self._logged_zoom_warn = False
 
+        try:
+            self._preview_min_interval = max(
+                0.0, float(settings.get("preview_min_interval", 0.2))
+            )
+        except Exception:
+            self._preview_min_interval = 0.2
+        self._last_preview_monotonic = 0.0
+
         self._gimbal: Optional["GimbalControl"] = None
         try:
             self._gimbal_sensor_type = int(settings.get("gimbal_sensor_type", 0))
@@ -192,6 +200,11 @@ class ImageStreamBridge:
         if "gimbal_sensor_id" in settings:
             try:
                 self._gimbal_sensor_id = int(settings["gimbal_sensor_id"])
+            except Exception:
+                pass
+        if "preview_min_interval" in settings:
+            try:
+                self._preview_min_interval = max(0.0, float(settings["preview_min_interval"]))
             except Exception:
                 pass
 
@@ -665,13 +678,21 @@ class ImageStreamBridge:
             return None
 
         zoomed = self._apply_zoom_to_jpeg(raw)
+        should_emit_preview = False
         with self._lock:
             self._latest_raw_jpeg = raw
             self._latest_jpeg = zoomed
             self._last_image_meta["kb"] = len(zoomed) / 1024.0
             if update_timestamp:
                 self._last_image_meta["received_at"] = datetime.datetime.now()
-        if self.preview_cb:
+            now = time.monotonic()
+            if self._preview_min_interval <= 0.0:
+                should_emit_preview = True
+                self._last_preview_monotonic = now
+            elif now - self._last_preview_monotonic >= self._preview_min_interval:
+                should_emit_preview = True
+                self._last_preview_monotonic = now
+        if should_emit_preview and self.preview_cb:
             try:
                 self.preview_cb(zoomed)
             except Exception:
