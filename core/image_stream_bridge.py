@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import socket
 import struct
 import threading
 import time
 import datetime
-from typing import Callable, Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any, Tuple, List
 
 try:
     from PIL import Image  # 미리보기 썸네일 생성에 사용될 수 있음(옵션)
@@ -57,6 +58,7 @@ class ImageStreamBridge:
         preview_cb: Optional[Callable[[bytes], None]],
         status_cb: Optional[Callable[[str], None]],
         settings: Dict[str, Any],
+        zoom_update_cb: Optional[Callable[[float], None]] = None,
     ) -> None:
         self.log = log_cb
         self.preview_cb = preview_cb
@@ -84,6 +86,19 @@ class ImageStreamBridge:
         self._zoom_scale = max(1.0, float(settings.get("zoom_scale", 1.0)))
         self._logged_zoom_warn = False
 
+        self._gimbal: Optional["GimbalControl"] = None
+        try:
+            self._gimbal_sensor_type = int(settings.get("gimbal_sensor_type", 0))
+        except Exception:
+            self._gimbal_sensor_type = 0
+        try:
+            self._gimbal_sensor_id = int(settings.get("gimbal_sensor_id", 0))
+        except Exception:
+            self._gimbal_sensor_id = 0
+
+        self._zoom_cb_lock = threading.Lock()
+        self._zoom_callbacks: List[Callable[[float], None]] = []
+
 
         # runtime
         self.is_server_running = threading.Event()
@@ -95,6 +110,7 @@ class ImageStreamBridge:
         self._udp_thread: Optional[threading.Thread] = None
 
         self._lock = threading.Lock()
+        self._latest_raw_jpeg: Optional[bytes] = None
         self._latest_jpeg: Optional[bytes] = None
         self._next_image_number: int = 0  # 다음 저장 번호 (000..999 롤링)
 
@@ -105,6 +121,9 @@ class ImageStreamBridge:
             "received_at": None,   # datetime or None
             "saved_path": None,    # 마지막으로 디스크에 쓴 파일 경로
         }
+
+        if zoom_update_cb is not None:
+            self.register_zoom_update_callback(zoom_update_cb)
 
         self._prepare_dirs()
         self._sync_next_number()
@@ -206,6 +225,32 @@ class ImageStreamBridge:
         self._gimbal_sensor_type = int(sensor_type)
         self._gimbal_sensor_id = int(sensor_id)
 
+    def register_zoom_update_callback(
+        self, callback: Optional[Callable[[float], None]]
+    ) -> Callable[[], None]:
+        """Register *callback* to be invoked when the zoom scale changes.
+
+        Returns an unsubscribe function. If *callback* is ``None`` a no-op
+        unsubscribe is returned for convenience.
+        """
+
+        if callback is None:
+            return lambda: None
+
+        with self._zoom_cb_lock:
+            self._zoom_callbacks.append(callback)
+
+        try:
+            callback(self._zoom_scale)
+        except Exception:
+            pass
+
+        def _unsubscribe() -> None:
+            with self._zoom_cb_lock:
+                self._zoom_callbacks = [cb for cb in self._zoom_callbacks if cb is not callback]
+
+        return _unsubscribe
+
     # --------------- TCP Server ---------------
 
     def _open_tcp(self) -> None:
@@ -296,7 +341,7 @@ class ImageStreamBridge:
                 self.log(f"[BRIDGE] {cmd_name}: missing uint32 img_num")
 
         elif cmd_id == CMD_SET_GIMBAL:
-            self.log(f"[BRIDGE] {cmd_name} received (reserved)")
+            self._handle_set_gimbal(cmd_payload)
 
         elif cmd_id == CMD_SET_ZOOM_RATIO:
             if len(cmd_payload) < 4:
@@ -321,20 +366,52 @@ class ImageStreamBridge:
 
     def _handle_req_capture(self) -> None:
         with self._lock:
-            if not self._latest_jpeg:
-                self.log("[BRIDGE] no image to capture (UDP not received yet)")
-                return
-            fn = os.path.join(self.realtime_dir, f"{self._next_image_number:03d}.jpg")
+            next_num = self._next_image_number
+            fn = os.path.join(self.realtime_dir, f"{next_num:03d}.jpg")
+            latest_jpeg = self._latest_jpeg
+            fallback_src = self._last_image_meta.get("saved_path")
+
+        saved_kb: Optional[float] = None
+        saved_from = "live"
+        write_error: Optional[Exception] = None
+
+        if latest_jpeg:
             try:
                 with open(fn, "wb") as f:
-                    f.write(self._latest_jpeg)
-                # 로그/상태 갱신
-                self._last_image_meta["saved_path"] = fn
-                self.log(f"[BRIDGE] saved image: {fn} | next_num(before)={self._next_image_number:03d}")
-                self._next_image_number = (self._next_image_number + 1) % 1000
-                self.log(f"[BRIDGE] next image number -> {self._next_image_number:03d}")
-            except Exception as e:
-                self.log(f"[BRIDGE] file write error: {e}")
+                    f.write(latest_jpeg)
+                saved_kb = len(latest_jpeg) / 1024.0
+            except Exception as exc:
+                write_error = exc
+        else:
+            write_error = RuntimeError("no in-memory frame to capture")
+
+        if write_error:
+            if fallback_src and os.path.exists(fallback_src):
+                try:
+                    shutil.copy2(fallback_src, fn)
+                    saved_kb = os.path.getsize(fn) / 1024.0
+                    saved_from = "fallback"
+                    self.log(
+                        f"[BRIDGE] capture fallback: reused {fallback_src} due to {write_error}"
+                    )
+                except Exception as copy_exc:
+                    self.log(
+                        f"[BRIDGE] capture fallback failed: {copy_exc} (original: {write_error})"
+                    )
+                    return
+            else:
+                self.log(f"[BRIDGE] capture failed ({write_error}); no previous image to copy")
+                return
+
+        with self._lock:
+            self._last_image_meta["saved_path"] = fn
+            if saved_kb is not None:
+                self._last_image_meta["kb"] = saved_kb
+            self.log(
+                f"[BRIDGE] saved image ({saved_from}): {fn} | next_num(before)={next_num:03d}"
+            )
+            self._next_image_number = (self._next_image_number + 1) % 1000
+            self.log(f"[BRIDGE] next image number -> {self._next_image_number:03d}")
 
     def _handle_set_count(self, count_num: int) -> None:
         with self._lock:
@@ -481,15 +558,12 @@ class ImageStreamBridge:
                 if len(self._reasm["recv"]) == self._reasm["total"]:
                     data = bytes(self._reasm["buf"][: self._reasm["maxpos"]])
                     if len(data) >= 4 and data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9"):
-                        with self._lock:
-                            self._latest_jpeg = data
-                            self._last_image_meta["kb"] = len(data) / 1024.0
-                            self._last_image_meta["received_at"] = datetime.datetime.now()
-                        if self.preview_cb:
-                            try: self.preview_cb(data)
-                            except Exception: pass
+                        zoomed = self._publish_zoomed_frame(data, update_timestamp=True)
                         elapsed = time.time() - self._reasm["start"]
-                        self.log(f"[BRIDGE] image received: {len(data)/1024:.1f} KB in {elapsed:.2f}s | next={self._next_image_number:03d}")
+                        size_kb = len(zoomed) / 1024.0 if zoomed else len(data) / 1024.0
+                        self.log(
+                            f"[BRIDGE] image received: {size_kb:.1f} KB in {elapsed:.2f}s | next={self._next_image_number:03d}"
+                        )
                     else:
                         self.log("[BRIDGE] invalid JPEG received")
                     self._reasm = None
@@ -527,7 +601,17 @@ class ImageStreamBridge:
             if abs(value - self._zoom_scale) < 1e-3:
                 return
             self._zoom_scale = value
+            latest_raw = self._latest_raw_jpeg
         self.log(f"[BRIDGE] zoom scale -> {self._zoom_scale:.2f}x")
+        if latest_raw:
+            self._publish_zoomed_frame(latest_raw, update_timestamp=False)
+        with self._zoom_cb_lock:
+            callbacks = list(self._zoom_callbacks)
+        for cb in callbacks:
+            try:
+                cb(self._zoom_scale)
+            except Exception:
+                pass
 
     def _send_zoom_ratio_ack(self, conn: socket.socket, zoom_ratio: float) -> None:
         ts_sec, ts_nsec = int(time.time()), time.time_ns() % 1_000_000_000
@@ -569,6 +653,24 @@ class ImageStreamBridge:
         except Exception as exc:
             self.log(f"[BRIDGE] zoom processing failed: {exc}")
         return jpeg
+
+    def _publish_zoomed_frame(self, raw: bytes, *, update_timestamp: bool) -> Optional[bytes]:
+        if not raw:
+            return None
+
+        zoomed = self._apply_zoom_to_jpeg(raw)
+        with self._lock:
+            self._latest_raw_jpeg = raw
+            self._latest_jpeg = zoomed
+            self._last_image_meta["kb"] = len(zoomed) / 1024.0
+            if update_timestamp:
+                self._last_image_meta["received_at"] = datetime.datetime.now()
+        if self.preview_cb:
+            try:
+                self.preview_cb(zoomed)
+            except Exception:
+                pass
+        return zoomed
 
     @staticmethod
     def _parse_udp_header(data: bytes) -> Optional[Dict[str, int]]:
