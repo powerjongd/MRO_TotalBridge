@@ -177,9 +177,15 @@ def apply_cli_overrides(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
 
 
 def make_log_cb(logger, prefix: str):
-    def _log(msg: str):
-        # msg 자체에 prefix가 있을 수 있지만, 통일된 앞머리 보장을 위해 강제 prefix
-        logger.info("%s %s", prefix, msg)
+    def _log(msg: str, *args, **kwargs) -> None:
+        """Proxy logger that enforces a prefix while supporting %-style args."""
+
+        if args:
+            logger.info("%s " + msg, prefix, *args, **kwargs)
+        else:
+            # msg 자체에 prefix가 있을 수 있지만, 통일된 앞머리 보장을 위해 강제 prefix
+            logger.info("%s %s", prefix, msg, **kwargs)
+
     return _log
 
 
