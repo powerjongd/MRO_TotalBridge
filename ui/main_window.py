@@ -110,6 +110,14 @@ class MainWindow(tk.Tk):
         self._last_photo = None
         self._last_img_ts = 0.0
         self._preview_paused = False
+        self._preview_lock = threading.Lock()
+        self._preview_busy = False
+        self._preview_last_monotonic = 0.0
+        try:
+            preview_interval = float(self.cfg.get("bridge", {}).get("preview_min_interval", 0.2))
+            self._preview_gui_min_interval = max(0.0, preview_interval)
+        except Exception:
+            self._preview_gui_min_interval = 0.2
 
         self.bridge_status_var = tk.StringVar(value="Image Stream Module: Stopped (Realtime)")
         self.gimbal_status_var = tk.StringVar(value="Gimbal: Deactivated")
@@ -308,8 +316,24 @@ class MainWindow(tk.Tk):
         if self._preview_paused:
             return
 
+        with self._preview_lock:
+            if self._preview_paused:
+                return
+            now = time.monotonic()
+            if (
+                self._preview_gui_min_interval > 0.0
+                and now - self._preview_last_monotonic < self._preview_gui_min_interval
+            ):
+                return
+            if self._preview_busy:
+                return
+            self._preview_busy = True
+            self._preview_last_monotonic = now
+
         def _update():
             try:
+                if self._preview_paused:
+                    return
                 img = Image.open(io.BytesIO(jpeg_bytes))
                 # 라벨 크기에 맞춰 썸네일
                 w = max(self.preview_label.winfo_width(), 1)
@@ -332,6 +356,9 @@ class MainWindow(tk.Tk):
                 self.preview_label.configure(text=f"Preview error: {e}", image="")
                 self.preview_label.image = None
                 self._last_photo = None
+            finally:
+                with self._preview_lock:
+                    self._preview_busy = False
 
         # GUI 스레드에서 실행
         self.after(0, _update)
