@@ -802,6 +802,7 @@ class GimbalControl:
                     with self._lock:
                         r, p, y = self.rpy_cur
                         wx_b, wy_b, wz_b = self._rpy_rate
+                        gimbal_id = int(self.mavlink_sensor_id) & 0xFF
                     r_sim, p_sim, y_sim = self._bridge_to_sim_rpy(r, p, y)
                     r_sim = self._normalize_angle(r_sim)
                     p_sim = self._normalize_angle(p_sim)
@@ -810,9 +811,18 @@ class GimbalControl:
                     wx, wy, wz = self._bridge_to_sim_rpy(wx_b, wy_b, wz_b)
                     time_boot_ms = int((now - t0) * 1000.0)
                     self.mav.mav.gimbal_device_attitude_status_send(
-                        self.mav_sys_id, self.mav_comp_id,
-                        time_boot_ms, GIMBAL_STATUS_FLAGS,
-                        [qx, qy, qz, qw], wx, wy, wz, 0
+                        self.mav_sys_id,
+                        self.mav_comp_id,
+                        time_boot_ms,
+                        GIMBAL_STATUS_FLAGS,
+                        [qx, qy, qz, qw],
+                        wx,
+                        wy,
+                        wz,
+                        0,
+                        float("nan"),
+                        float("nan"),
+                        gimbal_id,
                     )
                     last_status = now
             except Exception as e:

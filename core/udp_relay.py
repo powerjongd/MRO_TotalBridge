@@ -42,6 +42,9 @@ class UdpRelay:
     DEF_HB_CUSTOM_MODE = 0
     DEF_HB_SYS_STATUS = 4
 
+    SERIAL_RETRY_INTERVAL = 5.0
+    SERIAL_RETRY_SUCCESS_HOLD = 1.0
+
     def __init__(
         self,
         log_cb: Callable[[str], None],
@@ -91,6 +94,8 @@ class UdpRelay:
 
         # 공용 시리얼 (OF + Distance 중계)
         self.mav_ser: Optional[mavutil.mavfile] = None
+        self._serial_lock = threading.Lock()
+        self._serial_retry_at = 0.0
         self.enable_of_serial = bool(self.s.get("enable_optical_flow_serial", True))
         self.s["enable_optical_flow_serial"] = self.enable_of_serial
         self.enable_distance_serial = bool(self.s.get("enable_distance_serial", True))
@@ -140,8 +145,22 @@ class UdpRelay:
     def update_settings(self, s: Dict[str, Any]) -> None:
         log_path_changed = False
         logging_state_changed = False
+        serial_changed = False
+        baud_changed = False
+        serial_flags_changed = False
         with self._lock:
+            prev_port = str(self.s.get("serial_port", "")).strip()
+            prev_baud = int(self.s.get("serial_baud", 115200))
+            prev_flags = (self.enable_of_serial, self.enable_distance_serial)
             self.s.update(s)
+            new_port = str(self.s.get("serial_port", prev_port)).strip()
+            self.s["serial_port"] = new_port
+            if new_port != prev_port:
+                serial_changed = True
+            new_baud = int(self.s.get("serial_baud", prev_baud))
+            self.s["serial_baud"] = new_baud
+            if new_baud != prev_baud:
+                baud_changed = True
             # 스케일/품질
             self.of_scale_pix  = float(self.s.get("of_scale_pix", self.of_scale_pix))
             self.q_base        = int(self.s.get("q_base", self.q_base))
@@ -169,12 +188,14 @@ class UdpRelay:
             self.hb_ds_mode    = int(self.s.get("hb_ds_base_mode", self.hb_ds_mode))
             self.hb_ds_cus     = int(self.s.get("hb_ds_custom_mode", self.hb_ds_cus))
             self.hb_ds_stat    = int(self.s.get("hb_ds_system_status", self.hb_ds_stat))
-            # Distance 모드
+            # Distance 모드 및 플래그
             self.distance_mode = str(self.s.get("distance_mode", self.distance_mode)).lower()
             self.enable_of_serial = bool(self.s.get("enable_optical_flow_serial", self.enable_of_serial))
             self.s["enable_optical_flow_serial"] = self.enable_of_serial
             self.enable_distance_serial = bool(self.s.get("enable_distance_serial", self.enable_distance_serial))
             self.s["enable_distance_serial"] = self.enable_distance_serial
+            if (self.enable_of_serial, self.enable_distance_serial) != prev_flags:
+                serial_flags_changed = True
             new_log_path = str(self.s.get("gazebo_log_path", self.gazebo_log_path)).strip()
             if new_log_path != self.gazebo_log_path:
                 log_path_changed = True
@@ -186,6 +207,10 @@ class UdpRelay:
                 self._gazebo_logging_enabled = new_enabled
             self.s["enable_gazebo_logging"] = self._gazebo_logging_enabled
         self.log("[RELAY] settings updated")
+        if serial_changed or baud_changed or serial_flags_changed:
+            self._drop_serial_connection(schedule_retry=False)
+            if self.running and (self.enable_of_serial or self.enable_distance_serial):
+                self._open_serial_shared(force=True)
         if log_path_changed or logging_state_changed:
             if self.running:
                 self._open_gazebo_log(reset_counter=True)
@@ -249,7 +274,7 @@ class UdpRelay:
             self.log(f"[RELAY] Distance input open error: {e}")
 
         # 공용 시리얼 오픈
-        self._open_serial_shared()
+        self._open_serial_shared(force=True)
 
         # Gazebo 로그 오픈
         self._open_gazebo_log(reset_counter=True)
@@ -305,12 +330,7 @@ class UdpRelay:
             pass
         self.mav_udp = None
 
-        try:
-            if self.mav_ser:
-                self.mav_ser.close()
-        except Exception:
-            pass
-        self.mav_ser = None
+        self._drop_serial_connection(schedule_retry=False)
 
         self._close_gazebo_log()
 
@@ -348,20 +368,81 @@ class UdpRelay:
         return status
 
     # ------------- 내부 유틸 -------------
-    def _open_serial_shared(self) -> None:
-        port = self.s.get("serial_port", "")
+    def _open_serial_shared(self, force: bool = False) -> None:
+        port = str(self.s.get("serial_port", "")).strip()
         baud = int(self.s.get("serial_baud", 115200))
-        if not port:
-            self.log("[RELAY] serial_port empty (opticalflow/dist relay disabled)")
+        with self._serial_lock:
+            if not port:
+                if self.mav_ser:
+                    self.log("[RELAY] serial_port cleared; closing serial")
+                self._drop_serial_connection_locked(schedule_retry=False)
+                self.log("[RELAY] serial_port empty (opticalflow/dist relay disabled)")
+                return
+            if self.mav_ser and not force:
+                return
+            self._drop_serial_connection_locked(schedule_retry=False)
+            try:
+                conn = mavutil.mavlink_connection(
+                    port,
+                    baud=baud,
+                    source_system=self.hb_of_sysid,
+                    source_component=self.hb_of_compid,
+                )
+                try:
+                    conn.mav.mavlink20 = True
+                except Exception:
+                    pass
+                try:
+                    port_handle = getattr(conn, "port", None)
+                    if port_handle and hasattr(port_handle, "reset_input_buffer"):
+                        port_handle.reset_input_buffer()
+                    if port_handle and hasattr(port_handle, "reset_output_buffer"):
+                        port_handle.reset_output_buffer()
+                except Exception:
+                    pass
+                self.mav_ser = conn
+                self._serial_retry_at = time.time() + self.SERIAL_RETRY_SUCCESS_HOLD
+                self.log(f"[RELAY] serial open: {port} @ {baud}")
+            except SerialException as e:
+                self._serial_retry_at = time.time() + self.SERIAL_RETRY_INTERVAL
+                self.log(f"[RELAY] serial error: {e}")
+            except Exception as e:
+                self._serial_retry_at = time.time() + self.SERIAL_RETRY_INTERVAL
+                self.log(f"[RELAY] mavlink open error: {e}")
+
+    def _drop_serial_connection(self, *, schedule_retry: bool = True) -> None:
+        with self._serial_lock:
+            self._drop_serial_connection_locked(schedule_retry=schedule_retry)
+
+    def _drop_serial_connection_locked(self, *, schedule_retry: bool) -> None:
+        if self.mav_ser:
+            try:
+                self.mav_ser.close()
+            except Exception:
+                pass
+        self.mav_ser = None
+        if schedule_retry:
+            self._serial_retry_at = time.time() + self.SERIAL_RETRY_INTERVAL
+        else:
+            self._serial_retry_at = 0.0
+
+    def _ensure_serial_connection(self) -> None:
+        if not (self.enable_of_serial or self.enable_distance_serial):
             return
-        try:
-            # 공용: 같은 포트로 OPTICAL_FLOW, DISTANCE_SENSOR 모두 송신
-            self.mav_ser = mavutil.mavlink_connection(port, baud=baud, source_system=self.hb_of_sysid, source_component=self.hb_of_compid)
-            self.log(f"[RELAY] serial open: {port} @ {baud}")
-        except SerialException as e:
-            self.log(f"[RELAY] serial error: {e}")
-        except Exception as e:
-            self.log(f"[RELAY] mavlink open error: {e}")
+        port = str(self.s.get("serial_port", "")).strip()
+        if not port:
+            return
+        now = time.time()
+        with self._serial_lock:
+            if self.mav_ser:
+                return
+            if now < self._serial_retry_at:
+                return
+        self._open_serial_shared()
+
+    def _handle_serial_send_error(self, context: str, exc: Exception) -> None:
+        self.log(f"[RELAY] {context} error: {exc}")
+        self._drop_serial_connection(schedule_retry=True)
 
     def _emit_status(self, text: str) -> None:
         try:
@@ -670,6 +751,7 @@ class UdpRelay:
                     self.last_distance_update = time.time()
 
                 # 시리얼로 MAVLink DISTANCE_SENSOR 표준 전송 (확장 필드는 시리얼 전송 생략)
+                self._ensure_serial_connection()
                 if self.mav_ser and self.enable_distance_serial:
                     try:
                         self.mav_ser.mav.distance_sensor_send(
@@ -677,7 +759,7 @@ class UdpRelay:
                             int(type_), int(sid), int(orientation), int(covariance)
                         )
                     except Exception as e:
-                        self.log(f"[RELAY] distance serial send error: {e}")
+                        self._handle_serial_send_error("distance serial send", e)
 
                 rx_cnt += 1
                 if time.time() - last_log > 3.0:
@@ -720,6 +802,7 @@ class UdpRelay:
                     else:
                         cur_cm = int(cur if cur > 10 else cur * 100)
 
+                    self._ensure_serial_connection()
                     if self.mav_ser and self.enable_distance_serial:
                         try:
                             self.mav_ser.mav.distance_sensor_send(
@@ -731,7 +814,7 @@ class UdpRelay:
                                 int(getattr(m, "covariance", 0)),
                             )
                         except Exception as e:
-                            self.log(f"[RELAY] distance serial send error: {e}")
+                            self._handle_serial_send_error("distance serial send", e)
 
                     with self._lock:
                         self.current_distance_m = cur_cm / 100.0
@@ -756,12 +839,14 @@ class UdpRelay:
         while not self.stop_ev.is_set():
             now = time.time()
             try:
-                if self.mav_ser:
+                self._ensure_serial_connection()
+                mav_conn = self.mav_ser
+                if mav_conn:
                     # Optical Flow HB
                     if self.enable_of_serial and self.hb_of_rate_hz > 0 and now >= next_of:
-                        self.mav_ser.mav.srcSystem = self.hb_of_sysid
-                        self.mav_ser.mav.srcComponent = self.hb_of_compid
-                        self.mav_ser.mav.heartbeat_send(
+                        mav_conn.mav.srcSystem = self.hb_of_sysid
+                        mav_conn.mav.srcComponent = self.hb_of_compid
+                        mav_conn.mav.heartbeat_send(
                             self.hb_of_type, self.hb_of_autop,
                             self.hb_of_mode, self.hb_of_cus, self.hb_of_stat
                         )
@@ -769,15 +854,15 @@ class UdpRelay:
 
                     # Distance HB
                     if self.enable_distance_serial and self.hb_ds_rate_hz > 0 and now >= next_ds:
-                        self.mav_ser.mav.srcSystem = self.hb_ds_sysid
-                        self.mav_ser.mav.srcComponent = self.hb_ds_compid
-                        self.mav_ser.mav.heartbeat_send(
+                        mav_conn.mav.srcSystem = self.hb_ds_sysid
+                        mav_conn.mav.srcComponent = self.hb_ds_compid
+                        mav_conn.mav.heartbeat_send(
                             self.hb_ds_type, self.hb_ds_autop,
                             self.hb_ds_mode, self.hb_ds_cus, self.hb_ds_stat
                         )
                         next_ds = now + 1.0 / max(0.001, self.hb_ds_rate_hz)
             except Exception as e:
-                self.log(f"[RELAY] HB error: {e}")
+                self._handle_serial_send_error("HB", e)
             time.sleep(0.01)
 
     # ------------- MAV 송신 유틸 -------------
@@ -793,10 +878,12 @@ class UdpRelay:
         ground_distance: float,
     ) -> bool:
         """MAVLink OPTICAL_FLOW (#100) 전송"""
-        if not self.mav_ser or not self.enable_of_serial:
+        self._ensure_serial_connection()
+        mav_conn = self.mav_ser
+        if not mav_conn or not self.enable_of_serial:
             return False
         try:
-            self.mav_ser.mav.optical_flow_send(
+            mav_conn.mav.optical_flow_send(
                 int(time_usec),
                 int(sensor_id) & 0xFF,
                 int(flow_x), int(flow_y),
@@ -806,7 +893,7 @@ class UdpRelay:
             )
             return True
         except Exception as e:
-            self.log(f"[RELAY] optical_flow send error: {e}")
+            self._handle_serial_send_error("optical_flow send", e)
             return False
 
     # ------------- 품질 추정(설정 반영) -------------
