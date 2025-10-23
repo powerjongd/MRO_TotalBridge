@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import queue
 import socket
 import struct
 import threading
@@ -18,6 +19,7 @@ except ImportError:
 
 from network import gazebo_relay_icd as relay_icd
 from .log_parsers import UNIFIED_CSV_HEADER, format_drone_csv_row
+
 
 class UdpRelay:
     """
@@ -71,6 +73,14 @@ class UdpRelay:
         self._gazebo_logging_enabled = bool(self.s.get("enable_gazebo_logging", True))
         self.s["enable_gazebo_logging"] = self._gazebo_logging_enabled
         self._gazebo_log_block_reason = ""
+        self._gazebo_log_closing = False
+        self._gazebo_log_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._gazebo_log_writer = threading.Thread(
+            target=self._gazebo_log_worker_loop,
+            name="gazebo-csv-writer",
+            daemon=True,
+        )
+        self._gazebo_log_writer.start()
 
         self._rover_logger: Optional["RoverRelayLogger"] = None
 
@@ -229,6 +239,10 @@ class UdpRelay:
         # 외부 UDP 송신 소켓 (ExternalCtrl)
         self.sock_ext = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock_ext.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.sock_ext.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2 * 1024 * 1024)
+        except OSError:
+            pass
 
         # Gazebo 수신 소켓
         self.sock_gazebo = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -417,6 +431,14 @@ class UdpRelay:
     def _drop_serial_connection_locked(self, *, schedule_retry: bool) -> None:
         if self.mav_ser:
             try:
+                port_handle = getattr(self.mav_ser, "port", None)
+                if port_handle and hasattr(port_handle, "reset_input_buffer"):
+                    port_handle.reset_input_buffer()
+                if port_handle and hasattr(port_handle, "reset_output_buffer"):
+                    port_handle.reset_output_buffer()
+            except Exception:
+                pass
+            try:
                 self.mav_ser.close()
             except Exception:
                 pass
@@ -507,6 +529,7 @@ class UdpRelay:
                 self._gazebo_log_active = False
                 self._gazebo_log_error = reason or ""
                 self._gazebo_log_block_reason = reason or ""
+                self._gazebo_log_closing = False
                 return
 
             self._gazebo_log_block_reason = ""
@@ -521,10 +544,12 @@ class UdpRelay:
                     self._gazebo_log_count = 0
                 self._gazebo_log_active = False
                 self._gazebo_log_error = ""
+                self._gazebo_log_closing = False
                 return
 
             if self._gazebo_log_file and not reset_counter:
                 # 이미 열린 파일을 계속 사용
+                self._gazebo_log_closing = False
                 return
 
             if self._gazebo_log_file:
@@ -548,26 +573,38 @@ class UdpRelay:
                 self._gazebo_log_error = ""
                 self._gazebo_log_start_ts = time.time()
                 self._gazebo_log_last_ts = self._gazebo_log_start_ts
+                self._gazebo_log_closing = False
             except Exception as e:
                 self._gazebo_log_error = str(e)
                 self._gazebo_log_active = False
                 self._gazebo_log_file = None
+                self._gazebo_log_closing = False
                 self.log(f"[RELAY] Gazebo log open error: {e}")
 
     def _close_gazebo_log(self) -> None:
         with self._gazebo_log_lock:
-            if self._gazebo_log_file:
+            closing = bool(self._gazebo_log_file)
+            if closing:
+                self._gazebo_log_closing = True
+            else:
+                self._gazebo_log_closing = False
+        if closing:
+            self._gazebo_log_queue.join()
+        with self._gazebo_log_lock:
+            fh = self._gazebo_log_file
+            if fh:
                 try:
-                    self._gazebo_log_file.flush()
+                    fh.flush()
                 except Exception:
                     pass
                 try:
-                    self._gazebo_log_file.close()
+                    fh.close()
                 except Exception:
                     pass
             self._gazebo_log_file = None
             self._gazebo_log_active = False
             self._gazebo_log_block_reason = ""
+            self._gazebo_log_closing = False
 
     def _write_gazebo_log(
         self,
@@ -578,36 +615,69 @@ class UdpRelay:
         angular_velocity: tuple[float, float, float],
     ) -> None:
         with self._gazebo_log_lock:
-            fh = self._gazebo_log_file
-            if not fh:
+            active = self._gazebo_log_file is not None and not self._gazebo_log_closing
+        if not active:
+            return
+        self._gazebo_log_queue.put((
+            int(time_usec),
+            tuple(float(v) for v in position),
+            tuple(float(v) for v in orientation_wxyz),
+            tuple(float(v) for v in angular_velocity),
+        ))
+
+    def _gazebo_log_worker_loop(self) -> None:
+        while True:
+            try:
+                item = self._gazebo_log_queue.get()
+            except Exception:
                 return
             try:
-                row = format_drone_csv_row(
-                    time_usec=time_usec,
-                    position=position,
-                    orientation_wxyz=orientation_wxyz,
-                    angular_velocity=angular_velocity,
-                )
-                fh.write(row + "\n")
-                fh.flush()
-                now = time.time()
-                self._gazebo_log_count += 1
-                self._gazebo_log_last_ts = now
-                self._gazebo_log_active = True
-                self._gazebo_log_error = ""
-            except ValueError as e:
-                self._gazebo_log_error = str(e)
-                return
-            except Exception as e:
-                self._gazebo_log_error = str(e)
-                self._gazebo_log_active = False
+                if item is None:
+                    break
                 try:
-                    if fh:
-                        fh.close()
-                except Exception:
-                    pass
-                self._gazebo_log_file = None
-                self.log(f"[RELAY] Gazebo log write error: {e}")
+                    time_usec, position, orientation_wxyz, angular_velocity = item
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    line = format_drone_csv_row(
+                        time_usec=time_usec,
+                        position=position,
+                        orientation_wxyz=orientation_wxyz,
+                        angular_velocity=angular_velocity,
+                    )
+                except ValueError as exc:
+                    with self._gazebo_log_lock:
+                        self._gazebo_log_error = str(exc)
+                        self._gazebo_log_active = False
+                    continue
+                with self._gazebo_log_lock:
+                    fh = self._gazebo_log_file
+                if not fh:
+                    continue
+                try:
+                    fh.write(line + "\n")
+                    fh.flush()
+                except Exception as exc:  # noqa: BLE001
+                    with self._gazebo_log_lock:
+                        self._gazebo_log_error = str(exc)
+                        self._gazebo_log_active = False
+                        current = self._gazebo_log_file
+                        self._gazebo_log_file = None
+                    if current:
+                        try:
+                            current.close()
+                        except Exception:
+                            pass
+                    self.log(f"[RELAY] Gazebo log write error: {exc}")
+                else:
+                    now = time.time()
+                    with self._gazebo_log_lock:
+                        self._gazebo_log_count += 1
+                        self._gazebo_log_last_ts = now
+                        self._gazebo_log_active = True
+                        self._gazebo_log_error = ""
+            finally:
+                self._gazebo_log_queue.task_done()
 
     # ------------- Gazebo 루프 -------------
     def _gazebo_loop(self) -> None:
@@ -620,81 +690,93 @@ class UdpRelay:
         ext_port = int(self.s.get("ext_udp_port", 9091))  # 기본 9091
         dst_tuple = (ext_ip, ext_port)
 
-        while not self.stop_ev.is_set() and self.sock_gazebo:
-            try:
-                pkt, _ = self.sock_gazebo.recvfrom(2048)
-                if not pkt:
-                    continue
+        buffer = bytearray(4096)
+        view = memoryview(buffer)
 
-                # 1) 즉시 relay (원본 그대로)
+        while not self.stop_ev.is_set():
+            sock = self.sock_gazebo
+            if not sock:
+                break
+            try:
+                size, _ = sock.recvfrom_into(view)
+            except OSError:
+                break
+            except Exception as e:
+                self.log(f"[RELAY] gazebo loop error: {e}")
+                continue
+
+            if size <= 0:
+                continue
+
+            payload_view = view[:size]
+
+            ext_sock = self.sock_ext
+            if ext_sock:
                 try:
-                    if self.sock_ext:
-                        self.sock_ext.sendto(pkt, dst_tuple)
+                    ext_sock.sendto(payload_view, dst_tuple)
                 except Exception as e:
                     self.log(f"[RELAY] ext send error: {e}")
 
-                # 2) Optical Flow 가공 송신
-                if len(pkt) < relay_icd.GAZEBO_STRUCT_SIZE:
-                    continue
+            if size < relay_icd.GAZEBO_STRUCT_SIZE:
+                continue
 
+            try:
                 (
-                    header_type, msg_type, msg_size, reserved,
+                    _header_type, _msg_type, _msg_size, _reserved,
                     _unique_id, time_usec,
                     px, py, pz,
                     qw, qx, qy, qz,
                     ax, ay, az,
                     wx, wy, wz
-                ) = struct.unpack(
+                ) = struct.unpack_from(
                     relay_icd.GAZEBO_STRUCT_FMT,
-                    pkt[:relay_icd.GAZEBO_STRUCT_SIZE],
+                    payload_view,
+                    0,
                 )
+            except struct.error:
+                continue
 
-                # Gazebo Z축: Up(+Z)
-                ground_distance = max(0.0, pz)
+            time_usec_int = int(time_usec)
+            px_f, py_f, pz_f = float(px), float(py), float(pz)
+            qw_f, qx_f, qy_f, qz_f = float(qw), float(qx), float(qy), float(qz)
+            ax_f, ay_f, az_f = float(ax), float(ay), float(az)
+            wx_f, wy_f, wz_f = float(wx), float(wy), float(wz)
 
-                # 로그 파일 기록
-                self._write_gazebo_log(
-                    time_usec=time_usec,
-                    position=(px, py, pz),
-                    orientation_wxyz=(qw, qx, qy, qz),
-                    angular_velocity=(wx, wy, wz),
-                )
+            ground_distance = max(0.0, pz_f)
 
-                # 작은 각도 근사: flow_comp_m ≈ angular_rate * ground_distance
-                flow_comp_m_x = wy * ground_distance   # +Y rate → +X flow(m/s) (가정)
-                flow_comp_m_y = -wx * ground_distance  # +X rate → -Y flow(m/s)
+            flow_comp_m_x = wy_f * ground_distance   # +Y rate → +X flow(m/s) (가정)
+            flow_comp_m_y = -wx_f * ground_distance  # +X rate → -Y flow(m/s)
 
-                # 품질 추정
-                quality = self._estimate_quality(ax, ay, az, wx, wy, wz)
+            quality = self._estimate_quality(ax_f, ay_f, az_f, wx_f, wy_f, wz_f)
 
-                # 픽셀 스케일 적용
-                scale_pix = self.of_scale_pix
-                flow_x = int(max(-32768, min(32767, flow_comp_m_x * scale_pix)))
-                flow_y = int(max(-32768, min(32767, flow_comp_m_y * scale_pix)))
+            scale_pix = self.of_scale_pix
+            flow_x = int(max(-32768, min(32767, flow_comp_m_x * scale_pix)))
+            flow_y = int(max(-32768, min(32767, flow_comp_m_y * scale_pix)))
 
-                sent = self._send_optical_flow(
-                    time_usec=time_usec,
-                    sensor_id=int(self.s.get("flow_sensor_id", 0)),
-                    flow_x=flow_x,
-                    flow_y=flow_y,
-                    flow_comp_m_x=float(flow_comp_m_x),
-                    flow_comp_m_y=float(flow_comp_m_y),
-                    quality=int(quality),
-                    ground_distance=float(ground_distance),
-                )
+            sent = self._send_optical_flow(
+                time_usec=time_usec_int,
+                sensor_id=int(self.s.get("flow_sensor_id", 0)),
+                flow_x=flow_x,
+                flow_y=flow_y,
+                flow_comp_m_x=float(flow_comp_m_x),
+                flow_comp_m_y=float(flow_comp_m_y),
+                quality=int(quality),
+                ground_distance=float(ground_distance),
+            )
 
-                with self._lock:
-                    self.last_ground_distance = ground_distance
-                    self.last_av = (wx, wy, wz)
-                    self.of_quality = quality
-                    if sent:
-                        self.last_of_send_ts = time.time()
+            with self._lock:
+                self.last_ground_distance = ground_distance
+                self.last_av = (wx_f, wy_f, wz_f)
+                self.of_quality = quality
+                if sent:
+                    self.last_of_send_ts = time.time()
 
-            except OSError:
-                # 소켓 닫힘
-                break
-            except Exception as e:
-                self.log(f"[RELAY] gazebo loop error: {e}")
+            self._write_gazebo_log(
+                time_usec=time_usec_int,
+                position=(px_f, py_f, pz_f),
+                orientation_wxyz=(qw_f, qx_f, qy_f, qz_f),
+                angular_velocity=(wx_f, wy_f, wz_f),
+            )
 
     # ------------- Distance RAW UDP 루프 -------------
     def _distance_raw_udp_loop(self) -> None:

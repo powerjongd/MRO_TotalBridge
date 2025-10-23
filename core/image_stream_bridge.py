@@ -84,6 +84,7 @@ class ImageStreamBridge:
         self._predefined_numbers: list[int] = []
 
         self._zoom_scale = max(1.0, float(settings.get("zoom_scale", 1.0)))
+        self._zoom_requires_processing = self._zoom_scale > 1.0001
         self._logged_zoom_warn = False
 
         self._gimbal: Optional["GimbalControl"] = None
@@ -601,6 +602,7 @@ class ImageStreamBridge:
             if abs(value - self._zoom_scale) < 1e-3:
                 return
             self._zoom_scale = value
+            self._zoom_requires_processing = value > 1.0001
             latest_raw = self._latest_raw_jpeg
         self.log(f"[BRIDGE] zoom scale -> {self._zoom_scale:.2f}x")
         if latest_raw:
@@ -624,9 +626,13 @@ class ImageStreamBridge:
         except Exception as e:
             self.log(f"[BRIDGE] send Ack_Zoomratio failed: {e}")
 
+    def _get_zoom_state(self) -> tuple[float, bool]:
+        with self._lock:
+            return self._zoom_scale, self._zoom_requires_processing
+
     def _apply_zoom_to_jpeg(self, jpeg: bytes) -> bytes:
-        zoom = self._zoom_scale
-        if zoom <= 1.0001:
+        zoom, needs_processing = self._get_zoom_state()
+        if not needs_processing:
             return jpeg
         if not _HAS_PIL:
             if not self._logged_zoom_warn:
