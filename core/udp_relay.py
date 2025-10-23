@@ -429,6 +429,14 @@ class UdpRelay:
     def _drop_serial_connection_locked(self, *, schedule_retry: bool) -> None:
         if self.mav_ser:
             try:
+                port_handle = getattr(self.mav_ser, "port", None)
+                if port_handle and hasattr(port_handle, "reset_input_buffer"):
+                    port_handle.reset_input_buffer()
+                if port_handle and hasattr(port_handle, "reset_output_buffer"):
+                    port_handle.reset_output_buffer()
+            except Exception:
+                pass
+            try:
                 self.mav_ser.close()
             except Exception:
                 pass

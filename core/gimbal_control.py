@@ -43,6 +43,8 @@ def _quat_to_euler_deg(qx: float, qy: float, qz: float, qw: float):
     yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
     return roll, pitch, yaw
 class GimbalControl:
+    MAV_PROBE_WINDOW = 3.0
+
     def __init__(
         self,
         log_cb,
@@ -106,6 +108,7 @@ class GimbalControl:
         self._tcp_clients: Set[socket.socket] = set()
         self._tcp_stop = threading.Event()
         self._mav_stop = threading.Event()
+        self._mav_probe_timer: Optional[threading.Timer] = None
 
         self.mav: Optional[mavutil.mavfile] = None
         self.serial_port = str(self.s.get("serial_port", "") or "").strip()
@@ -299,10 +302,19 @@ class GimbalControl:
         self._open_serial()
 
     def _stop_mavlink_threads(self) -> None:
+        self._cancel_mav_probe()
         self._mav_stop.set()
         mav = self.mav
         self.mav = None
         if mav:
+            try:
+                port_handle = getattr(mav, "port", None)
+                if port_handle and hasattr(port_handle, "reset_input_buffer"):
+                    port_handle.reset_input_buffer()
+                if port_handle and hasattr(port_handle, "reset_output_buffer"):
+                    port_handle.reset_output_buffer()
+            except Exception:
+                pass
             try:
                 mav.close()
             except Exception:
@@ -317,6 +329,43 @@ class GimbalControl:
         self.mav_tx_thread = None
         self._mav_stop.clear()
         self.hb_rx_ok = False
+        self.last_hb_rx = 0.0
+
+    def _cancel_mav_probe(self) -> None:
+        timer = self._mav_probe_timer
+        if timer:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        self._mav_probe_timer = None
+
+    def _start_mav_probe(self) -> None:
+        if self.stop_ev.is_set():
+            return
+        self._cancel_mav_probe()
+
+        def _probe() -> None:
+            self._mav_probe_timer = None
+            if self.stop_ev.is_set() or self._mav_stop.is_set():
+                return
+            if not self.mav:
+                return
+            if self.hb_rx_ok:
+                return
+            self.log(
+                f"[GIMBAL] No MAVLink heartbeat within {self.MAV_PROBE_WINDOW:.1f}s; closing serial"
+            )
+            self._stop_mavlink_threads()
+
+        timer = threading.Timer(self.MAV_PROBE_WINDOW, _probe)
+        timer.daemon = True
+        self._mav_probe_timer = timer
+        timer.start()
+
+    def _handle_mavlink_failure(self, message: str) -> None:
+        self.log(message)
+        self._stop_mavlink_threads()
 
     def set_target_pose(self, x, y, z, roll_deg, pitch_deg, yaw_deg) -> None:
         with self._lock:
@@ -484,16 +533,25 @@ class GimbalControl:
                 self.serial_port, baud=self.serial_baud,
                 source_system=self.mav_sys_id, source_component=self.mav_comp_id
             )
+            try:
+                port_handle = getattr(self.mav, "port", None)
+                if port_handle and hasattr(port_handle, "reset_input_buffer"):
+                    port_handle.reset_input_buffer()
+                if port_handle and hasattr(port_handle, "reset_output_buffer"):
+                    port_handle.reset_output_buffer()
+            except Exception:
+                pass
             self.log(f"[GIMBAL] MAVLink serial: {self.serial_port} @ {self.serial_baud} (sys={self.mav_sys_id}, comp={self.mav_comp_id})")
             self._mav_stop.clear()
             self.mav_rx_thread = threading.Thread(target=self._mav_rx_loop, daemon=True)
             self.mav_tx_thread = threading.Thread(target=self._mav_tx_loop, daemon=True)
             self.mav_rx_thread.start()
             self.mav_tx_thread.start()
+            self._start_mav_probe()
         except SerialException as e:
-            self.log(f"[GIMBAL] serial error: {e}")
+            self._handle_mavlink_failure(f"[GIMBAL] serial error: {e}")
         except Exception as e:
-            self.log(f"[GIMBAL] mavlink open error: {e}")
+            self._handle_mavlink_failure(f"[GIMBAL] mavlink open error: {e}")
 
     # -------- status --------
     def get_status(self) -> Dict[str, Any]:
@@ -764,6 +822,7 @@ class GimbalControl:
                     if int(getattr(m, "type", -1)) == MC_HB_TYPE:
                         self.hb_rx_ok = True
                         self.last_hb_rx = time.time()
+                        self._cancel_mav_probe()
                 elif t == "GIMBAL_DEVICE_SET_ATTITUDE":
                     q = getattr(m, "q", [float("nan")]*4)
                     avx = getattr(m, "angular_velocity_x", float("nan"))
@@ -782,6 +841,9 @@ class GimbalControl:
                     pid = getattr(m, "param_id", "").strip("\x00")
                     pidx = int(getattr(m, "param_index", -1))
                     self._send_param_read(pid, pidx)
+            except SerialException as e:
+                self._handle_mavlink_failure(f"[GIMBAL] MAV RX serial error: {e}")
+                break
             except Exception as e:
                 self.log(f"[GIMBAL] MAV RX error: {e}")
 
@@ -825,6 +887,9 @@ class GimbalControl:
                         gimbal_id,
                     )
                     last_status = now
+            except SerialException as e:
+                self._handle_mavlink_failure(f"[GIMBAL] MAV TX serial error: {e}")
+                break
             except Exception as e:
                 self.log(f"[GIMBAL] MAV TX error: {e}")
             time.sleep(0.01)
