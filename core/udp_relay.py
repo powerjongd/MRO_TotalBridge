@@ -17,6 +17,7 @@ except ImportError:
     from serial.serialutil import SerialException
 
 from network import gazebo_relay_icd as relay_icd
+from .log_parsers import UNIFIED_CSV_HEADER, format_drone_csv_row
 
 class UdpRelay:
     """
@@ -457,9 +458,10 @@ class UdpRelay:
                 directory = os.path.dirname(path)
                 if directory:
                     os.makedirs(directory, exist_ok=True)
+                write_header = not os.path.exists(path) or os.path.getsize(path) == 0
                 self._gazebo_log_file = open(path, "a", encoding="utf-8")
-                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                self._gazebo_log_file.write(f"# --- Gazebo relay session started {ts} ---\n")
+                if write_header:
+                    self._gazebo_log_file.write(UNIFIED_CSV_HEADER + "\n")
                 self._gazebo_log_file.flush()
                 self._gazebo_log_active = True
                 self._gazebo_log_error = ""
@@ -475,8 +477,6 @@ class UdpRelay:
         with self._gazebo_log_lock:
             if self._gazebo_log_file:
                 try:
-                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                    self._gazebo_log_file.write(f"# --- Gazebo relay session stopped {ts} ---\n")
                     self._gazebo_log_file.flush()
                 except Exception:
                     pass
@@ -490,44 +490,33 @@ class UdpRelay:
 
     def _write_gazebo_log(
         self,
+        *,
         time_usec: int,
-        px: float,
-        py: float,
-        pz: float,
-        qw: float,
-        qx: float,
-        qy: float,
-        qz: float,
-        ax: float,
-        ay: float,
-        az: float,
-        wx: float,
-        wy: float,
-        wz: float,
+        position: tuple[float, float, float],
+        orientation_wxyz: tuple[float, float, float, float],
+        angular_velocity: tuple[float, float, float],
     ) -> None:
         with self._gazebo_log_lock:
             fh = self._gazebo_log_file
             if not fh:
                 return
             try:
-                now = time.time()
-                ts_local = time.localtime(now)
-                ts_ms = int((now - math.floor(now)) * 1000)
-                prefix = time.strftime("%Y-%m-%d %H:%M:%S", ts_local)
-                line = (
-                    f"{prefix}.{ts_ms:03d}\t"
-                    f"time_usec={int(time_usec)}\t"
-                    f"pos=({px:.4f},{py:.4f},{pz:.4f})\t"
-                    f"quat=({qw:.4f},{qx:.4f},{qy:.4f},{qz:.4f})\t"
-                    f"accel=({ax:.4f},{ay:.4f},{az:.4f})\t"
-                    f"gyro=({wx:.4f},{wy:.4f},{wz:.4f})\n"
+                row = format_drone_csv_row(
+                    time_usec=time_usec,
+                    position=position,
+                    orientation_wxyz=orientation_wxyz,
+                    angular_velocity=angular_velocity,
                 )
-                fh.write(line)
+                fh.write(row + "\n")
                 fh.flush()
+                now = time.time()
                 self._gazebo_log_count += 1
                 self._gazebo_log_last_ts = now
                 self._gazebo_log_active = True
                 self._gazebo_log_error = ""
+            except ValueError as e:
+                self._gazebo_log_error = str(e)
+                return
             except Exception as e:
                 self._gazebo_log_error = str(e)
                 self._gazebo_log_active = False
@@ -569,7 +558,7 @@ class UdpRelay:
 
                 (
                     header_type, msg_type, msg_size, reserved,
-                    unique_id, time_usec,
+                    _unique_id, time_usec,
                     px, py, pz,
                     qw, qx, qy, qz,
                     ax, ay, az,
@@ -585,19 +574,9 @@ class UdpRelay:
                 # 로그 파일 기록
                 self._write_gazebo_log(
                     time_usec=time_usec,
-                    px=px,
-                    py=py,
-                    pz=pz,
-                    qw=qw,
-                    qx=qx,
-                    qy=qy,
-                    qz=qz,
-                    ax=ax,
-                    ay=ay,
-                    az=az,
-                    wx=wx,
-                    wy=wy,
-                    wz=wz,
+                    position=(px, py, pz),
+                    orientation_wxyz=(qw, qx, qy, qz),
+                    angular_velocity=(wx, wy, wz),
                 )
 
                 # 작은 각도 근사: flow_comp_m ≈ angular_rate * ground_distance
