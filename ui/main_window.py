@@ -374,14 +374,24 @@ class MainWindow(tk.Tk):
     def _refresh_status_periodic(self) -> None:
         try:
             running = getattr(self.bridge, "is_server_running", None) and self.bridge.is_server_running.is_set()
+            bridge_status: Dict[str, Any] = {}
             try:
-                mode = self.bridge.get_runtime_status().get("image_source_mode")
+                status_obj = self.bridge.get_runtime_status()
+                if isinstance(status_obj, dict):
+                    bridge_status = status_obj
             except Exception:
-                mode = None
+                bridge_status = {}
+            mode = bridge_status.get("image_source_mode")
             self._set_bridge_status("Running" if running else "Stopped", mode)
             self.btn_server.configure(
                 text="Stop Image Stream Module" if running else "Start Image Stream Module"
             )
+
+            bridge_zoom = bridge_status.get("zoom_scale")
+            if isinstance(bridge_zoom, (int, float)):
+                zoom_value = float(bridge_zoom)
+                if (not self.zoom_state) or abs(zoom_value - self._current_zoom_value) > 1e-3:
+                    self._update_zoom_label(zoom_value)
 
             # Gimbal 상태
             if hasattr(self.gimbal, "get_status"):

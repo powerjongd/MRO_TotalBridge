@@ -224,11 +224,13 @@ def main() -> None:
     relay_log  = make_log_cb(log, "[RELAY]")
     rover_log  = make_log_cb(log, "[ROVER]")
 
+    bridge_cfg = cfg_dict.get("bridge", {})
+
     bridge = ImageStreamBridge(
         log_cb=bridge_log,
         preview_cb=None,  # GUI 미리보기는 UI 쪽에서 연결
         status_cb=make_status_cb(log, "BRIDGE"),
-        settings=cfg_dict.get("bridge", {}),
+        settings=bridge_cfg,
     )
 
     gimbal_cfg = cfg_dict.get("gimbal", {})
@@ -249,6 +251,18 @@ def main() -> None:
         settings=gimbal_cfg,
         zoom_update_cb=zoom_state.set,
     )
+
+    bridge.register_zoom_update_callback(zoom_state.set)
+    bridge.attach_gimbal_controller(gimbal)
+    try:
+        sensor_type = int(bridge_cfg.get("gimbal_sensor_type", 0))
+    except (TypeError, ValueError):
+        sensor_type = 0
+    try:
+        sensor_id = int(bridge_cfg.get("gimbal_sensor_id", 0))
+    except (TypeError, ValueError):
+        sensor_id = 0
+    bridge.configure_gimbal_forwarding(sensor_type, sensor_id)
     relay = UdpRelay(
         log_cb=relay_log,
         status_cb=make_status_cb(log, "RELAY"),
