@@ -90,6 +90,10 @@ class UdpRelay:
 
         # 공용 시리얼 (OF + Distance 중계)
         self.mav_ser: Optional[mavutil.mavfile] = None
+        self.enable_of_serial = bool(self.s.get("enable_optical_flow_serial", True))
+        self.s["enable_optical_flow_serial"] = self.enable_of_serial
+        self.enable_distance_serial = bool(self.s.get("enable_distance_serial", True))
+        self.s["enable_distance_serial"] = self.enable_distance_serial
 
         # Threads
         self.stop_ev = threading.Event()
@@ -166,6 +170,10 @@ class UdpRelay:
             self.hb_ds_stat    = int(self.s.get("hb_ds_system_status", self.hb_ds_stat))
             # Distance 모드
             self.distance_mode = str(self.s.get("distance_mode", self.distance_mode)).lower()
+            self.enable_of_serial = bool(self.s.get("enable_optical_flow_serial", self.enable_of_serial))
+            self.s["enable_optical_flow_serial"] = self.enable_of_serial
+            self.enable_distance_serial = bool(self.s.get("enable_distance_serial", self.enable_distance_serial))
+            self.s["enable_distance_serial"] = self.enable_distance_serial
             new_log_path = str(self.s.get("gazebo_log_path", self.gazebo_log_path)).strip()
             if new_log_path != self.gazebo_log_path:
                 log_path_changed = True
@@ -319,6 +327,9 @@ class UdpRelay:
                 "of_ground_dist": self.last_ground_distance,
                 "of_last_send_age_s": (time.time() - self.last_of_send_ts) if self.last_of_send_ts else -1.0,
                 "serial": self.s.get("serial_port", ""),
+                "serial_connected": bool(self.mav_ser),
+                "of_serial_enabled": bool(self.enable_of_serial),
+                "distance_serial_enabled": bool(self.enable_distance_serial),
                 "gazebo_listen": f"{self.s.get('gazebo_listen_ip','0.0.0.0')}:{int(self.s.get('gazebo_listen_port',17000))}",
                 "ext_dst": f"{self.s.get('ext_udp_ip','127.0.0.1')}:{int(self.s.get('ext_udp_port',9091))}",
                 "dist_udp": f"{self.s.get('distance_udp_listen_ip','0.0.0.0')}:{int(self.s.get('distance_udp_listen_port',14650))}",
@@ -601,7 +612,7 @@ class UdpRelay:
                 flow_x = int(max(-32768, min(32767, flow_comp_m_x * scale_pix)))
                 flow_y = int(max(-32768, min(32767, flow_comp_m_y * scale_pix)))
 
-                self._send_optical_flow(
+                sent = self._send_optical_flow(
                     time_usec=time_usec,
                     sensor_id=int(self.s.get("flow_sensor_id", 0)),
                     flow_x=flow_x,
@@ -616,7 +627,8 @@ class UdpRelay:
                     self.last_ground_distance = ground_distance
                     self.last_av = (wx, wy, wz)
                     self.of_quality = quality
-                    self.last_of_send_ts = time.time()
+                    if sent:
+                        self.last_of_send_ts = time.time()
 
             except OSError:
                 # 소켓 닫힘
@@ -679,7 +691,7 @@ class UdpRelay:
                     self.last_distance_update = time.time()
 
                 # 시리얼로 MAVLink DISTANCE_SENSOR 표준 전송 (확장 필드는 시리얼 전송 생략)
-                if self.mav_ser:
+                if self.mav_ser and self.enable_distance_serial:
                     try:
                         self.mav_ser.mav.distance_sensor_send(
                             int(time_boot_ms), int(min_cm), int(max_cm), int(cur_cm),
@@ -729,7 +741,7 @@ class UdpRelay:
                     else:
                         cur_cm = int(cur if cur > 10 else cur * 100)
 
-                    if self.mav_ser:
+                    if self.mav_ser and self.enable_distance_serial:
                         try:
                             self.mav_ser.mav.distance_sensor_send(
                                 int(getattr(m, "time_boot_ms", 0)),
@@ -767,7 +779,7 @@ class UdpRelay:
             try:
                 if self.mav_ser:
                     # Optical Flow HB
-                    if self.hb_of_rate_hz > 0 and now >= next_of:
+                    if self.enable_of_serial and self.hb_of_rate_hz > 0 and now >= next_of:
                         self.mav_ser.mav.srcSystem = self.hb_of_sysid
                         self.mav_ser.mav.srcComponent = self.hb_of_compid
                         self.mav_ser.mav.heartbeat_send(
@@ -777,7 +789,7 @@ class UdpRelay:
                         next_of = now + 1.0 / max(0.001, self.hb_of_rate_hz)
 
                     # Distance HB
-                    if self.hb_ds_rate_hz > 0 and now >= next_ds:
+                    if self.enable_distance_serial and self.hb_ds_rate_hz > 0 and now >= next_ds:
                         self.mav_ser.mav.srcSystem = self.hb_ds_sysid
                         self.mav_ser.mav.srcComponent = self.hb_ds_compid
                         self.mav_ser.mav.heartbeat_send(
@@ -800,10 +812,10 @@ class UdpRelay:
         flow_comp_m_y: float,
         quality: int,
         ground_distance: float,
-    ) -> None:
+    ) -> bool:
         """MAVLink OPTICAL_FLOW (#100) 전송"""
-        if not self.mav_ser:
-            return
+        if not self.mav_ser or not self.enable_of_serial:
+            return False
         try:
             self.mav_ser.mav.optical_flow_send(
                 int(time_usec),
@@ -813,8 +825,10 @@ class UdpRelay:
                 int(max(0, min(255, quality))),
                 float(ground_distance)
             )
+            return True
         except Exception as e:
             self.log(f"[RELAY] optical_flow send error: {e}")
+            return False
 
     # ------------- 품질 추정(설정 반영) -------------
     def _estimate_quality(self, ax: float, ay: float, az: float, wx: float, wy: float, wz: float) -> int:
