@@ -393,12 +393,19 @@ class RoverRelayLogger:
                 break
             try:
                 size, _ = sock.recvfrom_into(view)
-            except OSError:
-                break
+            except OSError as exc:
+                if self._stop_ev.is_set():
+                    break
+                self._log_status(f"feedback recv error: {exc}")
+                with lock:
+                    setattr(self, error_attr, str(exc))
+                time.sleep(0.01)
+                continue
             except Exception as e:  # noqa: BLE001
                 self._log_status(f"feedback recv error: {e}")
                 with lock:
                     setattr(self, error_attr, str(e))
+                time.sleep(0.01)
                 continue
 
             if size <= 0:
