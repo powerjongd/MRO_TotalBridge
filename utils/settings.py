@@ -227,6 +227,9 @@ class AppConfig:
         g.setdefault("serial_baud", 115200)
         g.setdefault("generator_ip", "127.0.0.1")
         g.setdefault("generator_port", 15020)
+        g.setdefault("mavlink_preset_index", 0)
+        g.setdefault("mavlink_sensor_type", g.get("sensor_type", 0))
+        g.setdefault("mavlink_sensor_id", g.get("sensor_id", 0))
         g.setdefault("presets", {"version": 2, "slots": [None] * 6})
         g.setdefault(
             "preset_bundle",
@@ -237,6 +240,7 @@ class AppConfig:
                 },
                 "presets": [None] * 6,
                 "selected": 0,
+                "applicable": g.get("mavlink_preset_index", 0),
             },
         )
 

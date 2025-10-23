@@ -105,8 +105,8 @@ class SensorPresetData:
         if not isinstance(data, dict):
             return cls()
         return cls(
-            sensor_type=_as_int(data.get("sensor_type", 0), 0),
-            sensor_id=_as_int(data.get("sensor_id", 0), 0),
+            sensor_type=_as_int(data.get("sensor_type", 0), 0) & 0xFF,
+            sensor_id=_as_int(data.get("sensor_id", 0), 0) & 0xFF,
             pos_x=_as_float(data.get("pos_x", 0.0), 0.0),
             pos_y=_as_float(data.get("pos_y", 0.0), 0.0),
             pos_z=_as_float(data.get("pos_z", 0.0), 0.0),
@@ -123,8 +123,8 @@ class SensorPresetData:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "sensor_type": self.sensor_type,
-            "sensor_id": self.sensor_id,
+            "sensor_type": self.sensor_type & 0xFF,
+            "sensor_id": self.sensor_id & 0xFF,
             "pos_x": self.pos_x,
             "pos_y": self.pos_y,
             "pos_z": self.pos_z,
@@ -173,6 +173,7 @@ class PresetBundle:
     network: NetworkSettings
     presets: List[Optional[SensorPreset]] = field(default_factory=list)
     selected_index: int = 0
+    applicable_index: int = 0
 
     @classmethod
     def from_config(cls, gimbal_cfg: Dict[str, Any]) -> "PresetBundle":
@@ -181,9 +182,17 @@ class PresetBundle:
         raw_bundle = gimbal_cfg.get("preset_bundle") if isinstance(gimbal_cfg.get("preset_bundle"), dict) else None
         raw_slots: Optional[Any] = None
         selected = _as_int(gimbal_cfg.get("selected_preset", 0), 0)
+        applicable = _as_int(gimbal_cfg.get("mavlink_preset_index", selected), selected)
         if raw_bundle:
             raw_slots = raw_bundle.get("presets") or raw_bundle.get("slots")
             selected = _as_int(raw_bundle.get("selected", raw_bundle.get("selected_preset", selected)), selected)
+            applicable = _as_int(
+                raw_bundle.get(
+                    "applicable",
+                    raw_bundle.get("applicable_preset", raw_bundle.get("mavlink_preset_index", applicable)),
+                ),
+                applicable,
+            )
         if raw_slots is None:
             legacy = gimbal_cfg.get("presets")
             if isinstance(legacy, dict):
@@ -217,13 +226,15 @@ class PresetBundle:
         while len(presets) < MAX_SENSOR_PRESETS:
             presets.append(None)
         selected = max(0, min(MAX_SENSOR_PRESETS - 1, selected))
-        return cls(network=network, presets=presets, selected_index=selected)
+        applicable = max(0, min(MAX_SENSOR_PRESETS - 1, applicable))
+        return cls(network=network, presets=presets, selected_index=selected, applicable_index=applicable)
 
     def to_config(self) -> Dict[str, Any]:
         return {
             "network": self.network.to_config(),
             "presets": [preset.to_config() if preset else None for preset in self.presets],
             "selected_preset": self.selected_index,
+            "applicable_preset": self.applicable_index,
         }
 
     def set_preset(self, idx: int, preset: SensorPreset) -> None:
@@ -284,6 +295,8 @@ class GimbalControlsWindow(tk.Toplevel):
         self.v_baud = tk.IntVar(value=payload.serial_baud)
         self.v_mav_sysid = tk.IntVar(value=payload.mav_sysid)
         self.v_mav_compid = tk.IntVar(value=payload.mav_compid)
+        self.v_applicable_preset = tk.StringVar()
+        self.cb_applicable_preset: Optional[ttk.Combobox] = None
 
         self.cur_x = tk.StringVar(value="-")
         self.cur_y = tk.StringVar(value="-")
@@ -297,7 +310,9 @@ class GimbalControlsWindow(tk.Toplevel):
         self.cur_wz = tk.StringVar(value="-")
 
         self._build_layout()
+        self._update_applicable_preset_dropdown()
         self._load_selected_preset(self.bundle.selected_index, apply_runtime=False)
+        self._apply_applicable_preset_runtime(self.bundle.applicable_index)
         self._write_back_state()
 
         self._refresh_status_periodic()
@@ -415,6 +430,16 @@ class GimbalControlsWindow(tk.Toplevel):
     def _build_serial_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
         ttk.Label(parent, text="MAVLink Serial").grid(row=row, column=0, columnspan=4, sticky="w", **pad)
         row += 1
+        ttk.Label(parent, text="Applicable Preset").grid(row=row, column=0, sticky="e", **pad)
+        self.cb_applicable_preset = ttk.Combobox(
+            parent,
+            textvariable=self.v_applicable_preset,
+            state="readonly",
+            width=24,
+        )
+        self.cb_applicable_preset.grid(row=row, column=1, columnspan=3, sticky="we", **pad)
+        self.cb_applicable_preset.bind("<<ComboboxSelected>>", self.on_applicable_preset_changed)
+        row += 1
         ttk.Label(parent, text="Port").grid(row=row, column=0, sticky="e", **pad)
         self.cb_ports = ttk.Combobox(parent, textvariable=self.v_serial_port, values=self._enum_serial_ports(), width=18)
         self.cb_ports.grid(row=row, column=1, sticky="w", **pad)
@@ -483,6 +508,56 @@ class GimbalControlsWindow(tk.Toplevel):
         combo = (self.v_sensor_type_combo.get() or "0").split(":", 1)[0]
         return _as_int(combo, 0)
 
+    def _applicable_combo_label(self, idx: int) -> str:
+        preset = self.bundle.get(idx)
+        label = preset.label(idx) if preset else self._default_preset_name(idx)
+        return f"{idx + 1}: {label}"
+
+    def _parse_applicable_index(self, value: str) -> int:
+        token = (value or "").split(":", 1)[0].strip()
+        idx = _as_int(token, self.bundle.applicable_index + 1) - 1
+        return max(0, min(MAX_SENSOR_PRESETS - 1, idx))
+
+    def _sync_applicable_index_from_var(self) -> int:
+        idx = self._parse_applicable_index(self.v_applicable_preset.get())
+        self.bundle.applicable_index = idx
+        return idx
+
+    def _update_applicable_preset_dropdown(self) -> None:
+        options = [self._applicable_combo_label(i) for i in range(MAX_SENSOR_PRESETS)]
+        if self.cb_applicable_preset is not None:
+            self.cb_applicable_preset.configure(values=options)
+        current = self._applicable_combo_label(self.bundle.applicable_index)
+        self.v_applicable_preset.set(current)
+
+    def _applicable_preset_data(self, idx: Optional[int] = None) -> SensorPresetData:
+        if idx is None:
+            idx = self.bundle.applicable_index
+        idx = max(0, min(MAX_SENSOR_PRESETS - 1, idx))
+        preset = self.bundle.get(idx)
+        if preset:
+            return preset.data
+        return SensorPresetData.from_dict(self.cfg.get("gimbal", {}))
+
+    def _apply_applicable_preset_runtime(self, idx: Optional[int] = None) -> None:
+        idx_to_use = self.bundle.applicable_index if idx is None else max(0, min(MAX_SENSOR_PRESETS - 1, idx))
+        data = self._applicable_preset_data(idx_to_use)
+        update_payload = {
+            "mavlink_preset_index": idx_to_use,
+            "mavlink_sensor_type": data.sensor_type & 0xFF,
+            "mavlink_sensor_id": data.sensor_id & 0xFF,
+        }
+        try:
+            if hasattr(self.gimbal, "update_settings"):
+                self.gimbal.update_settings(update_payload)
+        except Exception as exc:
+            self.log.exception("Failed to update MAVLink preset settings: %s", exc)
+        try:
+            if hasattr(self.gimbal, "set_mavlink_target"):
+                self.gimbal.set_mavlink_target(idx_to_use, data.sensor_type, data.sensor_id)
+        except Exception as exc:
+            self.log.exception("Failed to apply MAVLink preset runtime: %s", exc)
+
     def _var_get(self, variable: tk.Variable, fallback: Any) -> Any:
         try:
             return variable.get()
@@ -503,11 +578,12 @@ class GimbalControlsWindow(tk.Toplevel):
         else:
             name = self._default_preset_name(self.bundle.selected_index)
         self.v_preset_name.set(name)
+        self._update_applicable_preset_dropdown()
 
     def _collect_payload_from_form(self) -> SensorPresetData:
         return SensorPresetData(
-            sensor_type=self._sensor_code_from_combo(),
-            sensor_id=_as_int(self._var_get(self.v_sensor_id, 0), 0),
+            sensor_type=self._sensor_code_from_combo() & 0xFF,
+            sensor_id=_as_int(self._var_get(self.v_sensor_id, 0), 0) & 0xFF,
             pos_x=_as_float(self._var_get(self.v_pos_x, 0.0), 0.0),
             pos_y=_as_float(self._var_get(self.v_pos_y, 0.0), 0.0),
             pos_z=_as_float(self._var_get(self.v_pos_z, 0.0), 0.0),
@@ -524,7 +600,7 @@ class GimbalControlsWindow(tk.Toplevel):
 
     def _apply_payload_to_form(self, payload: SensorPresetData) -> None:
         self.v_sensor_type_combo.set(self._sensor_combo_label(payload.sensor_type))
-        self.v_sensor_id.set(payload.sensor_id)
+        self.v_sensor_id.set(payload.sensor_id & 0xFF)
         self.v_pos_x.set(payload.pos_x)
         self.v_pos_y.set(payload.pos_y)
         self.v_pos_z.set(payload.pos_z)
@@ -547,25 +623,39 @@ class GimbalControlsWindow(tk.Toplevel):
             "generator_ip": self.bundle.network.ip,
             "generator_port": self.bundle.network.port,
         })
+        app_idx = self._sync_applicable_index_from_var()
+        app_data = self._applicable_preset_data(app_idx)
+        values.update({
+            "mavlink_preset_index": app_idx,
+            "mavlink_sensor_type": app_data.sensor_type & 0xFF,
+            "mavlink_sensor_id": app_data.sensor_id & 0xFF,
+        })
         return values
 
     def _write_back_state(self) -> None:
         payload = self._collect_payload_from_form()
         self.bundle.network.ip = _as_str(self._var_get(self.v_gen_ip, self.bundle.network.ip), self.bundle.network.ip)
         self.bundle.network.port = _as_int(self._var_get(self.v_gen_port, self.bundle.network.port), self.bundle.network.port)
+        app_idx = self._sync_applicable_index_from_var()
         bundle_dict = self.bundle.to_config()
         gimbal_cfg = self.cfg.setdefault("gimbal", {})
         gimbal_cfg.update(payload.to_dict())
         gimbal_cfg["generator_ip"] = self.bundle.network.ip
         gimbal_cfg["generator_port"] = self.bundle.network.port
         gimbal_cfg["network"] = bundle_dict["network"]
+        app_data = self._applicable_preset_data(app_idx)
         gimbal_cfg["preset_bundle"] = {
             "network": bundle_dict["network"],
             "presets": bundle_dict["presets"],
             "selected": bundle_dict["selected_preset"],
+            "applicable": bundle_dict["applicable_preset"],
+            "applicable_preset": bundle_dict["applicable_preset"],
         }
         gimbal_cfg["presets"] = {"version": 2, "slots": bundle_dict["presets"]}
         gimbal_cfg["selected_preset"] = bundle_dict["selected_preset"]
+        gimbal_cfg["mavlink_preset_index"] = bundle_dict["applicable_preset"]
+        gimbal_cfg["mavlink_sensor_type"] = app_data.sensor_type & 0xFF
+        gimbal_cfg["mavlink_sensor_id"] = app_data.sensor_id & 0xFF
 
     def _send_udp_preset(self, idx: int, preset: SensorPreset, target_ip: str, target_port: int) -> None:
         data = preset.data
@@ -658,6 +748,12 @@ class GimbalControlsWindow(tk.Toplevel):
 
         idx = max(0, min(MAX_SENSOR_PRESETS - 1, idx))
         self._load_selected_preset(idx, apply_runtime=False)
+
+    def on_applicable_preset_changed(self, event: Optional[tk.Event] = None) -> None:
+        idx = self._sync_applicable_index_from_var()
+        self._update_applicable_preset_dropdown()
+        self._write_back_state()
+        self._apply_applicable_preset_runtime(idx)
 
     def _load_selected_preset(self, idx: int, apply_runtime: bool) -> None:
         self.bundle.selected_index = idx

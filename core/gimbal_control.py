@@ -75,8 +75,17 @@ class GimbalControl:
         self.power_on = bool(self.s.get("power_on", True))
         self.zoom_scale = max(1.0, float(self.s.get("zoom_scale", 1.0)))
 
-        self.sensor_type = int(self.s.get("sensor_type", 0))
-        self.sensor_id   = int(self.s.get("sensor_id", 0))
+        self.sensor_type = int(self.s.get("sensor_type", 0)) & 0xFF
+        self.sensor_id   = int(self.s.get("sensor_id", 0)) & 0xFF
+        self.s["sensor_type"] = self.sensor_type
+        self.s["sensor_id"] = self.sensor_id
+
+        self.mavlink_preset_index = int(self.s.get("mavlink_preset_index", 0))
+        self.mavlink_sensor_type = int(self.s.get("mavlink_sensor_type", self.sensor_type)) & 0xFF
+        self.mavlink_sensor_id = int(self.s.get("mavlink_sensor_id", self.sensor_id)) & 0xFF
+        self.s["mavlink_preset_index"] = self.mavlink_preset_index
+        self.s["mavlink_sensor_type"] = self.mavlink_sensor_type
+        self.s["mavlink_sensor_id"] = self.mavlink_sensor_id
 
         # ✅ MAVLink IDs를 설정에서 읽어오도록
         self.mav_sys_id  = int(self.s.get("mav_sysid", 1))
@@ -123,6 +132,26 @@ class GimbalControl:
 
     # -------- lifecycle --------
     @staticmethod
+    def _sanitize_sensor_code(value: Any) -> int:
+        try:
+            return int(value) & 0xFF
+        except Exception:
+            return 0
+
+    def _active_sensor_codes_locked(self) -> Tuple[int, int]:
+        if self.control_method == "mavlink":
+            sensor_type = self.mavlink_sensor_type
+            sensor_id = self.mavlink_sensor_id
+        else:
+            sensor_type = self.sensor_type
+            sensor_id = self.sensor_id
+        return sensor_type & 0xFF, sensor_id & 0xFF
+
+    def _active_sensor_codes(self) -> Tuple[int, int]:
+        with self._lock:
+            return self._active_sensor_codes_locked()
+
+    @staticmethod
     def _normalize_control_method(value: Any) -> str:
         if isinstance(value, str):
             lowered = value.lower()
@@ -168,8 +197,10 @@ class GimbalControl:
             if requested_method == "mavlink" and not requested_serial:
                 raise ValueError("MAVLink control requires a serial port before activation")
             self.s.update(settings)
-            self.sensor_type = int(self.s.get("sensor_type", self.sensor_type))
-            self.sensor_id   = int(self.s.get("sensor_id", self.sensor_id))
+            self.sensor_type = self._sanitize_sensor_code(self.s.get("sensor_type", self.sensor_type))
+            self.sensor_id   = self._sanitize_sensor_code(self.s.get("sensor_id", self.sensor_id))
+            self.s["sensor_type"] = self.sensor_type
+            self.s["sensor_id"] = self.sensor_id
             self.max_rate_dps = float(self.s.get("max_rate_dps", self.max_rate_dps))
             self.pos = [float(self.s.get("pos_x", self.pos[0])),
                         float(self.s.get("pos_y", self.pos[1])),
@@ -197,6 +228,19 @@ class GimbalControl:
             if "debug_dump_packets" in settings:
                 self.debug_dump_packets = bool(self.s.get("debug_dump_packets", self.debug_dump_packets))
                 self.s["debug_dump_packets"] = self.debug_dump_packets
+            if {"sensor_type", "sensor_id"}.intersection(settings.keys()):
+                self._last_sent_snapshot = None
+            if "mavlink_preset_index" in settings:
+                self.mavlink_preset_index = int(self.s.get("mavlink_preset_index", self.mavlink_preset_index))
+                self.s["mavlink_preset_index"] = self.mavlink_preset_index
+            if "mavlink_sensor_type" in settings:
+                self.mavlink_sensor_type = self._sanitize_sensor_code(settings.get("mavlink_sensor_type", self.mavlink_sensor_type))
+                self.s["mavlink_sensor_type"] = self.mavlink_sensor_type
+                self._last_sent_snapshot = None
+            if "mavlink_sensor_id" in settings:
+                self.mavlink_sensor_id = self._sanitize_sensor_code(settings.get("mavlink_sensor_id", self.mavlink_sensor_id))
+                self.s["mavlink_sensor_id"] = self.mavlink_sensor_id
+                self._last_sent_snapshot = None
             self._last_sent_snapshot = None
 
             if requested_serial != self.serial_port:
@@ -295,8 +339,7 @@ class GimbalControl:
         flag = int(bool(on))
         with self._lock:
             self.power_on = bool(flag)
-            sensor_type = int(self.sensor_type)
-            sensor_id = int(self.sensor_id)
+            sensor_type, sensor_id = self._active_sensor_codes_locked()
             target_ip = str(self.s.get("generator_ip", "127.0.0.1"))
             target_port = int(self.s.get("generator_port", 15020))
         pkt = self._pack_power_ctrl(sensor_type, sensor_id, flag)
@@ -365,13 +408,14 @@ class GimbalControl:
     ) -> None:
         """Handle an external Set_Gimbal request originating from the image stream module."""
 
-        sensor_type_i = int(sensor_type)
-        sensor_id_i = int(sensor_id)
+        sensor_type_i = self._sanitize_sensor_code(sensor_type)
+        sensor_id_i = self._sanitize_sensor_code(sensor_id)
         with self._lock:
             self.sensor_type = sensor_type_i
             self.sensor_id = sensor_id_i
             self.s["sensor_type"] = sensor_type_i
             self.s["sensor_id"] = sensor_id_i
+            self._last_sent_snapshot = None
 
         br_roll, br_pitch, br_yaw = self._sim_to_bridge_rpy(roll_deg, pitch_deg, yaw_deg)
 
@@ -389,6 +433,25 @@ class GimbalControl:
         self.log(
             "[GIMBAL] external pose applied -> sensor=%d/%d xyz=(%.2f,%.2f,%.2f) sim_rpy=(%.2f,%.2f,%.2f)"
             % (sensor_type_i, sensor_id_i, pos_x, pos_y, pos_z, roll_deg, pitch_deg, yaw_deg)
+        )
+
+    def set_mavlink_target(self, preset_index: int, sensor_type: int, sensor_id: int) -> None:
+        idx = max(0, int(preset_index))
+        sensor_type_i = self._sanitize_sensor_code(sensor_type)
+        sensor_id_i = self._sanitize_sensor_code(sensor_id)
+        with self._lock:
+            self.mavlink_preset_index = idx
+            self.mavlink_sensor_type = sensor_type_i
+            self.mavlink_sensor_id = sensor_id_i
+            self.s["mavlink_preset_index"] = self.mavlink_preset_index
+            self.s["mavlink_sensor_type"] = self.mavlink_sensor_type
+            self.s["mavlink_sensor_id"] = self.mavlink_sensor_id
+            self._last_sent_snapshot = None
+        self.log(
+            "[GIMBAL] MAVLink preset target -> preset=%d sensor=%d/%d",
+            idx + 1,
+            sensor_type_i,
+            sensor_id_i,
         )
 
     def set_mav_ids(self, sys_id: int, comp_id: int) -> None:
@@ -560,17 +623,20 @@ class GimbalControl:
             if len(body) != struct.calcsize(fmt):
                 self.log("[GIMBAL] TCP SET_TARGET malformed payload")
                 return
-            sensor_type, sensor_id, px, py, pz, r_sim, p_sim, y_sim = struct.unpack(fmt, body)
+            sensor_type_raw, sensor_id_raw, px, py, pz, r_sim, p_sim, y_sim = struct.unpack(fmt, body)
+            sensor_type = self._sanitize_sensor_code(sensor_type_raw)
+            sensor_id = self._sanitize_sensor_code(sensor_id_raw)
             r, p, y = self._sim_to_bridge_rpy(r_sim, p_sim, y_sim)
             with self._lock:
-                self.sensor_type = int(sensor_type)
-                self.sensor_id = int(sensor_id)
+                self.sensor_type = sensor_type
+                self.sensor_id = sensor_id
                 self.pos[:] = [px, py, pz]
                 self.rpy_tgt[:] = [r, p, y]
                 self.s["sensor_type"] = self.sensor_type
                 self.s["sensor_id"] = self.sensor_id
                 self.s["pos_x"], self.s["pos_y"], self.s["pos_z"] = self.pos
                 self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = self.rpy_tgt
+                self._last_sent_snapshot = None
             self.log(
                 f"[GIMBAL] TCP target -> sensor={sensor_type}/{sensor_id} "
                 f"xyz=({px:.2f},{py:.2f},{pz:.2f}) sim_rpy=({r_sim:.2f},{p_sim:.2f},{y_sim:.2f})"
@@ -657,9 +723,10 @@ class GimbalControl:
                     self._rpy_rate[i] = (self.rpy_cur[i] - self._last_rpy[i]) / dt
                     self._last_rpy[i] = self.rpy_cur[i]
 
+                sensor_type, sensor_id = self._active_sensor_codes_locked()
                 snapshot = (
-                    int(self.sensor_type),
-                    int(self.sensor_id),
+                    sensor_type,
+                    sensor_id,
                     (float(self.pos[0]), float(self.pos[1]), float(self.pos[2])),
                     (float(self.rpy_cur[0]), float(self.rpy_cur[1]), float(self.rpy_cur[2])),
                 )
@@ -668,7 +735,7 @@ class GimbalControl:
                     or self._has_pose_delta(self._last_sent_snapshot, snapshot)
                 )
                 if should_send:
-                    pkt = self._pack_gimbal_ctrl(self.sensor_type, self.sensor_id, self.pos, self.rpy_cur)
+                    pkt = self._pack_gimbal_ctrl(sensor_type, sensor_id, self.pos, self.rpy_cur)
                     try:
                         self.tx_sock.sendto(
                             pkt,
