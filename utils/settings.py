@@ -304,14 +304,6 @@ class AppConfig:
         rv = self.rover
         rv.setdefault("enabled", True)
         rv.setdefault("autostart", False)
-        rv.setdefault("cmd_listen_ip", "0.0.0.0")
-        rv.setdefault("cmd_listen_port", 18100)
-        rv.setdefault("cmd_dest_ip", "127.0.0.1")
-        rv.setdefault("cmd_dest_port", 18101)
-        rv.setdefault(
-            "cmd_log_path",
-            os.path.join(get_default_save_dir(), "rover_command_messages.txt"),
-        )
         rv.setdefault("feedback_listen_ip", "0.0.0.0")
         rv.setdefault("feedback_listen_port", 18102)
         rv.setdefault("feedback_dest_ip", "127.0.0.1")
@@ -320,10 +312,17 @@ class AppConfig:
             "feedback_log_path",
             os.path.join(get_default_save_dir(), "rover_feedback_messages.txt"),
         )
-        for key in ("cmd_log_path", "feedback_log_path"):
-            path = rv.get(key)
-            if path:
-                ensure_dir(os.path.dirname(path))
+        for obsolete in (
+            "cmd_listen_ip",
+            "cmd_listen_port",
+            "cmd_dest_ip",
+            "cmd_dest_port",
+            "cmd_log_path",
+        ):
+            rv.pop(obsolete, None)
+        path = rv.get("feedback_log_path")
+        if path:
+            ensure_dir(os.path.dirname(path))
 
     # ---------- 편의 메서드 ----------
 

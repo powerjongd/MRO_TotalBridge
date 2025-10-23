@@ -468,51 +468,30 @@ class MainWindow(tk.Tk):
             rover_enabled = bool(rover_status.get("enabled", rover_cfg.get("enabled", True)))
             rover_cfg["enabled"] = rover_enabled
 
-            if "cmd_log_path" in rover_status and rover_status["cmd_log_path"] is not None:
-                rover_cfg["cmd_log_path"] = rover_status["cmd_log_path"]
             if "feedback_log_path" in rover_status and rover_status["feedback_log_path"] is not None:
                 rover_cfg["feedback_log_path"] = rover_status["feedback_log_path"]
 
-            cmd_path = str(rover_cfg.get("cmd_log_path", "") or "")
             fb_path = str(rover_cfg.get("feedback_log_path", "") or "")
-            cmd_active = bool(rover_status.get("cmd_logging_active", False))
             fb_active = bool(rover_status.get("feedback_logging_active", False))
-            cmd_count = rover_status.get("cmd_logged_count")
             fb_count = rover_status.get("feedback_logged_count")
-            cmd_error = rover_status.get("cmd_log_error") or ""
             fb_error = rover_status.get("feedback_log_error") or ""
+
+            rover_cfg.pop("cmd_log_path", None)
 
             if not rover_enabled:
                 rover_text = "Rover Logging: Disabled (Settings)"
-            elif cmd_active or fb_active:
-                parts = []
-                if cmd_active:
-                    if isinstance(cmd_count, (int, float)):
-                        parts.append(f"CMD {int(cmd_count)}")
-                    else:
-                        parts.append("CMD")
-                if fb_active:
-                    if isinstance(fb_count, (int, float)):
-                        parts.append(f"FB {int(fb_count)}")
-                    else:
-                        parts.append("FB")
-                rover_text = f"Rover Logging: Recording ({', '.join(parts)})"
-            elif cmd_error or fb_error:
-                errs = []
-                if cmd_error:
-                    errs.append(f"CMD {cmd_error}")
-                if fb_error:
-                    errs.append(f"FB {fb_error}")
-                rover_text = f"Rover Logging: Error ({'; '.join(errs)})"
-            elif rover_active and not (cmd_path or fb_path):
+            elif fb_active:
+                if isinstance(fb_count, (int, float)):
+                    rover_text = f"Rover Logging: Recording (FB {int(fb_count)})"
+                else:
+                    rover_text = "Rover Logging: Recording (FB)"
+            elif fb_error:
+                rover_text = f"Rover Logging: Error (FB {fb_error})"
+            elif rover_active and not fb_path:
                 rover_text = "Rover Logging: Forwarding (no log path)"
-            elif cmd_path or fb_path:
-                targets = []
-                if cmd_path:
-                    targets.append(f"CMD→{os.path.basename(cmd_path) or cmd_path}")
-                if fb_path:
-                    targets.append(f"FB→{os.path.basename(fb_path) or fb_path}")
-                rover_text = f"Rover Logging: Ready ({', '.join(targets)})"
+            elif fb_path:
+                target = f"FB→{os.path.basename(fb_path) or fb_path}"
+                rover_text = f"Rover Logging: Ready ({target})"
             else:
                 rover_text = "Rover Logging: Idle"
             self.rover_log_status_var.set(rover_text)
