@@ -53,6 +53,8 @@ class RelaySettingsWindow(tk.Toplevel):
         self.v_serial_port = tk.StringVar(value=rconf.get("serial_port", ""))
         self.v_baud        = tk.IntVar(value=int(rconf.get("serial_baud", 115200)))
         self.v_flow_id     = tk.IntVar(value=int(rconf.get("flow_sensor_id", 0)))
+        self.v_enable_of_serial = tk.BooleanVar(value=bool(rconf.get("enable_optical_flow_serial", True)))
+        self.v_enable_distance_serial = tk.BooleanVar(value=bool(rconf.get("enable_distance_serial", True)))
         self.v_log_path    = tk.StringVar(value=rconf.get("gazebo_log_path", ""))
 
         # --- Auto-start
@@ -140,106 +142,119 @@ class RelaySettingsWindow(tk.Toplevel):
         # Auto-start
         ttk.Checkbutton(frm, text="Auto-Start on Launch", variable=self.v_autostart).grid(row=12, column=2, columnspan=2, sticky="w", **pad)
 
+        serial_flags = ttk.Frame(frm)
+        serial_flags.grid(row=13, column=0, columnspan=4, sticky="w", **pad)
+        ttk.Checkbutton(
+            serial_flags,
+            text="Optical Flow → MAVLink",
+            variable=self.v_enable_of_serial,
+        ).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Checkbutton(
+            serial_flags,
+            text="Distance → MAVLink",
+            variable=self.v_enable_distance_serial,
+        ).pack(side=tk.LEFT)
+
         btns_serial = ttk.Frame(frm)
-        btns_serial.grid(row=13, column=0, columnspan=4, sticky="e", **pad)
+        btns_serial.grid(row=14, column=0, columnspan=4, sticky="e", **pad)
         ttk.Button(btns_serial, text="Refresh Ports", command=self.on_refresh_ports).grid(row=0, column=0, padx=6)
         ttk.Button(btns_serial, text="Open Serial Now", command=self.on_open_serial).grid(row=0, column=1, padx=6)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=14, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=15, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
         # --- Optical Flow Scale & Quality Model
-        ttk.Label(frm, text="Optical Flow Parameters").grid(row=15, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Pixel Scale").grid(row=16, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_of_scale_pix, width=10).grid(row=16, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Q Base / Min / Max").grid(row=16, column=2, sticky="e", **pad)
-        row16 = ttk.Frame(frm); row16.grid(row=16, column=3, sticky="w")
+        ttk.Label(frm, text="Optical Flow Parameters").grid(row=16, column=0, columnspan=4, sticky="w", **pad)
+        ttk.Label(frm, text="Pixel Scale").grid(row=17, column=0, sticky="e", **pad)
+        ttk.Entry(frm, textvariable=self.v_of_scale_pix, width=10).grid(row=17, column=1, sticky="w", **pad)
+        ttk.Label(frm, text="Q Base / Min / Max").grid(row=17, column=2, sticky="e", **pad)
+        row16 = ttk.Frame(frm); row16.grid(row=17, column=3, sticky="w")
         ttk.Entry(row16, textvariable=self.v_q_base, width=4).pack(side=tk.LEFT, padx=(0,2))
         ttk.Entry(row16, textvariable=self.v_q_min,  width=4).pack(side=tk.LEFT, padx=(0,2))
         ttk.Entry(row16, textvariable=self.v_q_max,  width=4).pack(side=tk.LEFT)
 
-        ttk.Label(frm, text="Accel Thr / Penalty").grid(row=17, column=0, sticky="e", **pad)
-        row17 = ttk.Frame(frm); row17.grid(row=17, column=1, sticky="w")
+        ttk.Label(frm, text="Accel Thr / Penalty").grid(row=18, column=0, sticky="e", **pad)
+        row17 = ttk.Frame(frm); row17.grid(row=18, column=1, sticky="w")
         ttk.Entry(row17, textvariable=self.v_accel_thr,     width=8).pack(side=tk.LEFT, padx=(0,4))
         ttk.Entry(row17, textvariable=self.v_accel_penalty, width=8).pack(side=tk.LEFT)
 
-        ttk.Label(frm, text="Gyro Thr / Penalty").grid(row=17, column=2, sticky="e", **pad)
-        row17b = ttk.Frame(frm); row17b.grid(row=17, column=3, sticky="w")
+        ttk.Label(frm, text="Gyro Thr / Penalty").grid(row=18, column=2, sticky="e", **pad)
+        row17b = ttk.Frame(frm); row17b.grid(row=18, column=3, sticky="w")
         ttk.Entry(row17b, textvariable=self.v_gyro_thr,     width=8).pack(side=tk.LEFT, padx=(0,4))
         ttk.Entry(row17b, textvariable=self.v_gyro_penalty, width=8).pack(side=tk.LEFT)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=18, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=19, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
         # --- Heartbeat params (Optical Flow)
-        ttk.Label(frm, text="Heartbeat (Optical Flow)").grid(row=19, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Rate (Hz)").grid(row=20, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_hb_of_rate, width=8).grid(row=20, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Sys / Comp").grid(row=20, column=2, sticky="e", **pad)
-        row20 = ttk.Frame(frm); row20.grid(row=20, column=3, sticky="w")
+        ttk.Label(frm, text="Heartbeat (Optical Flow)").grid(row=20, column=0, columnspan=4, sticky="w", **pad)
+        ttk.Label(frm, text="Rate (Hz)").grid(row=21, column=0, sticky="e", **pad)
+        ttk.Entry(frm, textvariable=self.v_hb_of_rate, width=8).grid(row=21, column=1, sticky="w", **pad)
+        ttk.Label(frm, text="Sys / Comp").grid(row=21, column=2, sticky="e", **pad)
+        row20 = ttk.Frame(frm); row20.grid(row=21, column=3, sticky="w")
         ttk.Entry(row20, textvariable=self.v_hb_of_sysid,  width=5).pack(side=tk.LEFT, padx=(0,4))
         ttk.Entry(row20, textvariable=self.v_hb_of_compid, width=5).pack(side=tk.LEFT)
 
-        ttk.Label(frm, text="Type / Autopilot").grid(row=21, column=0, sticky="e", **pad)
-        row21 = ttk.Frame(frm); row21.grid(row=21, column=1, sticky="w")
+        ttk.Label(frm, text="Type / Autopilot").grid(row=22, column=0, sticky="e", **pad)
+        row21 = ttk.Frame(frm); row21.grid(row=22, column=1, sticky="w")
         ttk.Entry(row21, textvariable=self.v_hb_of_type,  width=5).pack(side=tk.LEFT, padx=(0,4))
         ttk.Entry(row21, textvariable=self.v_hb_of_autop, width=5).pack(side=tk.LEFT)
-        ttk.Label(frm, text="Base / Custom / Status").grid(row=21, column=2, sticky="e", **pad)
-        row21b = ttk.Frame(frm); row21b.grid(row=21, column=3, sticky="w")
+        ttk.Label(frm, text="Base / Custom / Status").grid(row=22, column=2, sticky="e", **pad)
+        row21b = ttk.Frame(frm); row21b.grid(row=22, column=3, sticky="w")
         ttk.Entry(row21b, textvariable=self.v_hb_of_mode, width=5).pack(side=tk.LEFT, padx=(0,2))
         ttk.Entry(row21b, textvariable=self.v_hb_of_cus,  width=5).pack(side=tk.LEFT, padx=(0,2))
         ttk.Entry(row21b, textvariable=self.v_hb_of_stat, width=5).pack(side=tk.LEFT)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=22, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=23, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
         # --- Heartbeat params (Distance Sensor)
-        ttk.Label(frm, text="Heartbeat (Distance Sensor)").grid(row=23, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Rate (Hz)").grid(row=24, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_hb_ds_rate, width=8).grid(row=24, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Sys / Comp").grid(row=24, column=2, sticky="e", **pad)
-        row24 = ttk.Frame(frm); row24.grid(row=24, column=3, sticky="w")
+        ttk.Label(frm, text="Heartbeat (Distance Sensor)").grid(row=24, column=0, columnspan=4, sticky="w", **pad)
+        ttk.Label(frm, text="Rate (Hz)").grid(row=25, column=0, sticky="e", **pad)
+        ttk.Entry(frm, textvariable=self.v_hb_ds_rate, width=8).grid(row=25, column=1, sticky="w", **pad)
+        ttk.Label(frm, text="Sys / Comp").grid(row=25, column=2, sticky="e", **pad)
+        row24 = ttk.Frame(frm); row24.grid(row=25, column=3, sticky="w")
         ttk.Entry(row24, textvariable=self.v_hb_ds_sysid,  width=5).pack(side=tk.LEFT, padx=(0,4))
         ttk.Entry(row24, textvariable=self.v_hb_ds_compid, width=5).pack(side=tk.LEFT)
 
-        ttk.Label(frm, text="Type / Autopilot").grid(row=25, column=0, sticky="e", **pad)
-        row25 = ttk.Frame(frm); row25.grid(row=25, column=1, sticky="w")
+        ttk.Label(frm, text="Type / Autopilot").grid(row=26, column=0, sticky="e", **pad)
+        row25 = ttk.Frame(frm); row25.grid(row=26, column=1, sticky="w")
         ttk.Entry(row25, textvariable=self.v_hb_ds_type,  width=5).pack(side=tk.LEFT, padx=(0,4))
         ttk.Entry(row25, textvariable=self.v_hb_ds_autop, width=5).pack(side=tk.LEFT)
-        ttk.Label(frm, text="Base / Custom / Status").grid(row=25, column=2, sticky="e", **pad)
-        row25b = ttk.Frame(frm); row25b.grid(row=25, column=3, sticky="w")
+        ttk.Label(frm, text="Base / Custom / Status").grid(row=26, column=2, sticky="e", **pad)
+        row25b = ttk.Frame(frm); row25b.grid(row=26, column=3, sticky="w")
         ttk.Entry(row25b, textvariable=self.v_hb_ds_mode, width=5).pack(side=tk.LEFT, padx=(0,2))
         ttk.Entry(row25b, textvariable=self.v_hb_ds_cus,  width=5).pack(side=tk.LEFT, padx=(0,2))
         ttk.Entry(row25b, textvariable=self.v_hb_ds_stat, width=5).pack(side=tk.LEFT)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=26, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=27, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
         # --- Gazebo Logging ---
-        ttk.Label(frm, text="Gazebo Logging").grid(row=27, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Log File").grid(row=28, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_log_path, width=32).grid(row=28, column=1, columnspan=2, sticky="we", **pad)
-        ttk.Button(frm, text="Browse...", command=self.on_browse_log).grid(row=28, column=3, sticky="w", **pad)
+        ttk.Label(frm, text="Gazebo Logging").grid(row=28, column=0, columnspan=4, sticky="w", **pad)
+        ttk.Label(frm, text="Log File").grid(row=29, column=0, sticky="e", **pad)
+        ttk.Entry(frm, textvariable=self.v_log_path, width=32).grid(row=29, column=1, columnspan=2, sticky="we", **pad)
+        ttk.Button(frm, text="Browse...", command=self.on_browse_log).grid(row=29, column=3, sticky="w", **pad)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=29, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=30, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
         # --- Control
         ctrl = ttk.Frame(frm)
-        ctrl.grid(row=30, column=0, columnspan=4, sticky="e", **pad)
+        ctrl.grid(row=31, column=0, columnspan=4, sticky="e", **pad)
         ttk.Button(ctrl, text="Start Relay", command=self.on_start).grid(row=0, column=0, padx=6)
         ttk.Button(ctrl, text="Stop Relay",  command=self.on_stop).grid(row=0, column=1, padx=6)
 
         # Save/Apply
         save = ttk.Frame(frm)
-        save.grid(row=31, column=0, columnspan=4, sticky="e", **pad)
+        save.grid(row=32, column=0, columnspan=4, sticky="e", **pad)
         ttk.Button(save, text="Save", command=self.on_save).grid(row=0, column=0, padx=6)
         ttk.Button(save, text="Apply & Close", command=self.on_apply_close).grid(row=0, column=1, padx=6)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=32, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=33, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
         # --- Status (3 lines)
         self.lbl_status1 = ttk.Label(frm, text="Status: -")
-        self.lbl_status1.grid(row=33, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status1.grid(row=34, column=0, columnspan=4, sticky="w", **pad)
         self.lbl_status2 = ttk.Label(frm, text="-")
-        self.lbl_status2.grid(row=34, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status2.grid(row=35, column=0, columnspan=4, sticky="w", **pad)
         self.lbl_status3 = ttk.Label(frm, text="-")
-        self.lbl_status3.grid(row=35, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status3.grid(row=36, column=0, columnspan=4, sticky="w", **pad)
 
     # ---------------- Helpers ----------------
     def _enum_serial_ports(self):
@@ -262,6 +277,8 @@ class RelaySettingsWindow(tk.Toplevel):
             "serial_port": self.v_serial_port.get().strip(),
             "serial_baud": int(self.v_baud.get()),
             "flow_sensor_id": int(self.v_flow_id.get()),
+            "enable_optical_flow_serial": bool(self.v_enable_of_serial.get()),
+            "enable_distance_serial": bool(self.v_enable_distance_serial.get()),
             "gazebo_log_path": self.v_log_path.get().strip(),
             # Autostart
             "autostart": bool(self.v_autostart.get()),
@@ -379,6 +396,9 @@ class RelaySettingsWindow(tk.Toplevel):
             gz = st.get("gazebo_listen", "-")
             ext = st.get("ext_dst", "-")
             dup = st.get("dist_udp", "-")
+            serial_connected = bool(st.get("serial_connected", False))
+            of_enabled = bool(st.get("of_serial_enabled", False))
+            dist_enabled = bool(st.get("distance_serial_enabled", False))
             log_active = bool(st.get("gazebo_logging_active", False))
             log_path = st.get("gazebo_log_path", "") or ""
             log_count = st.get("gazebo_logged_count")
@@ -389,7 +409,13 @@ class RelaySettingsWindow(tk.Toplevel):
                 f"Dist={dist:.2f} m (age {dage:.1f}s) | "
                 f"OF q={q} h={h:.2f} (age {of_age:.1f}s)"
             )
-            line2 = f"GZ={gz} → EXT={ext} | UDPdist={dup} | COM={serial}"
+            serial_info = f"COM={serial}"
+            if serial_connected:
+                svc = ["OF=ON" if of_enabled else "OF=OFF", "Dist=ON" if dist_enabled else "Dist=OFF"]
+                serial_info += f" [{', '.join(svc)}]"
+            else:
+                serial_info += " (closed)"
+            line2 = f"GZ={gz} → EXT={ext} | UDPdist={dup} | {serial_info}"
             if log_active and log_path:
                 disp = os.path.basename(log_path) or log_path
                 if isinstance(log_count, (int, float)):

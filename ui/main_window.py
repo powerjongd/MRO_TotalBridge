@@ -119,6 +119,11 @@ class MainWindow(tk.Tk):
         self.preview_info_var = tk.StringVar(value="Last: - | Size: -")
         self.zoom_var = tk.StringVar(value="Zoom: 1.00x")
 
+        self._preview_last_time = "-"
+        self._preview_last_size = "-"
+        self._current_zoom_value = 1.0
+        self._refresh_preview_info_label()
+
         self._build_layout()
         self._bind_events()
         self._init_zoom_subscription()
@@ -286,7 +291,14 @@ class MainWindow(tk.Tk):
             zoom = float(value)
         except Exception:
             zoom = 1.0
+        self._current_zoom_value = zoom
         self.zoom_var.set(f"Zoom: {zoom:.2f}x")
+        self._refresh_preview_info_label()
+
+    def _refresh_preview_info_label(self) -> None:
+        info = f"Last: {self._preview_last_time} | Size: {self._preview_last_size}"
+        info += f" | Zoom: {self._current_zoom_value:.2f}x"
+        self.preview_info_var.set(info)
 
     def on_preview(self, jpeg_bytes: bytes):
         """
@@ -313,7 +325,9 @@ class MainWindow(tk.Tk):
 
                 kb = len(jpeg_bytes) / 1024.0
                 tstr = time.strftime("%H:%M:%S", time.localtime(self._last_img_ts))
-                self.preview_info_var.set(f"Last: {tstr} | Size: {kb:.1f} KB")
+                self._preview_last_time = tstr
+                self._preview_last_size = f"{kb:.1f} KB"
+                self._refresh_preview_info_label()
             except Exception as e:
                 self.preview_label.configure(text=f"Preview error: {e}", image="")
                 self.preview_label.image = None
