@@ -13,9 +13,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 try:
-    from typing import Optional, Dict, Any, Callable, Deque
+    from typing import Optional, Dict, Any, Callable, Deque, Tuple
 except Exception:
-    Optional = Dict = Any = Callable = Deque = object  # type: ignore
+    Optional = Dict = Any = Callable = Deque = Tuple = object  # type: ignore
 
 from utils.observers import ObservableFloat
 
@@ -110,6 +110,18 @@ class MainWindow(tk.Tk):
         self._last_photo = None
         self._last_img_ts = 0.0
         self._preview_paused = False
+        self._preview_lock = threading.Lock()
+        self._preview_last_monotonic = 0.0
+        try:
+            preview_interval = float(self.cfg.get("bridge", {}).get("preview_min_interval", 1.0))
+            self._preview_gui_min_interval = max(0.0, preview_interval)
+        except Exception:
+            self._preview_gui_min_interval = 1.0
+        self._preview_pending_frame: Optional[Tuple[bytes, float]] = None
+        self._preview_worker_event = threading.Event()
+        self._preview_worker_stop = threading.Event()
+        self._preview_worker: Optional[threading.Thread] = None
+        self._preview_target_size: Tuple[int, int] = (640, 480)
 
         self.bridge_status_var = tk.StringVar(value="Image Stream Module: Stopped (Realtime)")
         self.gimbal_status_var = tk.StringVar(value="Gimbal: Deactivated")
@@ -125,6 +137,7 @@ class MainWindow(tk.Tk):
         self._refresh_preview_info_label()
 
         self._build_layout()
+        self.preview_label.bind("<Configure>", self._on_preview_label_resize)
         self._bind_events()
         self._init_zoom_subscription()
 
@@ -133,6 +146,8 @@ class MainWindow(tk.Tk):
             self.bridge.preview_cb = self.on_preview
         except Exception:
             pass
+
+        self._start_preview_worker()
 
         # 주기 상태 갱신
         self._refresh_status_periodic()
@@ -300,6 +315,94 @@ class MainWindow(tk.Tk):
         info += f" | Zoom: {self._current_zoom_value:.2f}x"
         self.preview_info_var.set(info)
 
+    def _on_preview_label_resize(self, event) -> None:
+        with self._preview_lock:
+            self._preview_target_size = (max(event.width, 1), max(event.height, 1))
+
+    def _start_preview_worker(self) -> None:
+        if self._preview_worker is not None and self._preview_worker.is_alive():
+            return
+
+        def _worker_loop() -> None:
+            self._preview_worker_loop()
+
+        self._preview_worker = threading.Thread(
+            target=_worker_loop,
+            name="PreviewDecoder",
+            daemon=True,
+        )
+        self._preview_worker.start()
+
+    def _preview_worker_loop(self) -> None:
+        while not self._preview_worker_stop.is_set():
+            self._preview_worker_event.wait()
+            if self._preview_worker_stop.is_set():
+                break
+            while True:
+                with self._preview_lock:
+                    frame = self._preview_pending_frame
+                    if frame is None:
+                        self._preview_worker_event.clear()
+                        break
+                    self._preview_pending_frame = None
+                    target_size = self._preview_target_size
+                jpeg_bytes, wall_time = frame
+                try:
+                    img = Image.open(io.BytesIO(jpeg_bytes))
+                    img.load()
+                    if img.mode not in ("RGB", "RGBA", "L"):
+                        img = img.convert("RGB")
+                    if target_size[0] > 0 and target_size[1] > 0:
+                        img.thumbnail(target_size, Image.Resampling.LANCZOS)
+                    processed_img = img.copy()
+                    img.close()
+                except Exception as exc:
+                    try:
+                        self.after(0, lambda err=exc: self._handle_preview_error(err))
+                    except tk.TclError:
+                        pass
+                    continue
+                kb = len(jpeg_bytes) / 1024.0
+                try:
+                    self.after(
+                        0,
+                        lambda p_img=processed_img, raw=jpeg_bytes, ts=wall_time, kb_val=kb: self._apply_preview_image(
+                            p_img, raw, ts, kb_val
+                        ),
+                    )
+                except tk.TclError:
+                    return
+
+    def _handle_preview_error(self, err: Exception) -> None:
+        self.preview_label.configure(text=f"Preview error: {err}", image="")
+        self.preview_label.image = None
+        self._last_photo = None
+
+    def _apply_preview_image(
+        self,
+        processed_img: Image.Image,
+        jpeg_bytes: bytes,
+        wall_time: float,
+        kb_val: float,
+    ) -> None:
+        if self._preview_paused:
+            return
+        try:
+            photo = ImageTk.PhotoImage(processed_img)
+        except Exception as exc:
+            self._handle_preview_error(exc)
+            return
+
+        self.preview_label.configure(image=photo, text="")
+        self.preview_label.image = photo
+        self._last_photo = (photo, jpeg_bytes)
+        self._last_img_ts = wall_time
+
+        tstr = time.strftime("%H:%M:%S", time.localtime(wall_time))
+        self._preview_last_time = tstr
+        self._preview_last_size = f"{kb_val:.1f} KB"
+        self._refresh_preview_info_label()
+
     def on_preview(self, jpeg_bytes: bytes):
         """
         ImageStreamBridge가 UDP로 최신 JPEG을 수신할 때 호출됨 (백그라운드 스레드).
@@ -308,40 +411,30 @@ class MainWindow(tk.Tk):
         if self._preview_paused:
             return
 
-        def _update():
-            try:
-                img = Image.open(io.BytesIO(jpeg_bytes))
-                # 라벨 크기에 맞춰 썸네일
-                w = max(self.preview_label.winfo_width(), 1)
-                h = max(self.preview_label.winfo_height(), 1)
-                img.thumbnail((w, h), Image.Resampling.LANCZOS)
-
-                photo = ImageTk.PhotoImage(img)
-                self.preview_label.configure(image=photo, text="")
-                # 참조 유지
-                self.preview_label.image = photo
-                self._last_photo = (photo, jpeg_bytes)
-                self._last_img_ts = time.time()
-
-                kb = len(jpeg_bytes) / 1024.0
-                tstr = time.strftime("%H:%M:%S", time.localtime(self._last_img_ts))
-                self._preview_last_time = tstr
-                self._preview_last_size = f"{kb:.1f} KB"
-                self._refresh_preview_info_label()
-            except Exception as e:
-                self.preview_label.configure(text=f"Preview error: {e}", image="")
-                self.preview_label.image = None
-                self._last_photo = None
-
-        # GUI 스레드에서 실행
-        self.after(0, _update)
+        wall_time = time.time()
+        with self._preview_lock:
+            if self._preview_paused:
+                return
+            now = time.monotonic()
+            if (
+                self._preview_gui_min_interval > 0.0
+                and now - self._preview_last_monotonic < self._preview_gui_min_interval
+            ):
+                return
+            self._preview_last_monotonic = now
+            self._preview_pending_frame = (jpeg_bytes, wall_time)
+        self._preview_worker_event.set()
 
     def toggle_preview_pause(self):
         self._preview_paused = not self._preview_paused
         if self._preview_paused:
+            with self._preview_lock:
+                self._preview_pending_frame = None
             self.preview_label.configure(text="Preview paused", image="")
             self.preview_label.image = None
         else:
+            with self._preview_lock:
+                self._preview_last_monotonic = 0.0
             self.preview_label.configure(text="Waiting for UDP image..." if not self._last_photo else "")
             # 재갱신은 다음 프레임 수신 때 반영
 
@@ -580,6 +673,11 @@ class MainWindow(tk.Tk):
                 self._zoom_unsubscribe()
             except Exception:
                 pass
+        self._preview_worker_stop.set()
+        self._preview_worker_event.set()
+        worker = getattr(self, "_preview_worker", None)
+        if isinstance(worker, threading.Thread):
+            worker.join(timeout=1.0)
         handler = getattr(self, "_log_handler", None)
         if handler is not None:
             try:

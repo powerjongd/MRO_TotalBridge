@@ -196,6 +196,7 @@ class AppConfig:
         # GUI 미리보기 등
         b.setdefault("console_echo", True)         # 콘솔 로그 echo
         b.setdefault("show_hud", True)             # (옵션) 간단 상태 표시
+        b.setdefault("preview_min_interval", 1.0)  # GUI 미리보기 프레임 최소 간격 (초)
         # req_capture / get_imgnum 페이로드 정책
         b.setdefault("use_1byte_payload_for_rcv", True)
         b.setdefault("zoom_scale", 1.0)
