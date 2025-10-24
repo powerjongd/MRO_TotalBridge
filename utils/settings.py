@@ -341,6 +341,7 @@ class AppConfig:
         heartbeat_cfg.setdefault("recovery_cooldown_sec", 30.0)
         heartbeat_cfg.setdefault("restart_delay_sec", 1.0)
         heartbeat_cfg.setdefault("restart_bridge", True)
+        heartbeat_cfg.setdefault("restart_mode", "bridge")
 
     # ---------- 편의 메서드 ----------
 

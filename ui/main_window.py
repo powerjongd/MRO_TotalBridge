@@ -4,18 +4,21 @@ from __future__ import annotations
 from PIL import Image, ImageTk
 import io
 import os
+import sys
 import time
 
 import logging
+import subprocess
 import threading
 from collections import deque
 import tkinter as tk
 from tkinter import ttk, messagebox
+import shlex
 
 try:
-    from typing import Optional, Dict, Any, Callable, Deque, Tuple
+    from typing import Optional, Dict, Any, Callable, Deque, Tuple, Sequence, List
 except Exception:
-    Optional = Dict = Any = Callable = Deque = Tuple = object  # type: ignore
+    Optional = Dict = Any = Callable = Deque = Tuple = Sequence = List = object  # type: ignore
 
 from utils.observers import ObservableFloat
 
@@ -23,10 +26,10 @@ from utils.observers import ObservableFloat
 class TkHeartbeatMonitor:
     """Background watchdog that monitors Tk `after` callbacks.
 
-    If the main loop stops scheduling heartbeats for longer than the configured
-    timeout, the monitor attempts to recover the image bridge module by
-    restarting it.  This helps when the UI thread is starved and the operator
-    perceives the entire bridge as frozen.
+    When the Tk main loop stops scheduling callbacks beyond the configured
+    timeout the monitor can either restart the image bridge module or replace
+    the entire process.  This makes it possible to recover even if the GUI
+    thread is permanently stalled.
     """
 
     def __init__(
@@ -41,6 +44,8 @@ class TkHeartbeatMonitor:
         timeout: float = 5.0,
         cooldown: float = 30.0,
         restart_delay: float = 1.0,
+        restart_mode: str = "bridge",
+        restart_command: Optional[Sequence[str]] = None,
     ) -> None:
         self._app = app
         self._log = log
@@ -51,6 +56,12 @@ class TkHeartbeatMonitor:
         self._timeout = max(0.5, float(timeout))
         self._cooldown = max(1.0, float(cooldown))
         self._restart_delay = max(0.0, float(restart_delay))
+        rm = (restart_mode or "bridge").strip().lower()
+        self._restart_mode = rm if rm in {"bridge", "process"} else "bridge"
+        if restart_command is not None:
+            self._restart_command = [str(part) for part in restart_command if str(part)]
+        else:
+            self._restart_command = None
 
         self._stop_event = threading.Event()
         self._last_pulse = time.monotonic()
@@ -112,14 +123,24 @@ class TkHeartbeatMonitor:
         try:
             self._last_recovery = time.monotonic()
             try:
-                self._log.warning(
-                    "[WATCHDOG] Tk heartbeat stalled for %.1fs (timeout %.1fs). Restarting image bridge.",
-                    elapsed,
-                    self._timeout,
-                )
+                if self._restart_mode == "process":
+                    self._log.warning(
+                        "[WATCHDOG] Tk heartbeat stalled for %.1fs (timeout %.1fs). Restarting entire process.",
+                        elapsed,
+                        self._timeout,
+                    )
+                else:
+                    self._log.warning(
+                        "[WATCHDOG] Tk heartbeat stalled for %.1fs (timeout %.1fs). Restarting image bridge.",
+                        elapsed,
+                        self._timeout,
+                    )
             except Exception:
                 pass
-            self._restart_bridge()
+            if self._restart_mode == "process":
+                self._restart_process()
+            else:
+                self._restart_bridge()
         finally:
             self._recovery_lock.release()
 
@@ -153,6 +174,49 @@ class TkHeartbeatMonitor:
                 self._log.error("[WATCHDOG] Bridge restart failed: %s", exc)
             except Exception:
                 pass
+
+    def _restart_process(self) -> None:
+        cmd = self._restart_command or self._compute_default_restart_command()
+        if not cmd:
+            try:
+                self._log.error("[WATCHDOG] No restart command available; skipping process restart.")
+            except Exception:
+                pass
+            return
+        try:
+            os.execv(cmd[0], cmd)
+        except Exception as exec_err:
+            try:
+                self._log.error("[WATCHDOG] execv failed (%s); attempting spawn fallback.", exec_err)
+            except Exception:
+                pass
+            try:
+                subprocess.Popen(cmd)
+            except Exception as spawn_err:
+                try:
+                    self._log.error("[WATCHDOG] Process spawn fallback failed: %s", spawn_err)
+                except Exception:
+                    pass
+                return
+            os._exit(0)
+
+    def _compute_default_restart_command(self) -> Optional[List[str]]:
+        try:
+            argv = list(sys.argv)
+            if not argv:
+                return None
+            if getattr(sys, "frozen", False):
+                exe = sys.executable or argv[0]
+                if not exe:
+                    return None
+                return [os.path.abspath(exe)] + argv[1:]
+            python_exe = sys.executable
+            if not python_exe:
+                return None
+            script_path = os.path.abspath(argv[0])
+            return [python_exe, script_path] + argv[1:]
+        except Exception:
+            return None
 
 
 class TkTextHandler(logging.Handler):
@@ -1007,9 +1071,30 @@ class MainWindow(tk.Tk):
         timeout = max(interval * 2.0, _float("timeout_sec", 5.0))
         cooldown = max(timeout, _float("recovery_cooldown_sec", 30.0))
         restart_delay = max(0.0, _float("restart_delay_sec", 1.0))
+        restart_mode_cfg = heartbeat_cfg.get("restart_mode", "bridge")
+        restart_mode = "bridge"
+        if isinstance(restart_mode_cfg, str):
+            candidate = restart_mode_cfg.strip().lower()
+            if candidate in {"bridge", "process"}:
+                restart_mode = candidate
         restart_bridge = bool(heartbeat_cfg.get("restart_bridge", True))
 
-        bridge_obj = self.bridge if restart_bridge else None
+        bridge_obj = self.bridge if restart_mode == "bridge" and restart_bridge else None
+
+        restart_command: Optional[Sequence[str]] = None
+        raw_restart_cmd = heartbeat_cfg.get("restart_command")
+        if isinstance(raw_restart_cmd, str):
+            raw_restart_cmd = raw_restart_cmd.strip()
+            if raw_restart_cmd:
+                try:
+                    restart_command = shlex.split(raw_restart_cmd)
+                except ValueError as exc:
+                    try:
+                        self.log.warning("[WATCHDOG] Invalid restart_command: %s", exc)
+                    except Exception:
+                        pass
+        elif isinstance(raw_restart_cmd, (list, tuple)):
+            restart_command = [str(part) for part in raw_restart_cmd if str(part)]
 
         self._heartbeat_monitor = TkHeartbeatMonitor(
             self,
@@ -1021,6 +1106,8 @@ class MainWindow(tk.Tk):
             timeout=timeout,
             cooldown=cooldown,
             restart_delay=restart_delay,
+            restart_mode=restart_mode,
+            restart_command=restart_command,
         )
 
 
