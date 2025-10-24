@@ -20,6 +20,141 @@ except Exception:
 from utils.observers import ObservableFloat
 
 
+class TkHeartbeatMonitor:
+    """Background watchdog that monitors Tk `after` callbacks.
+
+    If the main loop stops scheduling heartbeats for longer than the configured
+    timeout, the monitor attempts to recover the image bridge module by
+    restarting it.  This helps when the UI thread is starved and the operator
+    perceives the entire bridge as frozen.
+    """
+
+    def __init__(
+        self,
+        app: tk.Tk,
+        *,
+        log: logging.Logger,
+        bridge,
+        bridge_settings_getter: Optional[Callable[[], Dict[str, Any]]] = None,
+        enabled: bool = True,
+        interval: float = 1.0,
+        timeout: float = 5.0,
+        cooldown: float = 30.0,
+        restart_delay: float = 1.0,
+    ) -> None:
+        self._app = app
+        self._log = log
+        self._bridge = bridge
+        self._bridge_settings_getter = bridge_settings_getter
+        self._enabled = bool(enabled)
+        self._interval = max(0.1, float(interval))
+        self._timeout = max(0.5, float(timeout))
+        self._cooldown = max(1.0, float(cooldown))
+        self._restart_delay = max(0.0, float(restart_delay))
+
+        self._stop_event = threading.Event()
+        self._last_pulse = time.monotonic()
+        self._last_recovery = 0.0
+        self._recovery_lock = threading.Lock()
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._initialized = False
+
+        if not self._enabled:
+            return
+
+        self._schedule_pulse()
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_loop,
+            name="TkHeartbeatMonitor",
+            daemon=True,
+        )
+        self._monitor_thread.start()
+
+    def stop(self) -> None:
+        if not self._enabled:
+            return
+        self._stop_event.set()
+        if self._monitor_thread is not None:
+            self._monitor_thread.join(timeout=1.0)
+            self._monitor_thread = None
+
+    # ----- internal helpers -----
+
+    def _schedule_pulse(self) -> None:
+        try:
+            self._app.after(int(self._interval * 1000), self._record_pulse)
+        except tk.TclError:
+            # Tk has already been destroyed.
+            self._stop_event.set()
+
+    def _record_pulse(self) -> None:
+        self._last_pulse = time.monotonic()
+        self._initialized = True
+        if self._stop_event.is_set() or not self._enabled:
+            return
+        self._schedule_pulse()
+
+    def _monitor_loop(self) -> None:
+        while not self._stop_event.wait(self._interval):
+            if not self._initialized:
+                continue
+            now = time.monotonic()
+            elapsed = now - self._last_pulse
+            if elapsed < self._timeout:
+                continue
+            if now - self._last_recovery < self._cooldown:
+                continue
+            self._trigger_recovery(elapsed)
+
+    def _trigger_recovery(self, elapsed: float) -> None:
+        if not self._recovery_lock.acquire(blocking=False):
+            return
+        try:
+            self._last_recovery = time.monotonic()
+            try:
+                self._log.warning(
+                    "[WATCHDOG] Tk heartbeat stalled for %.1fs (timeout %.1fs). Restarting image bridge.",
+                    elapsed,
+                    self._timeout,
+                )
+            except Exception:
+                pass
+            self._restart_bridge()
+        finally:
+            self._recovery_lock.release()
+
+    def _restart_bridge(self) -> None:
+        if not self._bridge:
+            return
+        try:
+            if hasattr(self._bridge, "stop"):
+                self._bridge.stop()
+        except Exception as exc:
+            try:
+                self._log.error("[WATCHDOG] Bridge stop failed: %s", exc)
+            except Exception:
+                pass
+        if self._restart_delay > 0.0:
+            time.sleep(self._restart_delay)
+        if callable(getattr(self._bridge, "update_settings", None)) and self._bridge_settings_getter:
+            try:
+                settings = self._bridge_settings_getter() or {}
+                self._bridge.update_settings(settings)
+            except Exception as exc:
+                try:
+                    self._log.error("[WATCHDOG] Bridge settings refresh failed: %s", exc)
+                except Exception:
+                    pass
+        try:
+            if hasattr(self._bridge, "start"):
+                self._bridge.start()
+        except Exception as exc:
+            try:
+                self._log.error("[WATCHDOG] Bridge restart failed: %s", exc)
+            except Exception:
+                pass
+
+
 class TkTextHandler(logging.Handler):
     """Logging handler that forwards records to a Tk Text widget."""
 
@@ -98,6 +233,7 @@ class MainWindow(tk.Tk):
         self.log = log
         self.zoom_state = zoom_state
         self._zoom_unsubscribe: Optional[Callable[[], None]] = None
+        self._heartbeat_monitor: Optional[TkHeartbeatMonitor] = None
 
         gimbal_cfg = self.cfg.setdefault("gimbal", {})
         initial_method = str(gimbal_cfg.get("control_method", "tcp")).lower()
@@ -161,6 +297,7 @@ class MainWindow(tk.Tk):
             pass
 
         self._start_preview_worker()
+        self._init_heartbeat_monitor()
 
         # 주기 상태 갱신
         self._refresh_status_periodic()
@@ -832,10 +969,59 @@ class MainWindow(tk.Tk):
             except Exception:
                 pass
             self._log_handler = None
+        if self._heartbeat_monitor is not None:
+            try:
+                self._heartbeat_monitor.stop()
+            except Exception:
+                pass
+            self._heartbeat_monitor = None
         try:
             self.destroy()
         except Exception:
             pass
+
+
+    def _init_heartbeat_monitor(self) -> None:
+        ui_cfg = self.cfg.get("ui")
+        if not isinstance(ui_cfg, dict):
+            ui_cfg = {}
+            self.cfg["ui"] = ui_cfg
+        else:
+            self.cfg["ui"] = ui_cfg
+        heartbeat_cfg = ui_cfg.setdefault("heartbeat", {})
+        if not isinstance(heartbeat_cfg, dict):
+            heartbeat_cfg = {}
+            ui_cfg["heartbeat"] = heartbeat_cfg
+
+        enabled = bool(heartbeat_cfg.get("enabled", True))
+        if not enabled:
+            return
+
+        def _float(cfg_key: str, default: float) -> float:
+            try:
+                return float(heartbeat_cfg.get(cfg_key, default))
+            except (TypeError, ValueError):
+                return default
+
+        interval = max(0.1, _float("interval_sec", 1.0))
+        timeout = max(interval * 2.0, _float("timeout_sec", 5.0))
+        cooldown = max(timeout, _float("recovery_cooldown_sec", 30.0))
+        restart_delay = max(0.0, _float("restart_delay_sec", 1.0))
+        restart_bridge = bool(heartbeat_cfg.get("restart_bridge", True))
+
+        bridge_obj = self.bridge if restart_bridge else None
+
+        self._heartbeat_monitor = TkHeartbeatMonitor(
+            self,
+            log=self.log,
+            bridge=bridge_obj,
+            bridge_settings_getter=lambda: self.cfg.get("bridge", {}),
+            enabled=enabled,
+            interval=interval,
+            timeout=timeout,
+            cooldown=cooldown,
+            restart_delay=restart_delay,
+        )
 
 
 def run_gui(

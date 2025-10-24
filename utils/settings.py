@@ -326,6 +326,22 @@ class AppConfig:
         if path:
             ensure_dir(os.path.dirname(path))
 
+        # UI / Heartbeat 기본값
+        ui_cfg = self._extras.setdefault("ui", {})
+        if not isinstance(ui_cfg, dict):
+            ui_cfg = {}
+            self._extras["ui"] = ui_cfg
+        heartbeat_cfg = ui_cfg.setdefault("heartbeat", {})
+        if not isinstance(heartbeat_cfg, dict):
+            heartbeat_cfg = {}
+            ui_cfg["heartbeat"] = heartbeat_cfg
+        heartbeat_cfg.setdefault("enabled", True)
+        heartbeat_cfg.setdefault("interval_sec", 1.0)
+        heartbeat_cfg.setdefault("timeout_sec", 5.0)
+        heartbeat_cfg.setdefault("recovery_cooldown_sec", 30.0)
+        heartbeat_cfg.setdefault("restart_delay_sec", 1.0)
+        heartbeat_cfg.setdefault("restart_bridge", True)
+
     # ---------- 편의 메서드 ----------
 
     def get_save_dir(self) -> str:
