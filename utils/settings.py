@@ -263,6 +263,7 @@ class AppConfig:
         r.setdefault("serial_port", "")
         r.setdefault("serial_baud", 115200)
         r.setdefault("flow_sensor_id", 0)
+        r.setdefault("enable_optical_flow_processing", False)
         r.setdefault("enable_optical_flow_serial", True)
         r.setdefault("enable_distance_serial", True)
         # Auto-start

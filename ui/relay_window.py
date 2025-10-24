@@ -53,9 +53,11 @@ class RelaySettingsWindow(tk.Toplevel):
         self.v_serial_port = tk.StringVar(value=rconf.get("serial_port", ""))
         self.v_baud        = tk.IntVar(value=int(rconf.get("serial_baud", 115200)))
         self.v_flow_id     = tk.IntVar(value=int(rconf.get("flow_sensor_id", 0)))
+        self.v_enable_of_processing = tk.BooleanVar(value=bool(rconf.get("enable_optical_flow_processing", False)))
         self.v_enable_of_serial = tk.BooleanVar(value=bool(rconf.get("enable_optical_flow_serial", True)))
         self.v_enable_distance_serial = tk.BooleanVar(value=bool(rconf.get("enable_distance_serial", True)))
         self.v_log_path    = tk.StringVar(value=rconf.get("gazebo_log_path", ""))
+        self.v_enable_gz_log = tk.BooleanVar(value=bool(rconf.get("enable_gazebo_logging", True)))
 
         # --- Auto-start
         self.v_autostart = tk.BooleanVar(value=bool(rconf.get("autostart", False)))
@@ -89,6 +91,8 @@ class RelaySettingsWindow(tk.Toplevel):
         self.v_hb_ds_mode     = tk.IntVar(value=int(rconf.get("hb_ds_base_mode", 0)))
         self.v_hb_ds_cus      = tk.IntVar(value=int(rconf.get("hb_ds_custom_mode", 0)))
         self.v_hb_ds_stat     = tk.IntVar(value=int(rconf.get("hb_ds_system_status", 4)))
+
+        self._updating_log_toggle = False
 
         self._build_layout()
         self._refresh_status_periodic()
@@ -163,7 +167,12 @@ class RelaySettingsWindow(tk.Toplevel):
         ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=15, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
         # --- Optical Flow Scale & Quality Model
-        ttk.Label(frm, text="Optical Flow Parameters").grid(row=16, column=0, columnspan=4, sticky="w", **pad)
+        ttk.Label(frm, text="Optical Flow Parameters").grid(row=16, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Checkbutton(
+            frm,
+            text="Optical Flow 계산 활성화",
+            variable=self.v_enable_of_processing,
+        ).grid(row=16, column=2, columnspan=2, sticky="w", **pad)
         ttk.Label(frm, text="Pixel Scale").grid(row=17, column=0, sticky="e", **pad)
         ttk.Entry(frm, textvariable=self.v_of_scale_pix, width=10).grid(row=17, column=1, sticky="w", **pad)
         ttk.Label(frm, text="Q Base / Min / Max").grid(row=17, column=2, sticky="e", **pad)
@@ -232,29 +241,41 @@ class RelaySettingsWindow(tk.Toplevel):
         ttk.Entry(frm, textvariable=self.v_log_path, width=32).grid(row=29, column=1, columnspan=2, sticky="we", **pad)
         ttk.Button(frm, text="Browse...", command=self.on_browse_log).grid(row=29, column=3, sticky="w", **pad)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=30, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        ttk.Checkbutton(
+            frm,
+            text="Enable Gazebo Logging",
+            variable=self.v_enable_gz_log,
+            command=self.on_toggle_logging,
+        ).grid(row=30, column=0, columnspan=4, sticky="w", **pad)
+
+        log_ctrl = ttk.Frame(frm)
+        log_ctrl.grid(row=31, column=0, columnspan=4, sticky="e", **pad)
+        ttk.Button(log_ctrl, text="Start Logging", command=self.on_start_logging).grid(row=0, column=0, padx=6)
+        ttk.Button(log_ctrl, text="Stop Logging", command=self.on_stop_logging).grid(row=0, column=1, padx=6)
+
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=32, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
         # --- Control
         ctrl = ttk.Frame(frm)
-        ctrl.grid(row=31, column=0, columnspan=4, sticky="e", **pad)
+        ctrl.grid(row=33, column=0, columnspan=4, sticky="e", **pad)
         ttk.Button(ctrl, text="Start Relay", command=self.on_start).grid(row=0, column=0, padx=6)
         ttk.Button(ctrl, text="Stop Relay",  command=self.on_stop).grid(row=0, column=1, padx=6)
 
         # Save/Apply
         save = ttk.Frame(frm)
-        save.grid(row=32, column=0, columnspan=4, sticky="e", **pad)
+        save.grid(row=34, column=0, columnspan=4, sticky="e", **pad)
         ttk.Button(save, text="Save", command=self.on_save).grid(row=0, column=0, padx=6)
         ttk.Button(save, text="Apply & Close", command=self.on_apply_close).grid(row=0, column=1, padx=6)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=33, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=35, column=0, columnspan=4, sticky="ew", pady=(6,6))
 
         # --- Status (3 lines)
         self.lbl_status1 = ttk.Label(frm, text="Status: -")
-        self.lbl_status1.grid(row=34, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status1.grid(row=36, column=0, columnspan=4, sticky="w", **pad)
         self.lbl_status2 = ttk.Label(frm, text="-")
-        self.lbl_status2.grid(row=35, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status2.grid(row=37, column=0, columnspan=4, sticky="w", **pad)
         self.lbl_status3 = ttk.Label(frm, text="-")
-        self.lbl_status3.grid(row=36, column=0, columnspan=4, sticky="w", **pad)
+        self.lbl_status3.grid(row=38, column=0, columnspan=4, sticky="w", **pad)
 
     # ---------------- Helpers ----------------
     def _enum_serial_ports(self):
@@ -277,9 +298,11 @@ class RelaySettingsWindow(tk.Toplevel):
             "serial_port": self.v_serial_port.get().strip(),
             "serial_baud": int(self.v_baud.get()),
             "flow_sensor_id": int(self.v_flow_id.get()),
+            "enable_optical_flow_processing": bool(self.v_enable_of_processing.get()),
             "enable_optical_flow_serial": bool(self.v_enable_of_serial.get()),
             "enable_distance_serial": bool(self.v_enable_distance_serial.get()),
             "gazebo_log_path": self.v_log_path.get().strip(),
+            "enable_gazebo_logging": bool(self.v_enable_gz_log.get()),
             # Autostart
             "autostart": bool(self.v_autostart.get()),
             # OF scale & quality
@@ -349,6 +372,45 @@ class RelaySettingsWindow(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("Error", f"Open serial failed:\n{e}")
 
+    def _set_log_toggle(self, value: bool) -> None:
+        self._updating_log_toggle = True
+        try:
+            self.v_enable_gz_log.set(value)
+        finally:
+            self._updating_log_toggle = False
+
+    def _apply_logging_state(self, enable: bool, announce: bool) -> None:
+        previous = bool(self.v_enable_gz_log.get())
+        if enable and not self.v_log_path.get().strip():
+            messagebox.showerror("로그 경로 필요", "로그 파일 경로를 먼저 지정하세요.")
+            self._set_log_toggle(previous)
+            return
+
+        self._set_log_toggle(enable)
+        try:
+            self._apply_to_runtime()
+        except Exception as e:
+            messagebox.showerror("오류", f"로깅 상태 변경 실패:\n{e}")
+            self._set_log_toggle(previous)
+            return
+
+        if announce:
+            if enable:
+                messagebox.showinfo("Gazebo 로깅", "로그 기록을 시작했습니다.")
+            else:
+                messagebox.showinfo("Gazebo 로깅", "로그 기록을 중지했습니다.")
+
+    def on_toggle_logging(self) -> None:
+        if self._updating_log_toggle:
+            return
+        self._apply_logging_state(bool(self.v_enable_gz_log.get()), announce=False)
+
+    def on_start_logging(self) -> None:
+        self._apply_logging_state(True, announce=True)
+
+    def on_stop_logging(self) -> None:
+        self._apply_logging_state(False, announce=True)
+
     def on_start(self) -> None:
         try:
             self._apply_to_runtime()
@@ -397,21 +459,29 @@ class RelaySettingsWindow(tk.Toplevel):
             ext = st.get("ext_dst", "-")
             dup = st.get("dist_udp", "-")
             serial_connected = bool(st.get("serial_connected", False))
+            proc_enabled = bool(st.get("of_processing_enabled", False))
             of_enabled = bool(st.get("of_serial_enabled", False))
             dist_enabled = bool(st.get("distance_serial_enabled", False))
             log_active = bool(st.get("gazebo_logging_active", False))
             log_path = st.get("gazebo_log_path", "") or ""
             log_count = st.get("gazebo_logged_count")
             log_error = st.get("gazebo_log_error")
+            desired_enable = bool(st.get("enable_gazebo_logging", True))
+            if bool(self.v_enable_gz_log.get()) != desired_enable:
+                self._set_log_toggle(desired_enable)
 
             line1 = (
                 f"Status: {'Running' if act else 'Stopped'} | "
                 f"Dist={dist:.2f} m (age {dage:.1f}s) | "
-                f"OF q={q} h={h:.2f} (age {of_age:.1f}s)"
+                f"OF(proc={'ON' if proc_enabled else 'OFF'}) q={q} h={h:.2f} (age {of_age:.1f}s)"
             )
             serial_info = f"COM={serial}"
             if serial_connected:
-                svc = ["OF=ON" if of_enabled else "OF=OFF", "Dist=ON" if dist_enabled else "Dist=OFF"]
+                svc = [
+                    "Proc=ON" if proc_enabled else "Proc=OFF",
+                    "OF=ON" if of_enabled else "OF=OFF",
+                    "Dist=ON" if dist_enabled else "Dist=OFF",
+                ]
                 serial_info += f" [{', '.join(svc)}]"
             else:
                 serial_info += " (closed)"
