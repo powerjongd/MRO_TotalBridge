@@ -87,13 +87,23 @@ class ImageStreamBridge:
         self._zoom_requires_processing = self._zoom_scale > 1.0001
         self._logged_zoom_warn = False
 
+        self._zoom_cb_lock = threading.Lock()
+        self._zoom_callbacks: List[Callable[[float], None]] = []
+
+        self._lock = threading.Lock()
+        self._latest_raw_jpeg: Optional[bytes] = None
+        self._latest_jpeg: Optional[bytes] = None
+        self._next_image_number: int = 0  # 다음 저장 번호 (000..999 롤링)
+
+        self._last_preview_monotonic = 0.0
         try:
-            self._preview_min_interval = max(
-                0.0, float(settings.get("preview_min_interval", 1.0))
-            )
+            preview_interval_cfg = settings.get("preview_min_interval", 1.0)
+        except Exception:
+            preview_interval_cfg = 1.0
+        try:
+            self.configure_preview_interval(preview_interval_cfg, reset_gate=False)
         except Exception:
             self._preview_min_interval = 1.0
-        self._last_preview_monotonic = 0.0
 
         self._gimbal: Optional["GimbalControl"] = None
         try:
@@ -105,10 +115,6 @@ class ImageStreamBridge:
         except Exception:
             self._gimbal_sensor_id = 0
 
-        self._zoom_cb_lock = threading.Lock()
-        self._zoom_callbacks: List[Callable[[float], None]] = []
-
-
         # runtime
         self.is_server_running = threading.Event()
         self._tcp_sock: Optional[socket.socket] = None
@@ -117,11 +123,6 @@ class ImageStreamBridge:
 
         self._tcp_thread: Optional[threading.Thread] = None
         self._udp_thread: Optional[threading.Thread] = None
-
-        self._lock = threading.Lock()
-        self._latest_raw_jpeg: Optional[bytes] = None
-        self._latest_jpeg: Optional[bytes] = None
-        self._next_image_number: int = 0  # 다음 저장 번호 (000..999 롤링)
 
         # UDP reassembly buffer
         self._reasm: Optional[Dict[str, Any]] = None
@@ -204,7 +205,9 @@ class ImageStreamBridge:
                 pass
         if "preview_min_interval" in settings:
             try:
-                self._preview_min_interval = max(0.0, float(settings["preview_min_interval"]))
+                self.configure_preview_interval(
+                    settings["preview_min_interval"], announce=True
+                )
             except Exception:
                 pass
 
@@ -238,6 +241,33 @@ class ImageStreamBridge:
     def configure_gimbal_forwarding(self, sensor_type: int, sensor_id: int) -> None:
         self._gimbal_sensor_type = int(sensor_type)
         self._gimbal_sensor_id = int(sensor_id)
+
+    def configure_preview_interval(
+        self,
+        interval: float,
+        *,
+        reset_gate: bool = True,
+        announce: bool = False,
+    ) -> float:
+        """Update the minimum interval between preview callbacks.
+
+        Returns the normalized interval that will be used by the bridge."""
+
+        try:
+            value = max(0.0, float(interval))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid preview interval") from exc
+
+        with self._lock:
+            previous = self._preview_min_interval if hasattr(self, "_preview_min_interval") else None
+            self._preview_min_interval = value
+            if reset_gate:
+                self._last_preview_monotonic = 0.0
+
+        if announce and (previous is None or abs(value - previous) > 1e-6):
+            self.log(f"[BRIDGE] preview interval -> {value:.2f}s")
+
+        return self._preview_min_interval
 
     def register_zoom_update_callback(
         self, callback: Optional[Callable[[float], None]]
