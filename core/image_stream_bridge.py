@@ -95,6 +95,11 @@ class ImageStreamBridge:
         self._latest_jpeg: Optional[bytes] = None
         self._next_image_number: int = 0  # 다음 저장 번호 (000..999 롤링)
 
+        self._latest_frame_token: int = 0
+        self._last_captured_frame_token: int = -1
+        self._capture_inflight: bool = False
+        self._last_capture_completed_at: float = 0.0
+
         self._last_preview_monotonic = 0.0
         try:
             preview_interval_cfg = settings.get("preview_min_interval", 1.0)
@@ -409,7 +414,27 @@ class ImageStreamBridge:
             self.log(f"[BRIDGE] unknown cmd_id: {cmd_name}")
 
     def _handle_req_capture(self) -> None:
+        current_frame_token = -1
+        next_num = 0
+        fn = ""
+        latest_jpeg: Optional[bytes]
+        fallback_src: Optional[str]
+
         with self._lock:
+            if self._capture_inflight:
+                self.log("[BRIDGE] capture request ignored: capture already in progress")
+                return
+            current_frame_token = self._latest_frame_token
+            if (
+                self._last_captured_frame_token >= 0
+                and current_frame_token <= self._last_captured_frame_token
+                and self._last_capture_completed_at > 0.0
+            ):
+                self.log(
+                    "[BRIDGE] capture request ignored: waiting for a new frame before saving"
+                )
+                return
+            self._capture_inflight = True
             next_num = self._next_image_number
             fn = os.path.join(self.realtime_dir, f"{next_num:03d}.jpg")
             latest_jpeg = self._latest_jpeg
@@ -418,44 +443,56 @@ class ImageStreamBridge:
         saved_kb: Optional[float] = None
         saved_from = "live"
         write_error: Optional[Exception] = None
+        capture_success = False
 
-        if latest_jpeg:
-            try:
-                with open(fn, "wb") as f:
-                    f.write(latest_jpeg)
-                saved_kb = len(latest_jpeg) / 1024.0
-            except Exception as exc:
-                write_error = exc
-        else:
-            write_error = RuntimeError("no in-memory frame to capture")
-
-        if write_error:
-            if fallback_src and os.path.exists(fallback_src):
+        try:
+            if latest_jpeg:
                 try:
-                    shutil.copy2(fallback_src, fn)
-                    saved_kb = os.path.getsize(fn) / 1024.0
-                    saved_from = "fallback"
+                    with open(fn, "wb") as f:
+                        f.write(latest_jpeg)
+                    saved_kb = len(latest_jpeg) / 1024.0
+                except Exception as exc:
+                    write_error = exc
+            else:
+                write_error = RuntimeError("no in-memory frame to capture")
+
+            if write_error:
+                if fallback_src and os.path.exists(fallback_src):
+                    try:
+                        shutil.copy2(fallback_src, fn)
+                        saved_kb = os.path.getsize(fn) / 1024.0
+                        saved_from = "fallback"
+                        self.log(
+                            f"[BRIDGE] capture fallback: reused {fallback_src} due to {write_error}"
+                        )
+                    except Exception as copy_exc:
+                        self.log(
+                            f"[BRIDGE] capture fallback failed: {copy_exc} (original: {write_error})"
+                        )
+                        return
+                else:
                     self.log(
-                        f"[BRIDGE] capture fallback: reused {fallback_src} due to {write_error}"
-                    )
-                except Exception as copy_exc:
-                    self.log(
-                        f"[BRIDGE] capture fallback failed: {copy_exc} (original: {write_error})"
+                        f"[BRIDGE] capture failed ({write_error}); no previous image to copy"
                     )
                     return
-            else:
-                self.log(f"[BRIDGE] capture failed ({write_error}); no previous image to copy")
-                return
 
-        with self._lock:
-            self._last_image_meta["saved_path"] = fn
-            if saved_kb is not None:
-                self._last_image_meta["kb"] = saved_kb
-            self.log(
-                f"[BRIDGE] saved image ({saved_from}): {fn} | next_num(before)={next_num:03d}"
-            )
-            self._next_image_number = (self._next_image_number + 1) % 1000
-            self.log(f"[BRIDGE] next image number -> {self._next_image_number:03d}")
+            capture_success = True
+        finally:
+            with self._lock:
+                self._capture_inflight = False
+                if capture_success:
+                    self._last_captured_frame_token = current_frame_token
+                    self._last_capture_completed_at = time.monotonic()
+                    self._last_image_meta["saved_path"] = fn
+                    if saved_kb is not None:
+                        self._last_image_meta["kb"] = saved_kb
+                    self.log(
+                        f"[BRIDGE] saved image ({saved_from}): {fn} | next_num(before)={next_num:03d}"
+                    )
+                    self._next_image_number = (self._next_image_number + 1) % 1000
+                    self.log(
+                        f"[BRIDGE] next image number -> {self._next_image_number:03d}"
+                    )
 
     def _handle_set_count(self, count_num: int) -> None:
         with self._lock:
@@ -710,11 +747,12 @@ class ImageStreamBridge:
         zoomed = self._apply_zoom_to_jpeg(raw)
         should_emit_preview = False
         with self._lock:
+            if update_timestamp:
+                self._latest_frame_token += 1
+                self._last_image_meta["received_at"] = datetime.datetime.now()
             self._latest_raw_jpeg = raw
             self._latest_jpeg = zoomed
             self._last_image_meta["kb"] = len(zoomed) / 1024.0
-            if update_timestamp:
-                self._last_image_meta["received_at"] = datetime.datetime.now()
             now = time.monotonic()
             if self._preview_min_interval <= 0.0:
                 should_emit_preview = True
