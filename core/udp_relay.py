@@ -81,6 +81,14 @@ class UdpRelay:
             daemon=True,
         )
         self._gazebo_log_writer.start()
+        self._gazebo_log_interval_usec = 100_000  # 최대 10Hz 샘플링
+        self._gazebo_log_last_emit_usec = 0
+
+        # Gazebo 패킷 후처리 워커 (OF 계산/로그)
+        self._gazebo_packet_queue: Optional["queue.Queue[Optional[bytes]]"] = None
+        self._gazebo_packet_worker: Optional[threading.Thread] = None
+        self._gazebo_queue_drop_count = 0
+        self._gazebo_queue_last_warn = 0.0
 
         self._rover_logger: Optional["RoverRelayLogger"] = None
 
@@ -106,10 +114,23 @@ class UdpRelay:
         self.mav_ser: Optional[mavutil.mavfile] = None
         self._serial_lock = threading.Lock()
         self._serial_retry_at = 0.0
+        self.enable_of_processing = bool(self.s.get("enable_optical_flow_processing", False))
+        self.s["enable_optical_flow_processing"] = self.enable_of_processing
         self.enable_of_serial = bool(self.s.get("enable_optical_flow_serial", True))
         self.s["enable_optical_flow_serial"] = self.enable_of_serial
         self.enable_distance_serial = bool(self.s.get("enable_distance_serial", True))
         self.s["enable_distance_serial"] = self.enable_distance_serial
+
+        # Gazebo ExternalCtrl UDP 목적지 (런타임에 변경 가능)
+        ext_ip = str(self.s.get("ext_udp_ip", "127.0.0.1")).strip() or "127.0.0.1"
+        ext_port = int(self.s.get("ext_udp_port", 9091))
+        self._ext_udp_target_lock = threading.Lock()
+        self._ext_udp_target: Tuple[str, int] = (ext_ip, ext_port)
+        self._ext_udp_target_generation = 0
+        self._ext_udp_disabled_warn_ts = 0.0
+        self._forward_stats_lock = threading.Lock()
+        self._gazebo_forward_count = 0
+        self._gazebo_forward_last_ts = 0.0
 
         # Threads
         self.stop_ev = threading.Event()
@@ -155,6 +176,7 @@ class UdpRelay:
     def update_settings(self, s: Dict[str, Any]) -> None:
         log_path_changed = False
         logging_state_changed = False
+        processing_changed = False
         serial_changed = False
         baud_changed = False
         serial_flags_changed = False
@@ -162,6 +184,7 @@ class UdpRelay:
             prev_port = str(self.s.get("serial_port", "")).strip()
             prev_baud = int(self.s.get("serial_baud", 115200))
             prev_flags = (self.enable_of_serial, self.enable_distance_serial)
+            prev_processing = self.enable_of_processing
             self.s.update(s)
             new_port = str(self.s.get("serial_port", prev_port)).strip()
             self.s["serial_port"] = new_port
@@ -189,6 +212,19 @@ class UdpRelay:
             self.hb_of_mode    = int(self.s.get("hb_of_base_mode", self.hb_of_mode))
             self.hb_of_cus     = int(self.s.get("hb_of_custom_mode", self.hb_of_cus))
             self.hb_of_stat    = int(self.s.get("hb_of_system_status", self.hb_of_stat))
+            # 외부 컨트롤러 목적지
+            with self._ext_udp_target_lock:
+                prev_target = self._ext_udp_target
+            new_ext_ip = str(self.s.get("ext_udp_ip", prev_target[0])).strip() or "127.0.0.1"
+            new_ext_port = int(self.s.get("ext_udp_port", prev_target[1]))
+            self.s["ext_udp_ip"] = new_ext_ip
+            self.s["ext_udp_port"] = new_ext_port
+            if (new_ext_ip, new_ext_port) != prev_target:
+                self._set_ext_udp_target(new_ext_ip, new_ext_port)
+                self.log(
+                    "[RELAY] ExternalCtrl UDP target set to "
+                    f"{new_ext_ip}:{new_ext_port}"
+                )
             # HB DS
             self.hb_ds_rate_hz = float(self.s.get("hb_ds_rate_hz", self.hb_ds_rate_hz))
             self.hb_ds_sysid   = int(self.s.get("hb_ds_sysid", self.hb_ds_sysid))
@@ -200,12 +236,18 @@ class UdpRelay:
             self.hb_ds_stat    = int(self.s.get("hb_ds_system_status", self.hb_ds_stat))
             # Distance 모드 및 플래그
             self.distance_mode = str(self.s.get("distance_mode", self.distance_mode)).lower()
+            self.enable_of_processing = bool(
+                self.s.get("enable_optical_flow_processing", self.enable_of_processing)
+            )
+            self.s["enable_optical_flow_processing"] = self.enable_of_processing
             self.enable_of_serial = bool(self.s.get("enable_optical_flow_serial", self.enable_of_serial))
             self.s["enable_optical_flow_serial"] = self.enable_of_serial
             self.enable_distance_serial = bool(self.s.get("enable_distance_serial", self.enable_distance_serial))
             self.s["enable_distance_serial"] = self.enable_distance_serial
             if (self.enable_of_serial, self.enable_distance_serial) != prev_flags:
                 serial_flags_changed = True
+            if self.enable_of_processing != prev_processing:
+                processing_changed = True
             new_log_path = str(self.s.get("gazebo_log_path", self.gazebo_log_path)).strip()
             if new_log_path != self.gazebo_log_path:
                 log_path_changed = True
@@ -221,11 +263,35 @@ class UdpRelay:
             self._drop_serial_connection(schedule_retry=False)
             if self.running and (self.enable_of_serial or self.enable_distance_serial):
                 self._open_serial_shared(force=True)
+        if processing_changed:
+            self.log(
+                "[RELAY] optical flow processing "
+                + ("enabled" if self.enable_of_processing else "disabled")
+            )
+            with self._lock:
+                self.last_of_send_ts = 0.0
+                self.of_quality = 0
         if log_path_changed or logging_state_changed:
             if self.running:
                 self._open_gazebo_log(reset_counter=True)
             else:
                 self._close_gazebo_log()
+
+    def _set_ext_udp_target(self, ip: str, port: int) -> None:
+        target = (ip, int(port))
+        with self._ext_udp_target_lock:
+            self._ext_udp_target = target
+            self._ext_udp_target_generation += 1
+            self._ext_udp_disabled_warn_ts = 0.0
+
+    def _maybe_warn_missing_ext_target(self, now: float) -> None:
+        should_warn = False
+        with self._ext_udp_target_lock:
+            if now - self._ext_udp_disabled_warn_ts >= 5.0:
+                self._ext_udp_disabled_warn_ts = now
+                should_warn = True
+        if should_warn:
+            self.log("[RELAY] ExternalCtrl UDP target not set; relay skipped")
 
     # ------------- 라이프사이클 -------------
     def start(self) -> None:
@@ -235,6 +301,12 @@ class UdpRelay:
             self.running = True
 
         self.stop_ev.clear()
+
+        with self._forward_stats_lock:
+            self._gazebo_forward_count = 0
+            self._gazebo_forward_last_ts = 0.0
+        with self._ext_udp_target_lock:
+            self._ext_udp_disabled_warn_ts = 0.0
 
         # 외부 UDP 송신 소켓 (ExternalCtrl)
         self.sock_ext = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -294,6 +366,16 @@ class UdpRelay:
         self._open_gazebo_log(reset_counter=True)
 
         # 스레드 가동
+        self._gazebo_packet_queue = queue.Queue(maxsize=2000)
+        self._gazebo_queue_drop_count = 0
+        self._gazebo_queue_last_warn = 0.0
+        self._gazebo_packet_worker = threading.Thread(
+            target=self._gazebo_packet_worker_loop,
+            name="gazebo-packet-worker",
+            daemon=True,
+        )
+        self._gazebo_packet_worker.start()
+
         self.th_gazebo = threading.Thread(target=self._gazebo_loop, daemon=True)
         self.th_gazebo.start()
 
@@ -322,6 +404,17 @@ class UdpRelay:
         except Exception:
             pass
         self.sock_gazebo = None
+
+        if self._gazebo_packet_queue is not None:
+            try:
+                self._gazebo_packet_queue.put_nowait(None)
+            except Exception:
+                pass
+        worker = self._gazebo_packet_worker
+        if worker:
+            worker.join(timeout=1.0)
+        self._gazebo_packet_worker = None
+        self._gazebo_packet_queue = None
 
         try:
             if self.sock_ext:
@@ -354,6 +447,9 @@ class UdpRelay:
     # ------------- 상태 -------------
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
+            with self._forward_stats_lock:
+                forward_count = self._gazebo_forward_count
+                forward_last_ts = self._gazebo_forward_last_ts if self._gazebo_forward_last_ts else None
             status = {
                 "activated": self.running,
                 "distance_m": self.current_distance_m,
@@ -363,11 +459,14 @@ class UdpRelay:
                 "of_last_send_age_s": (time.time() - self.last_of_send_ts) if self.last_of_send_ts else -1.0,
                 "serial": self.s.get("serial_port", ""),
                 "serial_connected": bool(self.mav_ser),
+                "of_processing_enabled": bool(self.enable_of_processing),
                 "of_serial_enabled": bool(self.enable_of_serial),
                 "distance_serial_enabled": bool(self.enable_distance_serial),
                 "gazebo_listen": f"{self.s.get('gazebo_listen_ip','0.0.0.0')}:{int(self.s.get('gazebo_listen_port',17000))}",
                 "ext_dst": f"{self.s.get('ext_udp_ip','127.0.0.1')}:{int(self.s.get('ext_udp_port',9091))}",
                 "dist_udp": f"{self.s.get('distance_udp_listen_ip','0.0.0.0')}:{int(self.s.get('distance_udp_listen_port',14650))}",
+                "gazebo_forward_count": forward_count,
+                "gazebo_forward_last_ts": forward_last_ts,
             }
         with self._gazebo_log_lock:
             status.update({
@@ -516,6 +615,8 @@ class UdpRelay:
         self.gazebo_log_path = str(self.s.get("gazebo_log_path", self.gazebo_log_path)).strip()
         path = self.gazebo_log_path
         allow, reason = self._should_enable_gazebo_log()
+        if reset_counter:
+            self._gazebo_log_last_emit_usec = 0
         with self._gazebo_log_lock:
             if not allow:
                 if self._gazebo_log_file:
@@ -605,6 +706,7 @@ class UdpRelay:
             self._gazebo_log_active = False
             self._gazebo_log_block_reason = ""
             self._gazebo_log_closing = False
+        self._gazebo_log_last_emit_usec = 0
 
     def _write_gazebo_log(
         self,
@@ -679,6 +781,24 @@ class UdpRelay:
             finally:
                 self._gazebo_log_queue.task_done()
 
+    def _should_log_gazebo_sample(self, time_usec: int) -> bool:
+        interval = self._gazebo_log_interval_usec
+        if interval <= 0:
+            return True
+        if time_usec <= 0:
+            # 타임스탬프가 없으면 실시간 기준으로 판단
+            now_usec = int(time.time() * 1_000_000)
+        else:
+            now_usec = time_usec
+        last = self._gazebo_log_last_emit_usec
+        if last == 0 or now_usec < last:
+            self._gazebo_log_last_emit_usec = now_usec
+            return True
+        if now_usec - last >= interval:
+            self._gazebo_log_last_emit_usec = now_usec
+            return True
+        return False
+
     # ------------- Gazebo 루프 -------------
     def _gazebo_loop(self) -> None:
         """
@@ -686,17 +806,20 @@ class UdpRelay:
             * 그대로 ExternalCtrl 목적지로 relay (지연 최소)
             * 동시에 OPTICAL_FLOW(#100) 값 생성해 시리얼 송신
         """
-        ext_ip = self.s.get("ext_udp_ip", "127.0.0.1")
-        ext_port = int(self.s.get("ext_udp_port", 9091))  # 기본 9091
-        dst_tuple = (ext_ip, ext_port)
-
         buffer = bytearray(4096)
         view = memoryview(buffer)
+        cached_target: Tuple[str, int] = ("", 0)
+        cached_generation = -1
 
         while not self.stop_ev.is_set():
             sock = self.sock_gazebo
             if not sock:
                 break
+            if cached_generation != self._ext_udp_target_generation:
+                with self._ext_udp_target_lock:
+                    cached_target = self._ext_udp_target
+                    cached_generation = self._ext_udp_target_generation
+            dst_tuple = cached_target
             try:
                 size, _ = sock.recvfrom_into(view)
             except OSError as exc:
@@ -715,42 +838,112 @@ class UdpRelay:
             payload_view = view[:size]
 
             ext_sock = self.sock_ext
-            if ext_sock:
+            forwarded = False
+            if dst_tuple[1] <= 0 or not dst_tuple[0]:
+                now = time.time()
+                self._maybe_warn_missing_ext_target(now)
+            elif ext_sock:
                 try:
                     ext_sock.sendto(payload_view, dst_tuple)
+                    forwarded = True
                 except Exception as e:
                     self.log(f"[RELAY] ext send error: {e}")
 
-            if size < relay_icd.GAZEBO_STRUCT_SIZE:
+            if forwarded:
+                with self._forward_stats_lock:
+                    self._gazebo_forward_count += 1
+                    self._gazebo_forward_last_ts = time.time()
+
+            queue_ref = self._gazebo_packet_queue
+            if queue_ref:
+                try:
+                    queue_ref.put_nowait(bytes(payload_view))
+                except queue.Full:
+                    self._handle_gazebo_queue_overflow()
+
+    def _gazebo_packet_worker_loop(self) -> None:
+        queue_ref = self._gazebo_packet_queue
+        if not queue_ref:
+            return
+        while True:
+            try:
+                if self.stop_ev.is_set():
+                    payload = queue_ref.get_nowait()
+                else:
+                    payload = queue_ref.get(timeout=0.1)
+            except queue.Empty:
+                if self.stop_ev.is_set():
+                    break
                 continue
 
             try:
-                (
-                    _header_type, _msg_type, _msg_size, _reserved,
-                    _unique_id, time_usec,
-                    px, py, pz,
-                    qw, qx, qy, qz,
-                    ax, ay, az,
-                    wx, wy, wz
-                ) = struct.unpack_from(
-                    relay_icd.GAZEBO_STRUCT_FMT,
-                    payload_view,
-                    0,
-                )
-            except struct.error:
-                continue
+                if payload is None:
+                    break
+                self._process_gazebo_payload(payload)
+            finally:
+                queue_ref.task_done()
 
-            time_usec_int = int(time_usec)
-            px_f, py_f, pz_f = float(px), float(py), float(pz)
-            qw_f, qx_f, qy_f, qz_f = float(qw), float(qx), float(qy), float(qz)
-            ax_f, ay_f, az_f = float(ax), float(ay), float(az)
-            wx_f, wy_f, wz_f = float(wx), float(wy), float(wz)
+        # stop 이벤트가 설정된 후 남은 항목 처리
+        while True:
+            try:
+                payload = queue_ref.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                if payload is None:
+                    break
+                self._process_gazebo_payload(payload)
+            finally:
+                queue_ref.task_done()
 
-            ground_distance = max(0.0, pz_f)
+    def _process_gazebo_payload(self, payload: bytes) -> None:
+        if len(payload) < relay_icd.GAZEBO_STRUCT_SIZE:
+            return
 
+        try:
+            (
+                _header_type,
+                _msg_type,
+                _msg_size,
+                _reserved,
+                _unique_id,
+                time_usec,
+                px,
+                py,
+                pz,
+                qw,
+                qx,
+                qy,
+                qz,
+                ax,
+                ay,
+                az,
+                wx,
+                wy,
+                wz,
+            ) = struct.unpack_from(
+                relay_icd.GAZEBO_STRUCT_FMT,
+                payload,
+                0,
+            )
+        except struct.error:
+            return
+
+        time_usec_int = int(time_usec)
+        px_f, py_f, pz_f = float(px), float(py), float(pz)
+        qw_f, qx_f, qy_f, qz_f = float(qw), float(qx), float(qy), float(qz)
+        ax_f, ay_f, az_f = float(ax), float(ay), float(az)
+        wx_f, wy_f, wz_f = float(wx), float(wy), float(wz)
+
+        ground_distance = max(0.0, pz_f)
+
+        process_flow = bool(self.enable_of_processing)
+        sent = False
+        quality = 0
+
+        if process_flow:
             flow_comp_m_x = wy_f * ground_distance   # +Y rate → +X flow(m/s) (가정)
             flow_comp_m_y = -wx_f * ground_distance  # +X rate → -Y flow(m/s)
-
             quality = self._estimate_quality(ax_f, ay_f, az_f, wx_f, wy_f, wz_f)
 
             scale_pix = self.of_scale_pix
@@ -767,20 +960,37 @@ class UdpRelay:
                 quality=int(quality),
                 ground_distance=float(ground_distance),
             )
+        else:
+            # 처리 비활성 시 직전 발송 시각 초기화
+            sent = False
 
-            with self._lock:
-                self.last_ground_distance = ground_distance
-                self.last_av = (wx_f, wy_f, wz_f)
+        with self._lock:
+            self.last_ground_distance = ground_distance
+            self.last_av = (wx_f, wy_f, wz_f)
+            if process_flow:
                 self.of_quality = quality
                 if sent:
                     self.last_of_send_ts = time.time()
+            else:
+                self.of_quality = 0
+                self.last_of_send_ts = 0.0
 
+        if self._gazebo_logging_enabled and self._should_log_gazebo_sample(time_usec_int):
             self._write_gazebo_log(
                 time_usec=time_usec_int,
                 position=(px_f, py_f, pz_f),
                 orientation_wxyz=(qw_f, qx_f, qy_f, qz_f),
                 angular_velocity=(wx_f, wy_f, wz_f),
             )
+
+    def _handle_gazebo_queue_overflow(self) -> None:
+        self._gazebo_queue_drop_count += 1
+        now = time.time()
+        if now - self._gazebo_queue_last_warn >= 5.0:
+            self._gazebo_queue_last_warn = now
+            dropped = self._gazebo_queue_drop_count
+            self._gazebo_queue_drop_count = 0
+            self.log(f"[RELAY] Gazebo packet worker backlog, dropped {dropped} packets")
 
     # ------------- Distance RAW UDP 루프 -------------
     def _distance_raw_udp_loop(self) -> None:
