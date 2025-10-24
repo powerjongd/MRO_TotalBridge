@@ -16,23 +16,17 @@ except ImportError:
     from serial.serialutil import SerialException
 
 from utils.helpers import euler_to_quat, wrap_angle_deg
-from network.bridge_tcp import parse_bridge_tcp_command
 from network.gimbal_icd import (
+    TYPE_GIMBAL_CTRL,
+    TYPE_POWER_CTRL,
     MC_HB_TYPE,
     GIMBAL_STATUS_FLAGS,
-    PARAM_TABLE,
-    PARAM_COUNT,
-    TCP_CMD_GET_STATUS,
     TCP_CMD_SET_TARGET,
     TCP_CMD_SET_ZOOM,
-)
-from network.gimbal_messages import (
-    StatusSnapshot,
-    build_gimbal_ctrl_packet,
-    build_power_ctrl_packet,
-    build_status_frame,
-    parse_set_target,
-    parse_set_zoom,
+    TCP_CMD_GET_STATUS,
+    TCP_CMD_STATUS,
+    PARAM_TABLE,
+    PARAM_COUNT,
 )
 
 
@@ -619,20 +613,19 @@ class GimbalControl:
         return bytes(buf)
 
     def _process_tcp_command(self, payload: bytes, conn: socket.socket) -> None:
-        command = parse_bridge_tcp_command(payload)
-        if command is None:
+        if len(payload) < 9:
             self.log("[GIMBAL] TCP payload too short")
             return
-
-        if command.cmd_id == TCP_CMD_SET_TARGET:
-            target = parse_set_target(command)
-            if target is None:
-                self.log("[GIMBAL] TCP SET_TARGET invalid payload")
+        ts_sec, ts_nsec, cmd_id = struct.unpack("<IIB", payload[:9])
+        body = payload[9:]
+        if cmd_id == TCP_CMD_SET_TARGET:
+            fmt = "<hh3d3f"
+            if len(body) != struct.calcsize(fmt):
+                self.log("[GIMBAL] TCP SET_TARGET malformed payload")
                 return
-            sensor_type = self._sanitize_sensor_code(target.sensor_type)
-            sensor_id = self._sanitize_sensor_code(target.sensor_id)
-            px, py, pz = target.position_xyz
-            r_sim, p_sim, y_sim = target.sim_rpy
+            sensor_type_raw, sensor_id_raw, px, py, pz, r_sim, p_sim, y_sim = struct.unpack(fmt, body)
+            sensor_type = self._sanitize_sensor_code(sensor_type_raw)
+            sensor_id = self._sanitize_sensor_code(sensor_id_raw)
             r, p, y = self._sim_to_bridge_rpy(r_sim, p_sim, y_sim)
             with self._lock:
                 self.sensor_type = sensor_type
@@ -649,18 +642,18 @@ class GimbalControl:
                 f"xyz=({px:.2f},{py:.2f},{pz:.2f}) sim_rpy=({r_sim:.2f},{p_sim:.2f},{y_sim:.2f})"
             )
             self._send_status_message(conn)
-        elif command.cmd_id == TCP_CMD_SET_ZOOM:
-            zoom = parse_set_zoom(command)
-            if zoom is None:
-                self.log("[GIMBAL] TCP SET_ZOOM invalid payload")
+        elif cmd_id == TCP_CMD_SET_ZOOM:
+            if len(body) < 4:
+                self.log("[GIMBAL] TCP SET_ZOOM missing float")
                 return
-            self._set_zoom_scale(zoom.zoom_scale)
+            (zoom_val,) = struct.unpack("<f", body[:4])
+            self._set_zoom_scale(float(zoom_val))
             self.log(f"[GIMBAL] TCP zoom scale -> {self.zoom_scale:.2f}")
             self._send_status_message(conn)
-        elif command.cmd_id == TCP_CMD_GET_STATUS:
+        elif cmd_id == TCP_CMD_GET_STATUS:
             self._send_status_message(conn)
         else:
-            self.log(f"[GIMBAL] TCP unknown cmd: 0x{command.cmd_id:02X}")
+            self.log(f"[GIMBAL] TCP unknown cmd: 0x{cmd_id:02X}")
 
     def _send_status_message(self, conn: socket.socket) -> None:
         with self._lock:
@@ -673,20 +666,28 @@ class GimbalControl:
             max_rate = self.max_rate_dps
         r_cur_sim, p_cur_sim, y_cur_sim = self._bridge_to_sim_rpy(r_cur, p_cur, y_cur)
         r_tgt_sim, p_tgt_sim, y_tgt_sim = self._bridge_to_sim_rpy(r_tgt, p_tgt, y_tgt)
-        snapshot = StatusSnapshot(
-            sensor_type=sensor_type,
-            sensor_id=sensor_id,
-            position_xyz=(px, py, pz),
-            sim_rpy_current=(r_cur_sim, p_cur_sim, y_cur_sim),
-            sim_rpy_target=(r_tgt_sim, p_tgt_sim, y_tgt_sim),
-            zoom_scale=zoom,
-            max_rate_dps=max_rate,
+        payload = struct.pack(
+            "<hh3d3f3ff",
+            sensor_type,
+            sensor_id,
+            px,
+            py,
+            pz,
+            r_cur_sim,
+            p_cur_sim,
+            y_cur_sim,
+            r_tgt_sim,
+            p_tgt_sim,
+            y_tgt_sim,
+            zoom,
+            max_rate,
         )
         ts_sec = int(time.time())
         ts_nsec = time.time_ns() % 1_000_000_000
-        frame = build_status_frame(snapshot, ts_sec=ts_sec, ts_nsec=ts_nsec)
+        full = struct.pack("<IIB", ts_sec, ts_nsec, TCP_CMD_STATUS) + payload
+        header = struct.pack("<I", len(full))
         try:
-            conn.sendall(frame)
+            conn.sendall(header + full)
         except Exception as exc:
             self.log(f"[GIMBAL] TCP send status failed: {exc}")
 
@@ -903,11 +904,31 @@ class GimbalControl:
         sim_roll = self._normalize_angle(sim_roll)
         sim_pitch = self._normalize_angle(sim_pitch)
         sim_yaw = self._normalize_angle(sim_yaw)
-        quat = euler_to_quat(sim_roll, sim_pitch, sim_yaw)
-        return build_gimbal_ctrl_packet(sensor_type, sensor_id, (float(xyz[0]), float(xyz[1]), float(xyz[2])), quat)
+        qx, qy, qz, qw = euler_to_quat(sim_roll, sim_pitch, sim_yaw)
+        payload = struct.pack(
+            "<BB3d4f",
+            sensor_type & 0xFF,
+            sensor_id & 0xFF,
+            float(xyz[0]),
+            float(xyz[1]),
+            float(xyz[2]),
+            float(qx),
+            float(qy),
+            float(qz),
+            float(qw),
+        )
+        header = struct.pack("<BiIB", 1, TYPE_GIMBAL_CTRL, len(payload), 0)
+        return header + payload
 
     def _pack_power_ctrl(self, sensor_type: int, sensor_id: int, power_on: int) -> bytes:
-        return build_power_ctrl_packet(sensor_type, sensor_id, power_on)
+        payload = struct.pack(
+            "<BBB",
+            sensor_type & 0xFF,
+            sensor_id & 0xFF,
+            power_on & 0xFF,
+        )
+        header = struct.pack("<BiIB", 1, TYPE_POWER_CTRL, len(payload), 0)
+        return header + payload
 
     def _dump_packet_bytes(self, label: str, pkt: bytes) -> None:
         hex_str = " ".join(f"{b:02X}" for b in pkt)

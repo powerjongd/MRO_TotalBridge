@@ -32,9 +32,6 @@ from network.image_stream_icd import (
     CMD_FILE_IMG_TRANSFER,
     CMD_ACK_ZOOM_RATIO,
     COMMAND_NAMES,
-    UDP_HEADER_SIZE as ICD_UDP_HEADER_SIZE,
-    parse_udp_header,
-    pack_tcp_response,
 )
 
 
@@ -42,7 +39,7 @@ __all__ = ["ImageStreamBridge", "ImageBridgeCore"]
 
 
 class ImageStreamBridge:
-    UDP_HEADER_SIZE = ICD_UDP_HEADER_SIZE
+    UDP_HEADER_SIZE = 30
     MAX_UDP_FRAME_SIZE = 64_970
     MAX_TOTAL_IMAGE_SIZE = 128 * 1024 * 1024  # 128 MB safety cap
     MAX_FRAMES_PER_IMAGE = 4096
@@ -543,9 +540,10 @@ class ImageStreamBridge:
         ack_uuid = 0
         data = struct.pack("<II", ack_uuid, last_saved)
         ts_sec, ts_nsec = int(time.time()), time.time_ns() % 1_000_000_000
-        frame = pack_tcp_response(CMD_IMG_NUM_RESPONSE, data, ts_sec=ts_sec, ts_nsec=ts_nsec)
+        full = struct.pack("<IIB", ts_sec, ts_nsec, CMD_IMG_NUM_RESPONSE) + data
+        header = struct.pack("<I", len(full))
         try:
-            conn.sendall(frame)
+            conn.sendall(header + full)
             self.log(f"[BRIDGE] Img_Num_Response: {last_saved:03d}")
         except Exception as e:
             self.log(f"[BRIDGE] send Get_ImgNum failed: {e}")
@@ -562,9 +560,10 @@ class ImageStreamBridge:
             img = self._apply_zoom_to_jpeg(img)
         data = struct.pack("<III", ack_uuid, img_num, len(img)) + img
         ts_sec, ts_nsec = int(time.time()), time.time_ns() % 1_000_000_000
-        frame = pack_tcp_response(CMD_FILE_IMG_TRANSFER, data, ts_sec=ts_sec, ts_nsec=ts_nsec)
+        full = struct.pack("<IIB", ts_sec, ts_nsec, CMD_FILE_IMG_TRANSFER) + data
+        header = struct.pack("<I", len(full))
         try:
-            conn.sendall(frame)
+            conn.sendall(header + full)
             self.log(f"[BRIDGE] File_ImgTransfer sent: num={img_num:03d}, size={len(img)}")
         except Exception as e:
             self.log(f"[BRIDGE] send File_ImgTransfer failed: {e}")
@@ -670,7 +669,7 @@ class ImageStreamBridge:
                 time.sleep(0.05)
                 continue
 
-            header = parse_udp_header(packet)
+            header = self._parse_udp_header(packet)
             if not header or header.get("msg_type") != 9:
                 continue
 
@@ -859,9 +858,10 @@ class ImageStreamBridge:
     def _send_zoom_ratio_ack(self, conn: socket.socket, zoom_ratio: float) -> None:
         ts_sec, ts_nsec = int(time.time()), time.time_ns() % 1_000_000_000
         data = struct.pack("<f", float(zoom_ratio))
-        frame = pack_tcp_response(CMD_ACK_ZOOM_RATIO, data, ts_sec=ts_sec, ts_nsec=ts_nsec)
+        full = struct.pack("<IIB", ts_sec, ts_nsec, CMD_ACK_ZOOM_RATIO) + data
+        header = struct.pack("<I", len(full))
         try:
-            conn.sendall(frame)
+            conn.sendall(header + full)
             self.log(f"[BRIDGE] Ack_Zoomratio sent: {zoom_ratio:.3f}")
         except Exception as e:
             self.log(f"[BRIDGE] send Ack_Zoomratio failed: {e}")
@@ -926,6 +926,28 @@ class ImageStreamBridge:
             except Exception:
                 pass
         return zoomed
+
+    @classmethod
+    def _parse_udp_header(cls, data: bytes) -> Optional[Dict[str, int]]:
+        """
+        30 bytes header: <IBBHIIIIIBB>
+        keys: header_version, msg_type, protocol_type, send_count,
+              msg_frames, frame_size, frame_pos, frame_index, msg_size,
+              time_sec(1B), time_nano_sec(1B)
+        """
+        if len(data) < cls.UDP_HEADER_SIZE:
+            return None
+        try:
+            header_format = "<IBBHIIIIIBB"
+            keys = [
+                "header_version", "msg_type", "protocol_type", "send_count",
+                "msg_frames", "frame_size", "frame_pos", "frame_index",
+                "msg_size", "time_sec", "time_nano_sec",
+            ]
+            values = struct.unpack(header_format, data[: cls.UDP_HEADER_SIZE])
+            return dict(zip(keys, values))
+        except struct.error:
+            return None
 
     # --------------- utils ---------------
 
