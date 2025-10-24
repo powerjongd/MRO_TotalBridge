@@ -96,5 +96,21 @@ high-level features are:
   non-obvious.
 - Keep README.md in sync with major feature additions to aid operators.
 
+## Network Resiliency Notes (2024-06)
+
+- **UDP 이미지 재조립 안정화** – `core/image_stream_bridge.py` 의 UDP 루프는
+  이제 프레임마다 헤더 필드를 검증하고, 조각 수/총 크기/오프셋이 사양을
+  벗어나면 해당 세션을 폐기합니다. 최대 조각 크기(64,970바이트)와 총
+  이미지 크기(128MB) 상한을 초과하는 값은 즉시 거부하며, 3초 동안 갱신이
+  없으면 부분 프레임을 타임아웃 처리합니다. 소켓 오류가 발생하면
+  자동으로 소켓을 닫고 짧은 백오프 후 재오픈하여 수신이 중단되지 않게
+  했습니다.
+- **TCP 명령 경로 보호** – 헤더 길이 값은 최소/최대 범위를 검사하고,
+  페이로드는 길이에 따라 적응형 타임아웃으로 수신합니다. 타임아웃이나
+  길이 불일치가 발생하면 연결을 정리하고 클라이언트가 재연결할 수 있게
+  하여 장시간 블로킹을 방지합니다. 명령 헤더를 기다리는 동안에는 타임아웃
+  없이 소켓 타임아웃(1초)만 반복해서 polling 하므로, 장시간 명령이 없는
+  유휴 연결도 끊지 않고 유지합니다.
+
 By contributing to this repository, you agree to follow these guidelines to
 ensure consistent behavior across the Unified Bridge tooling.
