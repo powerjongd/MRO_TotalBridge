@@ -112,11 +112,23 @@ class MainWindow(tk.Tk):
         self._preview_paused = False
         self._preview_lock = threading.Lock()
         self._preview_last_monotonic = 0.0
+        self._preview_gui_min_interval = 1.0
         try:
-            preview_interval = float(self.cfg.get("bridge", {}).get("preview_min_interval", 1.0))
-            self._preview_gui_min_interval = max(0.0, preview_interval)
+            preview_interval_cfg = float(self.cfg.get("bridge", {}).get("preview_min_interval", 1.0))
         except Exception:
-            self._preview_gui_min_interval = 1.0
+            preview_interval_cfg = 1.0
+        self.preview_interval_var = tk.StringVar()
+        try:
+            self._set_preview_interval(
+                preview_interval_cfg,
+                persist=False,
+                sync_bridge=True,
+                announce_bridge=False,
+                reset_gate=False,
+            )
+        except RuntimeError:
+            self._preview_gui_min_interval = max(0.0, preview_interval_cfg)
+            self.preview_interval_var.set(f"{self._preview_gui_min_interval:.2f}")
         self._preview_pending_frame: Optional[Tuple[bytes, float]] = None
         self._preview_worker_event = threading.Event()
         self._preview_worker_stop = threading.Event()
@@ -221,6 +233,13 @@ class MainWindow(tk.Tk):
         self.lbl_preview_info.pack(fill=tk.X, pady=(0, 2))
 
         ttk.Label(right, textvariable=self.zoom_var, anchor="w").pack(fill=tk.X, pady=(0, 6))
+
+        interval_frame = ttk.Frame(right)
+        interval_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(interval_frame, text="Preview interval (s)").pack(side=tk.LEFT, padx=(0, 4))
+        interval_entry = ttk.Entry(interval_frame, textvariable=self.preview_interval_var, width=6)
+        interval_entry.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(interval_frame, text="Apply", command=self._on_apply_preview_interval).pack(side=tk.LEFT)
 
         btns = ttk.Frame(right)
         btns.pack(fill=tk.X, pady=6)
@@ -461,6 +480,81 @@ class MainWindow(tk.Tk):
 
     def _bind_events(self) -> None:
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _set_preview_interval(
+        self,
+        interval: float,
+        *,
+        persist: bool,
+        sync_bridge: bool,
+        announce_bridge: bool,
+        reset_gate: bool = True,
+    ) -> float:
+        try:
+            normalized = max(0.0, float(interval))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Invalid preview interval") from exc
+
+        applied = normalized
+        if sync_bridge:
+            configure = getattr(self.bridge, "configure_preview_interval", None)
+            if callable(configure):
+                try:
+                    result = configure(
+                        normalized,
+                        reset_gate=reset_gate,
+                        announce=announce_bridge,
+                    )
+                    if isinstance(result, (int, float)):
+                        applied = float(result)
+                except Exception as exc:
+                    raise RuntimeError("Bridge rejected preview interval") from exc
+
+        self._preview_gui_min_interval = applied
+        self.preview_interval_var.set(f"{applied:.2f}")
+        if reset_gate:
+            with self._preview_lock:
+                self._preview_last_monotonic = 0.0
+        if persist:
+            bridge_cfg = self.cfg.setdefault("bridge", {})
+            bridge_cfg["preview_min_interval"] = applied
+        return applied
+
+    def _on_apply_preview_interval(self) -> None:
+        value = self.preview_interval_var.get().strip()
+        try:
+            interval = float(value)
+        except ValueError:
+            messagebox.showerror("잘못된 값", "숫자 값을 입력하세요.")
+            self.preview_interval_var.set(f"{self._preview_gui_min_interval:.2f}")
+            return
+
+        if interval < 0:
+            messagebox.showerror("잘못된 값", "0초 이상으로 입력하세요.")
+            self.preview_interval_var.set(f"{self._preview_gui_min_interval:.2f}")
+            return
+
+        previous = self._preview_gui_min_interval
+        try:
+            applied = self._set_preview_interval(
+                interval,
+                persist=True,
+                sync_bridge=True,
+                announce_bridge=True,
+            )
+        except RuntimeError as exc:
+            self.preview_interval_var.set(f"{previous:.2f}")
+            try:
+                self.log.error("[UI] Preview interval update failed: %s", exc)
+            except Exception:
+                pass
+            messagebox.showerror("오류", "브릿지에 적용하지 못했습니다.")
+            return
+
+        try:
+            self.log.info("[UI] Preview interval updated to %.2fs", applied)
+        except Exception:
+            pass
 
     # ---------------- 상태 갱신 ----------------
 
