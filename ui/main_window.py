@@ -134,6 +134,7 @@ class MainWindow(tk.Tk):
         self._preview_worker_stop = threading.Event()
         self._preview_worker: Optional[threading.Thread] = None
         self._preview_target_size: Tuple[int, int] = (640, 480)
+        self._server_toggle_in_progress = False
 
         self.bridge_status_var = tk.StringVar(value="Image Stream Module: Stopped (Realtime)")
         self.gimbal_status_var = tk.StringVar(value="Gimbal: Deactivated")
@@ -717,19 +718,67 @@ class MainWindow(tk.Tk):
     # ---------------- 버튼 동작 ----------------
 
     def on_toggle_server(self) -> None:
+        if self._server_toggle_in_progress:
+            return
+
+        self._server_toggle_in_progress = True
         try:
-            running = getattr(self.bridge, "is_server_running", None) and self.bridge.is_server_running.is_set()
-            if running:
-                self.bridge.stop()
-                self.btn_server.configure(text="Start Image Stream Module")
-            else:
-                # 설정에서 네트워크 파라미터 읽어와 재시작 가능
-                bs = self.cfg.get("bridge", {})
-                self.bridge.update_settings(bs)
-                self.bridge.start()
-                self.btn_server.configure(text="Stop Image Stream Module")
-        except Exception as e:
-            messagebox.showerror("Error", f"Toggle server failed:\n{e}")
+            self.btn_server.configure(state=tk.DISABLED)
+        except tk.TclError:
+            self._server_toggle_in_progress = False
+            return
+
+        def _toggle_worker() -> None:
+            error: Optional[Exception] = None
+            try:
+                running_event = getattr(self.bridge, "is_server_running", None)
+                running = bool(running_event and running_event.is_set())
+                if running:
+                    self.bridge.stop()
+                else:
+                    bs = self.cfg.get("bridge", {})
+                    self.bridge.update_settings(bs)
+                    self.bridge.start()
+            except Exception as exc:
+                error = exc
+            finally:
+                def _finalize() -> None:
+                    try:
+                        running_now = bool(
+                            getattr(self.bridge, "is_server_running", None)
+                            and self.bridge.is_server_running.is_set()
+                        )
+                    except Exception:
+                        running_now = False
+
+                    btn_text = (
+                        "Stop Image Stream Module"
+                        if running_now
+                        else "Start Image Stream Module"
+                    )
+                    try:
+                        self.btn_server.configure(text=btn_text, state=tk.NORMAL)
+                    except tk.TclError:
+                        pass
+                    self._server_toggle_in_progress = False
+
+                    if error is not None:
+                        try:
+                            if hasattr(self, "log") and self.log:
+                                self.log.error("[UI] Toggle server failed: %s", error)
+                        except Exception:
+                            pass
+                        try:
+                            messagebox.showerror("Error", f"Toggle server failed:\n{error}")
+                        except tk.TclError:
+                            pass
+
+                try:
+                    self.after(0, _finalize)
+                except tk.TclError:
+                    self._server_toggle_in_progress = False
+
+        threading.Thread(target=_toggle_worker, name="BridgeToggle", daemon=True).start()
 
     def open_bridge_window(self) -> None:
         try:
