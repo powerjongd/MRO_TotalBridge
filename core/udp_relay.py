@@ -9,7 +9,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Callable, Optional, Dict, Any, Tuple
+from typing import Callable, Optional, Dict, Any, Tuple, Union
 
 from pymavlink import mavutil
 try:
@@ -83,12 +83,27 @@ class UdpRelay:
         self._gazebo_log_writer.start()
         self._gazebo_log_interval_usec = 100_000  # 최대 10Hz 샘플링
         self._gazebo_log_last_emit_usec = 0
+        self._gazebo_log_pending_flush = 0
+        self._gazebo_log_last_flush = 0.0
+        self._gazebo_log_flush_every = 20
+        self._gazebo_log_flush_interval = 0.5
 
-        # Gazebo 패킷 후처리 워커 (OF 계산/로그)
-        self._gazebo_packet_queue: Optional["queue.Queue[Optional[bytes]]"] = None
-        self._gazebo_packet_worker: Optional[threading.Thread] = None
-        self._gazebo_queue_drop_count = 0
-        self._gazebo_queue_last_warn = 0.0
+        # Gazebo 패킷 처리 스로틀링 (실시간 우선)
+        self._gazebo_process_interval_usec = max(
+            0, int(self.s.get("gazebo_process_interval_usec", 5_000))
+        )
+        self.s["gazebo_process_interval_usec"] = self._gazebo_process_interval_usec
+        if self._gazebo_process_interval_usec:
+            self._gazebo_process_interval_sec = (
+                self._gazebo_process_interval_usec / 1_000_000.0
+            )
+        else:
+            self._gazebo_process_interval_sec = 0.0
+        self._gazebo_last_process_monotonic = 0.0
+        self._gazebo_icd_mismatch_last_warn = 0.0
+        self._gazebo_icd_mismatch_count = 0
+        self._gazebo_icd_mismatch_last_reason = ""
+        self._gazebo_payload_fallback_warned = False
 
         self._rover_logger: Optional["RoverRelayLogger"] = None
 
@@ -258,6 +273,23 @@ class UdpRelay:
                 logging_state_changed = True
                 self._gazebo_logging_enabled = new_enabled
             self.s["enable_gazebo_logging"] = self._gazebo_logging_enabled
+            new_process_interval = int(
+                self.s.get(
+                    "gazebo_process_interval_usec",
+                    self._gazebo_process_interval_usec,
+                )
+            )
+            if new_process_interval < 0:
+                new_process_interval = 0
+            if new_process_interval != self._gazebo_process_interval_usec:
+                self._gazebo_process_interval_usec = new_process_interval
+                if new_process_interval:
+                    self._gazebo_process_interval_sec = (
+                        new_process_interval / 1_000_000.0
+                    )
+                else:
+                    self._gazebo_process_interval_sec = 0.0
+            self.s["gazebo_process_interval_usec"] = self._gazebo_process_interval_usec
         self.log("[RELAY] settings updated")
         if serial_changed or baud_changed or serial_flags_changed:
             self._drop_serial_connection(schedule_retry=False)
@@ -365,17 +397,8 @@ class UdpRelay:
         # Gazebo 로그 오픈
         self._open_gazebo_log(reset_counter=True)
 
+        self._gazebo_last_process_monotonic = 0.0
         # 스레드 가동
-        self._gazebo_packet_queue = queue.Queue(maxsize=2000)
-        self._gazebo_queue_drop_count = 0
-        self._gazebo_queue_last_warn = 0.0
-        self._gazebo_packet_worker = threading.Thread(
-            target=self._gazebo_packet_worker_loop,
-            name="gazebo-packet-worker",
-            daemon=True,
-        )
-        self._gazebo_packet_worker.start()
-
         self.th_gazebo = threading.Thread(target=self._gazebo_loop, daemon=True)
         self.th_gazebo.start()
 
@@ -404,17 +427,7 @@ class UdpRelay:
         except Exception:
             pass
         self.sock_gazebo = None
-
-        if self._gazebo_packet_queue is not None:
-            try:
-                self._gazebo_packet_queue.put_nowait(None)
-            except Exception:
-                pass
-        worker = self._gazebo_packet_worker
-        if worker:
-            worker.join(timeout=1.0)
-        self._gazebo_packet_worker = None
-        self._gazebo_packet_queue = None
+        self._gazebo_last_process_monotonic = 0.0
 
         try:
             if self.sock_ext:
@@ -675,6 +688,8 @@ class UdpRelay:
                 self._gazebo_log_start_ts = time.time()
                 self._gazebo_log_last_ts = self._gazebo_log_start_ts
                 self._gazebo_log_closing = False
+                self._gazebo_log_pending_flush = 0
+                self._gazebo_log_last_flush = self._gazebo_log_start_ts
             except Exception as e:
                 self._gazebo_log_error = str(e)
                 self._gazebo_log_active = False
@@ -706,6 +721,8 @@ class UdpRelay:
             self._gazebo_log_active = False
             self._gazebo_log_block_reason = ""
             self._gazebo_log_closing = False
+            self._gazebo_log_pending_flush = 0
+            self._gazebo_log_last_flush = 0.0
         self._gazebo_log_last_emit_usec = 0
 
     def _write_gazebo_log(
@@ -722,9 +739,9 @@ class UdpRelay:
             return
         self._gazebo_log_queue.put((
             int(time_usec),
-            tuple(float(v) for v in position),
-            tuple(float(v) for v in orientation_wxyz),
-            tuple(float(v) for v in angular_velocity),
+            position,
+            orientation_wxyz,
+            angular_velocity,
         ))
 
     def _gazebo_log_worker_loop(self) -> None:
@@ -756,9 +773,9 @@ class UdpRelay:
                     fh = self._gazebo_log_file
                 if not fh:
                     continue
+                flush_now = False
                 try:
                     fh.write(line + "\n")
-                    fh.flush()
                 except Exception as exc:  # noqa: BLE001
                     with self._gazebo_log_lock:
                         self._gazebo_log_error = str(exc)
@@ -778,6 +795,33 @@ class UdpRelay:
                         self._gazebo_log_last_ts = now
                         self._gazebo_log_active = True
                         self._gazebo_log_error = ""
+                        self._gazebo_log_pending_flush += 1
+                        if self._gazebo_log_flush_every > 0 and (
+                            self._gazebo_log_pending_flush
+                            >= self._gazebo_log_flush_every
+                        ):
+                            flush_now = True
+                            self._gazebo_log_pending_flush = 0
+                            self._gazebo_log_last_flush = now
+                        elif now - self._gazebo_log_last_flush >= self._gazebo_log_flush_interval:
+                            flush_now = True
+                            self._gazebo_log_pending_flush = 0
+                            self._gazebo_log_last_flush = now
+                    if flush_now:
+                        try:
+                            fh.flush()
+                        except Exception as exc:  # noqa: BLE001
+                            with self._gazebo_log_lock:
+                                self._gazebo_log_error = str(exc)
+                                self._gazebo_log_active = False
+                                current = self._gazebo_log_file
+                                self._gazebo_log_file = None
+                            if current:
+                                try:
+                                    current.close()
+                                except Exception:
+                                    pass
+                            self.log(f"[RELAY] Gazebo log flush error: {exc}")
             finally:
                 self._gazebo_log_queue.task_done()
 
@@ -854,83 +898,113 @@ class UdpRelay:
                     self._gazebo_forward_count += 1
                     self._gazebo_forward_last_ts = time.time()
 
-            queue_ref = self._gazebo_packet_queue
-            if queue_ref:
-                try:
-                    queue_ref.put_nowait(bytes(payload_view))
-                except queue.Full:
-                    self._handle_gazebo_queue_overflow()
+            interval_sec = self._gazebo_process_interval_sec
+            if interval_sec > 0.0:
+                now_monotonic = time.perf_counter()
+                last_monotonic = self._gazebo_last_process_monotonic
+                if last_monotonic and now_monotonic - last_monotonic < interval_sec:
+                    continue
+                self._gazebo_last_process_monotonic = now_monotonic
+            else:
+                self._gazebo_last_process_monotonic = time.perf_counter()
 
-    def _gazebo_packet_worker_loop(self) -> None:
-        queue_ref = self._gazebo_packet_queue
-        if not queue_ref:
-            return
-        while True:
-            try:
-                if self.stop_ev.is_set():
-                    payload = queue_ref.get_nowait()
-                else:
-                    payload = queue_ref.get(timeout=0.1)
-            except queue.Empty:
-                if self.stop_ev.is_set():
-                    break
-                continue
+            self._process_gazebo_payload(payload_view)
 
-            try:
-                if payload is None:
-                    break
-                self._process_gazebo_payload(payload)
-            finally:
-                queue_ref.task_done()
-
-        # stop 이벤트가 설정된 후 남은 항목 처리
-        while True:
-            try:
-                payload = queue_ref.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                if payload is None:
-                    break
-                self._process_gazebo_payload(payload)
-            finally:
-                queue_ref.task_done()
-
-    def _process_gazebo_payload(self, payload: bytes) -> None:
-        if len(payload) < relay_icd.GAZEBO_STRUCT_SIZE:
+    def _process_gazebo_payload(self, payload: Union[bytes, memoryview]) -> None:
+        payload_view = memoryview(payload)
+        payload_len = len(payload_view)
+        min_payload = relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE
+        if payload_len < min_payload:
+            self._note_gazebo_icd_mismatch(
+                "too short",
+                payload_len,
+                expected=f"{relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE} or {relay_icd.GAZEBO_STRUCT_SIZE}",
+            )
             return
 
         try:
-            (
-                _header_type,
-                _msg_type,
-                _msg_size,
-                _reserved,
-                _unique_id,
-                time_usec,
-                px,
-                py,
-                pz,
-                qw,
-                qx,
-                qy,
-                qz,
-                ax,
-                ay,
-                az,
-                wx,
-                wy,
-                wz,
-            ) = struct.unpack_from(
-                relay_icd.GAZEBO_STRUCT_FMT,
-                payload,
-                0,
+            if payload_len >= relay_icd.GAZEBO_STRUCT_SIZE:
+                (
+                    _header_type,
+                    _msg_type,
+                    msg_size,
+                    _reserved,
+                    _unique_id,
+                    time_usec,
+                    px,
+                    py,
+                    pz,
+                    qw,
+                    qx,
+                    qy,
+                    qz,
+                    ax,
+                    ay,
+                    az,
+                    wx,
+                    wy,
+                    wz,
+                ) = struct.unpack_from(
+                    relay_icd.GAZEBO_STRUCT_FMT,
+                    payload_view,
+                    0,
+                )
+                if msg_size not in (
+                    relay_icd.GAZEBO_PAYLOAD_SIZE,
+                    relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE,
+                ):
+                    self._note_gazebo_icd_mismatch(
+                        f"unexpected payload length field: {msg_size}",
+                        payload_len,
+                        expected=f"msg_size={relay_icd.GAZEBO_PAYLOAD_SIZE}",
+                    )
+            elif payload_len == relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE:
+                (
+                    time_usec,
+                    px,
+                    py,
+                    pz,
+                    qw,
+                    qx,
+                    qy,
+                    qz,
+                    ax,
+                    ay,
+                    az,
+                    wx,
+                    wy,
+                    wz,
+                ) = struct.unpack_from(
+                    relay_icd.GAZEBO_PAYLOAD_NO_HEADER_FMT,
+                    payload_view,
+                    0,
+                )
+                if not self._gazebo_payload_fallback_warned:
+                    self._gazebo_payload_fallback_warned = True
+                    self.log(
+                        "[RELAY] Gazebo packet missing header/unique_id; "
+                        "using timestamp-first payload layout."
+                    )
+            else:
+                self._note_gazebo_icd_mismatch(
+                    "length not recognised",
+                    payload_len,
+                    expected=f"{relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE} or {relay_icd.GAZEBO_STRUCT_SIZE}",
+                )
+                return
+        except struct.error as exc:
+            self._note_gazebo_icd_mismatch(
+                f"unpack error: {exc}",
+                payload_len,
+                expected=f"{relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE} or {relay_icd.GAZEBO_STRUCT_SIZE}",
             )
-        except struct.error:
             return
 
         time_usec_int = int(time_usec)
         px_f, py_f, pz_f = float(px), float(py), float(pz)
+        # Gazebo quaternions arrive in the (w, x, y, z) order, matching the
+        # simulator's convention. The gimbal control module continues to use the
+        # Unreal ordering (x, y, z, w).
         qw_f, qx_f, qy_f, qz_f = float(qw), float(qx), float(qy), float(qz)
         ax_f, ay_f, az_f = float(ax), float(ay), float(az)
         wx_f, wy_f, wz_f = float(wx), float(wy), float(wz)
@@ -983,14 +1057,27 @@ class UdpRelay:
                 angular_velocity=(wx_f, wy_f, wz_f),
             )
 
-    def _handle_gazebo_queue_overflow(self) -> None:
-        self._gazebo_queue_drop_count += 1
+    def _note_gazebo_icd_mismatch(
+        self, reason: str, length: int, *, expected: str | None = None
+    ) -> None:
+        self._gazebo_icd_mismatch_count += 1
+        if expected is None:
+            expected = (
+                f"{relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE}"
+                f" or {relay_icd.GAZEBO_STRUCT_SIZE}"
+            )
+        self._gazebo_icd_mismatch_last_reason = (
+            f"{reason}; len={length}, expected {expected}"
+        )
         now = time.time()
-        if now - self._gazebo_queue_last_warn >= 5.0:
-            self._gazebo_queue_last_warn = now
-            dropped = self._gazebo_queue_drop_count
-            self._gazebo_queue_drop_count = 0
-            self.log(f"[RELAY] Gazebo packet worker backlog, dropped {dropped} packets")
+        if now - self._gazebo_icd_mismatch_last_warn >= 5.0:
+            count = self._gazebo_icd_mismatch_count
+            self._gazebo_icd_mismatch_count = 0
+            self._gazebo_icd_mismatch_last_warn = now
+            reason_text = self._gazebo_icd_mismatch_last_reason or reason
+            self.log(
+                f"[RELAY] Gazebo packet skipped ({reason_text}) x{count}. Check ICD alignment."
+            )
 
     # ------------- Distance RAW UDP 루프 -------------
     def _distance_raw_udp_loop(self) -> None:
