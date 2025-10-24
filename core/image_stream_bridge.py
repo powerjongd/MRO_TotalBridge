@@ -89,10 +89,10 @@ class ImageStreamBridge:
 
         try:
             self._preview_min_interval = max(
-                0.0, float(settings.get("preview_min_interval", 0.2))
+                0.0, float(settings.get("preview_min_interval", 1.0))
             )
         except Exception:
-            self._preview_min_interval = 0.2
+            self._preview_min_interval = 1.0
         self._last_preview_monotonic = 0.0
 
         self._gimbal: Optional["GimbalControl"] = None
