@@ -119,10 +119,15 @@ pyinstaller --noconfirm --clean --name MroUnifiedBridge \
   --hidden-import "pymavlink.dialects.v20.common" \
   --hidden-import "pymavlink.dialects.v20.ardupilotmega" \
   --hidden-import "serial.tools.list_ports" \
+  --hidden-import "PySide6.QtCore" \
+  --hidden-import "PySide6.QtGui" \
+  --hidden-import "PySide6.QtWidgets" \
   --collect-submodules "pymavlink" \
   --collect-submodules "PIL" \
+  --collect-submodules "PySide6" \
   --collect-data "pymavlink" \
   --collect-data "PIL" \
+  --collect-data "PySide6" \
   --windowed main.py
 ```
 
@@ -133,10 +138,15 @@ pyinstaller --noconfirm --clean --name MroUnifiedBridge \
   --hidden-import "pymavlink.dialects.v20.common" \
   --hidden-import "pymavlink.dialects.v20.ardupilotmega" \
   --hidden-import "serial.tools.list_ports" \
+  --hidden-import "PySide6.QtCore" \
+  --hidden-import "PySide6.QtGui" \
+  --hidden-import "PySide6.QtWidgets" \
   --collect-submodules "pymavlink" \
   --collect-submodules "PIL" \
+  --collect-submodules "PySide6" \
   --collect-data "pymavlink" \
   --collect-data "PIL" \
+  --collect-data "PySide6" \
   --windowed --onefile main.py
 ```
 
