@@ -374,7 +374,13 @@ class MainWindow(QtWidgets.QMainWindow):
             with Image.open(io.BytesIO(data)) as img:
                 rgb = img.convert("RGBA")
                 ptr = rgb.tobytes("raw", "RGBA")
-                qimg = QtGui.QImage(ptr, rgb.width, rgb.height, QtGui.QImage.Format_RGBA8888)
+                qimg = QtGui.QImage(
+                    ptr,
+                    rgb.width,
+                    rgb.height,
+                    rgb.width * 4,
+                    QtGui.QImage.Format_RGBA8888,
+                )
                 return qimg.copy()
         except Exception:
             return QtGui.QImage()
@@ -420,15 +426,17 @@ class MainWindow(QtWidgets.QMainWindow):
         gimbal_state = getattr(self.gimbal, "get_status", None)
         if callable(gimbal_state):
             try:
-                self.lbl_gimbal.setText(f"Gimbal: {gimbal_state()}")
+                status = gimbal_state()
             except Exception:
-                self.lbl_gimbal.setText("Gimbal: Unknown")
+                status = None
+            self.lbl_gimbal.setText(self._format_gimbal_status(status))
         relay_state = getattr(self.relay, "get_status", None)
         if callable(relay_state):
             try:
-                self.lbl_relay.setText(f"Relay: {relay_state()}")
+                status = relay_state()
             except Exception:
-                self.lbl_relay.setText("Relay: Unknown")
+                status = None
+            self.lbl_relay.setText(self._format_relay_status(status))
         rover_state = getattr(self.rover, "get_status", None)
         if callable(rover_state):
             try:
@@ -438,9 +446,141 @@ class MainWindow(QtWidgets.QMainWindow):
         log_state = getattr(self.relay, "get_logging_status", None)
         if callable(log_state):
             try:
-                self.lbl_relay_log.setText(f"Gazebo Logging: {log_state()}")
+                status = log_state()
             except Exception:
-                pass
+                status = None
+            self.lbl_relay_log.setText(self._format_logging_status(status))
+
+    def _format_gimbal_status(self, status: Optional[Dict[str, Any]]) -> str:
+        prefix = "Gimbal:"
+        if not status:
+            return f"{prefix} Unknown"
+        if not isinstance(status, dict):
+            return f"{prefix} {status}"
+
+        active = bool(status.get("activated"))
+        method = status.get("control_mode") or status.get("control_method")
+        method_label = str(method).upper() if method else None
+        state_text = "Active" if active else "Idle"
+        if method_label:
+            state_text = f"{state_text} ({method_label})"
+
+        details: list[str] = []
+        if status.get("control_method") == "tcp" and status.get("tcp_bind"):
+            details.append(f"TCP {status['tcp_bind']}")
+        elif status.get("serial_state"):
+            details.append(f"Serial {status['serial_state']}")
+
+        roll = status.get("current_roll_deg")
+        pitch = status.get("current_pitch_deg")
+        yaw = status.get("current_yaw_deg")
+        angles = []
+        for value in (roll, pitch, yaw):
+            if isinstance(value, (int, float)):
+                angles.append(f"{value:.1f}°")
+        if len(angles) == 3:
+            details.append(f"RPY {'/'.join(angles)}")
+
+        zoom = status.get("zoom_scale")
+        if isinstance(zoom, (int, float)):
+            details.append(f"Zoom {zoom:.2f}x")
+
+        if not details:
+            return f"{prefix} {state_text}"
+        return f"{prefix} {state_text} · {' · '.join(details)}"
+
+    def _format_relay_status(self, status: Optional[Dict[str, Any]]) -> str:
+        prefix = "Relay:"
+        if not status:
+            return f"{prefix} Unknown"
+        if not isinstance(status, dict):
+            return f"{prefix} {status}"
+
+        active = bool(status.get("activated"))
+        state_text = "Active" if active else "Stopped"
+
+        details: list[str] = []
+
+        listen = status.get("gazebo_listen")
+        if listen:
+            details.append(f"IN {listen}")
+        ext = status.get("ext_dst")
+        if ext:
+            details.append(f"OUT {ext}")
+
+        serial_connected = status.get("serial_connected")
+        if serial_connected is not None:
+            serial_label = "Serial OK" if serial_connected else "Serial OFF"
+            details.append(serial_label)
+
+        of_enabled = status.get("of_processing_enabled")
+        if of_enabled is not None:
+            details.append(f"OptFlow {'ON' if of_enabled else 'OFF'}")
+
+        count = status.get("gazebo_forward_count")
+        if isinstance(count, int) and count >= 0:
+            details.append(f"Forwarded {count}")
+        last_ts = status.get("gazebo_forward_last_ts")
+        if isinstance(last_ts, (int, float)) and last_ts > 0:
+            try:
+                last_time = time.strftime("%H:%M:%S", time.localtime(last_ts))
+            except Exception:
+                last_time = None
+            if last_time:
+                details.append(f"Last {last_time}")
+
+        distance = status.get("distance_m")
+        if isinstance(distance, (int, float)) and distance >= 0:
+            age = status.get("distance_age_s")
+            if isinstance(age, (int, float)) and age >= 0:
+                details.append(f"Distance {distance:.1f}m ({age:.0f}s ago)")
+            else:
+                details.append(f"Distance {distance:.1f}m")
+
+        if not details:
+            return f"{prefix} {state_text}"
+        return f"{prefix} {state_text} · {' · '.join(details)}"
+
+    def _format_logging_status(self, status: Optional[Dict[str, Any]]) -> str:
+        prefix = "Gazebo Logging:"
+        if not status:
+            return f"{prefix} Unknown"
+        if not isinstance(status, dict):
+            return f"{prefix} {status}"
+
+        enabled = bool(status.get("enable_gazebo_logging", True))
+        active = bool(status.get("gazebo_logging_active"))
+        blocked_reason = status.get("gazebo_log_block_reason")
+
+        if not enabled:
+            state_text = "Disabled"
+        elif active:
+            state_text = "Active"
+        else:
+            state_text = "Idle"
+
+        details: list[str] = []
+
+        if active:
+            count = status.get("gazebo_logged_count")
+            if isinstance(count, int):
+                details.append(f"{count} entries")
+            last_ts = status.get("gazebo_log_last_write_ts")
+            if isinstance(last_ts, (int, float)) and last_ts > 0:
+                try:
+                    last_time = time.strftime("%H:%M:%S", time.localtime(last_ts))
+                except Exception:
+                    last_time = None
+                if last_time:
+                    details.append(f"Last {last_time}")
+        if status.get("gazebo_log_path"):
+            details.append(str(status["gazebo_log_path"]))
+        if blocked_reason:
+            details.append(f"Blocked: {blocked_reason}")
+
+        if not details:
+            return f"{prefix} {state_text}"
+        return f"{prefix} {state_text} · {' · '.join(details)}"
 
     # ------------------------------------------------------------------
     # Button handlers

@@ -25,6 +25,11 @@ _SET_TARGET_FMT = "<hh3d3f"
 
 @dataclass
 class SetTargetPayload:
+    """Decoded payload for :data:`TCP_CMD_SET_TARGET`.
+
+    The ``sim_rpy`` tuple carries roll/pitch/yaw in the bridge/UI order so that
+    TCP controllers can share the same orientation convention as the manual UI.
+    """
     sensor_type: int
     sensor_id: int
     position_xyz: Tuple[float, float, float]

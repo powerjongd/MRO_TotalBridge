@@ -383,12 +383,12 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         layout.addWidget(self.status_label)
 
         btn_box = QtWidgets.QDialogButtonBox()
-        btn_box.addButton("Save", QtWidgets.QDialogButtonBox.ActionRole)
+        save_button = btn_box.addButton("Save", QtWidgets.QDialogButtonBox.ActionRole)
         btn_box.addButton(QtWidgets.QDialogButtonBox.Ok)
         btn_box.addButton(QtWidgets.QDialogButtonBox.Cancel)
         layout.addWidget(btn_box)
 
-        btn_box.button(QtWidgets.QDialogButtonBox.ActionRole).clicked.connect(self.on_save)
+        save_button.clicked.connect(self.on_save)
         btn_box.accepted.connect(self.on_apply_close)
         btn_box.rejected.connect(self.reject)
 
