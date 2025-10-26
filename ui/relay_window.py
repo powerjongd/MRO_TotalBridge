@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtConcurrent, QtCore, QtGui, QtWidgets
 from serial.tools import list_ports
 
 from utils.settings import AppConfig, ConfigManager
@@ -26,6 +25,7 @@ class RelaySettingsDialog(QtWidgets.QDialog):
         rconf = cfg.get("relay", {})
         self.fields: Dict[str, QtWidgets.QWidget] = {}
         self._stop_in_progress = False
+        self._background_watchers: list[QtCore.QFutureWatcher] = []
 
         self._build_layout(rconf)
         self._status_timer = QtCore.QTimer(self)
@@ -33,6 +33,31 @@ class RelaySettingsDialog(QtWidgets.QDialog):
         self._status_timer.timeout.connect(self._refresh_status)
         self._status_timer.start()
         self._refresh_status()
+
+    # ------------------------------------------------------------------
+    def _run_background(self, func: Callable[[], object], slot: Callable[[object], None]) -> None:
+        watcher = QtCore.QFutureWatcher(self)
+        future = QtConcurrent.run(func)
+        self._background_watchers.append(watcher)
+
+        def _cleanup() -> None:
+            try:
+                result = future.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                payload: object = exc
+            else:
+                payload = result
+            try:
+                slot(payload)
+            finally:
+                try:
+                    self._background_watchers.remove(watcher)
+                except ValueError:
+                    pass
+                watcher.deleteLater()
+
+        watcher.finished.connect(_cleanup)
+        watcher.setFuture(future)
 
     # ------------------------------------------------------------------
     def _build_layout(self, rconf: Dict[str, Any]) -> None:
@@ -408,21 +433,15 @@ class RelaySettingsDialog(QtWidgets.QDialog):
         self.btn_stop.setEnabled(False)
         self.btn_start.setEnabled(False)
 
-        def worker() -> None:
+        def worker() -> Optional[Exception]:
             error: Optional[Exception] = None
             try:
                 self.relay.stop()
             except Exception as exc:
                 error = exc
-            finally:
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_on_stop_finished",
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(object, error),
-                )
+            return error
 
-        threading.Thread(target=worker, name="RelayStop", daemon=True).start()
+        self._run_background(worker, self._on_stop_finished)
 
     @QtCore.Slot(object)
     def _on_stop_finished(self, error: Optional[Exception]) -> None:

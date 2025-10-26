@@ -9,7 +9,7 @@ from collections import deque
 from typing import Any, Callable, Deque, Dict, Optional
 
 from PIL import Image
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtConcurrent, QtCore, QtGui, QtWidgets
 
 from utils.helpers import get_recent_log_lines
 from utils.observers import ObservableFloat
@@ -115,6 +115,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_zoom_value = float(self.cfg.get("gimbal", {}).get("zoom_scale", 1.0))
         self._preview_target_size = QtCore.QSize(640, 480)
         self._server_toggle_in_progress = False
+        self._background_watchers: list[QtCore.QFutureWatcher] = []
 
         gimbal_cfg = self.cfg.setdefault("gimbal", {})
         initial_method = str(gimbal_cfg.get("control_method", "tcp")).lower()
@@ -148,6 +149,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preview_timer.start()
 
         self._restore_recent_logs()
+
+    # ------------------------------------------------------------------
+    def _run_background(self, func: Callable[[], object], slot: Callable[[object], None]) -> None:
+        watcher = QtCore.QFutureWatcher(self)
+        future = QtConcurrent.run(func)
+        self._background_watchers.append(watcher)
+
+        def _cleanup() -> None:
+            try:
+                result = future.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                payload: object = exc
+            else:
+                payload = result
+            try:
+                slot(payload)
+            finally:
+                try:
+                    self._background_watchers.remove(watcher)
+                except ValueError:
+                    pass
+                watcher.deleteLater()
+
+        watcher.finished.connect(_cleanup)
+        watcher.setFuture(future)
 
     # ------------------------------------------------------------------
     # UI construction helpers
@@ -609,7 +635,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._server_toggle_in_progress = True
         self.btn_server.setEnabled(False)
 
-        def worker() -> None:
+        def worker() -> Optional[Exception]:
             error: Optional[Exception] = None
             try:
                 running = bool(getattr(self.bridge, "is_server_running", None) and self.bridge.is_server_running.is_set())
@@ -620,15 +646,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.bridge.start()
             except Exception as exc:  # pragma: no cover - runtime guard
                 error = exc
-            finally:
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_toggle_finalize",
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(object, error),
-                )
+            return error
 
-        threading.Thread(target=worker, name="BridgeToggle", daemon=True).start()
+        self._run_background(worker, self._toggle_finalize)
 
     @QtCore.Slot(object)
     def _toggle_finalize(self, error: Optional[Exception]) -> None:
