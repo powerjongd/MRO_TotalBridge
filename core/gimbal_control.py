@@ -341,15 +341,27 @@ class GimbalControl:
             self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = self.rpy_tgt
         self._last_sent_snapshot = None
 
-    def set_target_pose(self, x, y, z, roll_deg, pitch_deg, yaw_deg) -> None:
+    def set_target_pose(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+        *,
+        persist: bool = False,
+        log: bool = True,
+    ) -> None:
         with self._lock:
             self._apply_pose_locked(
-                (x, y, z), (roll_deg, pitch_deg, yaw_deg), persist=False
+                (x, y, z), (roll_deg, pitch_deg, yaw_deg), persist=persist
             )
-        self.log(
-            f"[GIMBAL] target pose set → xyz=({x:.2f},{y:.2f},{z:.2f}), "
-            f"rpy=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f})"
-        )
+        if log:
+            self.log(
+                f"[GIMBAL] target pose set → xyz=({x:.2f},{y:.2f},{z:.2f}), "
+                f"rpy=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f})"
+            )
 
     def set_max_rate(self, rate_dps: float) -> None:
         with self._lock:
@@ -455,22 +467,35 @@ class GimbalControl:
             self.s["sensor_id"] = sensor_id_i
             self._last_sent_snapshot = None
 
-        br_roll, br_pitch, br_yaw = self._sim_to_bridge_rpy(roll_deg, pitch_deg, yaw_deg)
+        # The TCP Set_Gimbal payload provides roll/pitch/yaw in the same order as the UI.
+        # Treat the values as bridge-native degrees so the downstream quaternion packing
+        # path matches what the operator sees in the control panel.
+        bridge_roll = float(roll_deg)
+        bridge_pitch = float(pitch_deg)
+        bridge_yaw = float(yaw_deg)
 
-        self.set_target_pose(pos_x, pos_y, pos_z, br_roll, br_pitch, br_yaw)
+        self.set_target_pose(
+            pos_x,
+            pos_y,
+            pos_z,
+            bridge_roll,
+            bridge_pitch,
+            bridge_yaw,
+            log=False,
+        )
         self.send_udp_preset(
             sensor_type_i,
             sensor_id_i,
             pos_x,
             pos_y,
             pos_z,
-            br_roll,
-            br_pitch,
-            br_yaw,
+            bridge_roll,
+            bridge_pitch,
+            bridge_yaw,
         )
         self.log(
-            "[GIMBAL] external pose applied -> sensor=%d/%d xyz=(%.2f,%.2f,%.2f) sim_rpy=(%.2f,%.2f,%.2f)"
-            % (sensor_type_i, sensor_id_i, pos_x, pos_y, pos_z, roll_deg, pitch_deg, yaw_deg)
+            "[GIMBAL] external pose applied -> sensor=%d/%d xyz=(%.2f,%.2f,%.2f) bridge_rpy=(%.2f,%.2f,%.2f)"
+            % (sensor_type_i, sensor_id_i, pos_x, pos_y, pos_z, bridge_roll, bridge_pitch, bridge_yaw)
         )
 
     def set_mavlink_target(self, preset_index: int, sensor_type: int, sensor_id: int) -> None:
@@ -697,7 +722,16 @@ class GimbalControl:
                 self.sensor_id = sensor_id
                 self.s["sensor_type"] = self.sensor_type
                 self.s["sensor_id"] = self.sensor_id
-                self._apply_pose_locked((px, py, pz), (r, p, y), persist=True)
+            self.set_target_pose(
+                px,
+                py,
+                pz,
+                r,
+                p,
+                y,
+                persist=True,
+                log=False,
+            )
             self.log(
                 f"[GIMBAL] TCP target -> sensor={sensor_type}/{sensor_id} "
                 f"xyz=({px:.2f},{py:.2f},{pz:.2f}) bridge_rpy=({r:.2f},{p:.2f},{y:.2f}) "
