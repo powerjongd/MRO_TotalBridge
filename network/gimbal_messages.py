@@ -27,8 +27,10 @@ _SET_TARGET_FMT = "<hh3d3f"
 class SetTargetPayload:
     """Decoded payload for :data:`TCP_CMD_SET_TARGET`.
 
-    The ``sim_rpy`` tuple carries roll/pitch/yaw in the bridge/UI order so that
-    TCP controllers can share the same orientation convention as the manual UI.
+    The ``sim_rpy`` tuple stores the simulator's rotation angles in the Unreal
+    ``FRotator`` order of (Pitch, Yaw, Roll).  Callers that operate in the
+    bridge/UI roll-pitch-yaw order should permute the values accordingly before
+    constructing the payload.
     """
     sensor_type: int
     sensor_id: int

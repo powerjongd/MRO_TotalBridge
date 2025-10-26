@@ -42,6 +42,12 @@ class BridgeSettingsDialog(QtWidgets.QDialog):
         self.udp_edit.setRange(1, 65535)
         self.udp_edit.setValue(int(bconf.get("udp_port", 9998)))
 
+        self.preview_interval = QtWidgets.QDoubleSpinBox()
+        self.preview_interval.setRange(0.0, 10.0)
+        self.preview_interval.setDecimals(2)
+        self.preview_interval.setSingleStep(0.1)
+        self.preview_interval.setValue(float(bconf.get("preview_min_interval", 1.0)))
+
         self.mode_group = QtWidgets.QButtonGroup(self)
         self.radio_realtime = QtWidgets.QRadioButton("Use Realtime ImageSet (SaveFile)")
         self.radio_predefined = QtWidgets.QRadioButton("Use PreDefined ImageSet")
@@ -87,6 +93,7 @@ class BridgeSettingsDialog(QtWidgets.QDialog):
         form.addRow("IP", self.ip_edit)
         form.addRow("TCP Port", self.tcp_edit)
         form.addRow("UDP Port", self.udp_edit)
+        form.addRow("Preview Interval (s)", self.preview_interval)
 
         gimbal_box = QtWidgets.QGroupBox("Gimbal Forwarding")
         gimbal_form = QtWidgets.QFormLayout(gimbal_box)
@@ -137,6 +144,7 @@ class BridgeSettingsDialog(QtWidgets.QDialog):
             "ip": ip,
             "tcp_port": tcp,
             "udp_port": udp,
+            "preview_min_interval": float(self.preview_interval.value()),
             "image_source_mode": mode,
             "realtime_dir": realtime_dir,
             "predefined_dir": predefined_dir,

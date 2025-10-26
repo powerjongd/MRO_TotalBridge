@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Any, Callable, Deque, Dict, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, Optional
 
 from PIL import Image
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -56,7 +56,7 @@ class QtLogHandler(logging.Handler):
 
 
 class _PreviewBridge(QtCore.QObject):
-    frame_ready = QtCore.Signal(bytes, float)
+    frame_ready = QtCore.Signal(bytes)
 
 
 class PreviewLabel(QtWidgets.QLabel):
@@ -98,6 +98,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log = log
         self.zoom_state = zoom_state
         self._zoom_unsubscribe: Optional[Callable[[], None]] = None
+        self._status_label_min_width = 280
 
         self._preview_bridge = _PreviewBridge()
         self._preview_bridge.frame_ready.connect(self._handle_preview_frame)
@@ -107,7 +108,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preview_last_time = "-"
         self._preview_min_interval = float(self.cfg.get("bridge", {}).get("preview_min_interval", 1.0))
         self._preview_max_queue = 5
-        self._preview_queue: Deque[Tuple[bytes, float]] = deque(maxlen=self._preview_max_queue)
+        self._preview_queue: Deque[bytes] = deque(maxlen=self._preview_max_queue)
         self._preview_lock = threading.Lock()
         self._current_zoom_value = float(self.cfg.get("gimbal", {}).get("zoom_scale", 1.0))
         self._preview_target_size = QtCore.QSize(640, 480)
@@ -217,8 +218,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rb_tcp.setChecked(True)
         self.rb_tcp.toggled.connect(self._on_gimbal_method_changed)
 
-        self.lbl_gimbal = QtWidgets.QLabel("Gimbal: Deactivated")
-        self.lbl_gimbal.setWordWrap(True)
+        self.lbl_gimbal = self._make_status_label("Gimbal: Deactivated")
         gimbal_layout.addWidget(self.lbl_gimbal)
 
         header_layout.addWidget(gimbal_box)
@@ -236,8 +236,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_relay.clicked.connect(self.open_relay_window)
         relay_row.addWidget(self.btn_relay)
         relay_row.addStretch()
-        self.lbl_relay = QtWidgets.QLabel("Relay: Deactivated")
-        self.lbl_relay.setWordWrap(True)
+        self.lbl_relay = self._make_status_label("Relay: Deactivated")
         relay_row.addWidget(self.lbl_relay)
         relay_layout.addLayout(relay_row)
 
@@ -248,19 +247,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_rover.clicked.connect(self.open_rover_window)
         rover_row.addWidget(self.btn_rover)
         rover_row.addStretch()
-        self.lbl_rover = QtWidgets.QLabel("Rover Logging: Idle")
-        self.lbl_rover.setWordWrap(True)
+        self.lbl_rover = self._make_status_label("Rover Logging: Idle")
         rover_row.addWidget(self.lbl_rover)
         relay_layout.addLayout(rover_row)
 
-        self.lbl_relay_log = QtWidgets.QLabel("Gazebo Logging: Idle")
-        self.lbl_relay_log.setWordWrap(True)
+        self.lbl_relay_log = self._make_status_label("Gazebo Logging: Idle")
         self.lbl_relay_log.setStyleSheet("color: #888888;")
         relay_layout.addWidget(self.lbl_relay_log)
 
         header_layout.addWidget(relay_box)
 
         self._layout.addWidget(header)
+
+    def _make_status_label(self, text: str) -> QtWidgets.QLabel:
+        label = QtWidgets.QLabel(text)
+        label.setWordWrap(True)
+        label.setMinimumWidth(self._status_label_min_width)
+        return label
 
     def _build_preview_area(self) -> None:
         group = QtWidgets.QGroupBox("Image Preview")
@@ -327,20 +330,26 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Preview handling
     # ------------------------------------------------------------------
-    def on_preview(self, frame: bytes, timestamp: float) -> None:
+    def on_preview(self, frame: bytes, timestamp: Optional[float] = None) -> None:
         with self._preview_lock:
-            self._preview_queue.append((frame, timestamp))
+            self._preview_queue.append(frame)
+        QtCore.QMetaObject.invokeMethod(
+            self,
+            "_drain_preview_queue",
+            QtCore.Qt.QueuedConnection,
+        )
 
+    @QtCore.Slot()
     def _drain_preview_queue(self) -> None:
         with self._preview_lock:
             if not self._preview_queue:
                 return
-            frame, ts = self._preview_queue.pop()
+            frame = self._preview_queue.pop()
             self._preview_queue.clear()
-        self._preview_bridge.frame_ready.emit(frame, ts)
+        self._preview_bridge.frame_ready.emit(frame)
 
-    @QtCore.Slot(bytes, float)
-    def _handle_preview_frame(self, frame: bytes, timestamp: float) -> None:
+    @QtCore.Slot(bytes)
+    def _handle_preview_frame(self, frame: bytes) -> None:
         now = time.monotonic()
         if (now - self._preview_last_ts) < max(0.0, self._preview_min_interval):
             return
@@ -440,9 +449,11 @@ class MainWindow(QtWidgets.QMainWindow):
         rover_state = getattr(self.rover, "get_status", None)
         if callable(rover_state):
             try:
-                self.lbl_rover.setText(f"Rover Logging: {rover_state()}")
+                rover_status = rover_state()
             except Exception:
                 self.lbl_rover.setText("Rover Logging: Unknown")
+            else:
+                self.lbl_rover.setText(f"Rover Logging: {rover_status}")
         log_state = getattr(self.relay, "get_logging_status", None)
         if callable(log_state):
             try:
