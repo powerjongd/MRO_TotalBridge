@@ -632,8 +632,10 @@ class GimbalControl:
             sensor_type = self._sanitize_sensor_code(target.sensor_type)
             sensor_id = self._sanitize_sensor_code(target.sensor_id)
             px, py, pz = target.position_xyz
-            r_sim, p_sim, y_sim = target.sim_rpy
-            r, p, y = self._sim_to_bridge_rpy(r_sim, p_sim, y_sim)
+            # TCP controllers send roll/pitch/yaw in the same order used by the UI.
+            # Store the values directly so the downstream quaternion packing applies
+            # the identical Unreal mapping as manual inputs.
+            r, p, y = (float(target.sim_rpy[0]), float(target.sim_rpy[1]), float(target.sim_rpy[2]))
             with self._lock:
                 self.sensor_type = sensor_type
                 self.sensor_id = sensor_id
@@ -646,7 +648,7 @@ class GimbalControl:
                 self._last_sent_snapshot = None
             self.log(
                 f"[GIMBAL] TCP target -> sensor={sensor_type}/{sensor_id} "
-                f"xyz=({px:.2f},{py:.2f},{pz:.2f}) sim_rpy=({r_sim:.2f},{p_sim:.2f},{y_sim:.2f})"
+                f"xyz=({px:.2f},{py:.2f},{pz:.2f}) rpy=({r:.2f},{p:.2f},{y:.2f})"
             )
             self._send_status_message(conn)
         elif command.cmd_id == TCP_CMD_SET_ZOOM:
