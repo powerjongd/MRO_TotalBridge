@@ -9,6 +9,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from core.network import get_global_dispatcher
+
 from .log_parsers import UNIFIED_CSV_HEADER, RoverFeedbackCsvFormatter
 
 
@@ -45,7 +47,6 @@ class RoverRelayLogger:
         self._feedback_sock: Optional[socket.socket] = None
         self._feedback_tx_sock: Optional[socket.socket] = None
         self._feedback_dest: Optional[Tuple[str, int]] = None
-        self._feedback_thread: Optional[threading.Thread] = None
         self._feedback_log_file: Optional[Any] = None
         self._feedback_log_lock = threading.Lock()
         self._feedback_logged_count = 0
@@ -59,6 +60,9 @@ class RoverRelayLogger:
             daemon=True,
         )
         self._feedback_log_worker.start()
+
+        self._dispatcher = get_global_dispatcher()
+        self._feedback_registered = False
 
         self._relay: Optional["UdpRelay"] = None
 
@@ -100,11 +104,24 @@ class RoverRelayLogger:
             self.stop()
             raise
 
+        try:
+            sock = self._feedback_sock
+            if sock is None:
+                raise RuntimeError("feedback socket not available")
+            self._dispatcher.register(
+                sock,
+                self._handle_feedback_packet,
+                name=f"rover-feedback-{self.feedback_listen_port}",
+                idle_callback=None,
+                buffer_size=65535,
+            )
+            self._feedback_registered = True
+        except Exception:
+            self.stop()
+            raise
+
         with self._lock:
             self.running = True
-
-        self._feedback_thread = threading.Thread(target=self._feedback_loop, daemon=True)
-        self._feedback_thread.start()
 
         if self._relay:
             self._relay.notify_rover_logging_changed()
@@ -119,6 +136,12 @@ class RoverRelayLogger:
             self.running = False
 
         sock = self._feedback_sock
+        if self._feedback_registered and sock is not None:
+            try:
+                self._dispatcher.unregister(sock)
+            except Exception:
+                pass
+            self._feedback_registered = False
         if sock is not None:
             try:
                 sock.close()
@@ -133,11 +156,6 @@ class RoverRelayLogger:
             except Exception:
                 pass
             self._feedback_tx_sock = None
-
-        thread = self._feedback_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
-        self._feedback_thread = None
 
         self._close_logs()
 
@@ -376,58 +394,33 @@ class RoverRelayLogger:
                     pass
                 setattr(self, file_attr, None)
 
-    def _feedback_loop(self) -> None:
-        sock_attr, lock, file_attr, error_attr = (
-            "_feedback_sock",
-            self._feedback_log_lock,
-            "_feedback_log_file",
-            "_feedback_log_error",
-        )
+    def _handle_feedback_packet(
+        self,
+        packet: bytes,
+        _addr: Tuple[str, int],
+        _timestamp: float,
+    ) -> None:
+        if not packet:
+            return
 
-        buffer = bytearray(65535)
-        view = memoryview(buffer)
+        lock = self._feedback_log_lock
+        error_attr = "_feedback_log_error"
 
-        while not self._stop_ev.is_set():
-            sock = getattr(self, sock_attr)
-            if sock is None:
-                break
+        tx_sock = self._feedback_tx_sock
+        if tx_sock is not None:
             try:
-                size, _ = sock.recvfrom_into(view)
-            except OSError as exc:
-                if self._stop_ev.is_set():
-                    break
-                self._log_status(f"feedback recv error: {exc}")
+                tx_sock.send(packet)
+            except Exception as exc:  # noqa: BLE001
+                self._log_status(f"feedback send error: {exc}")
                 with lock:
                     setattr(self, error_attr, str(exc))
-                time.sleep(0.01)
-                continue
-            except Exception as e:  # noqa: BLE001
-                self._log_status(f"feedback recv error: {e}")
-                with lock:
-                    setattr(self, error_attr, str(e))
-                time.sleep(0.01)
-                continue
 
-            if size <= 0:
-                continue
-
-            payload_view = view[:size]
-
-            tx_sock = self._feedback_tx_sock
-            if tx_sock is not None:
-                try:
-                    tx_sock.send(payload_view)
-                except Exception as e:  # noqa: BLE001
-                    self._log_status(f"feedback send error: {e}")
-                    with lock:
-                        setattr(self, error_attr, str(e))
-
-            self._queue_feedback_log(
-                payload_view,
-                lock=lock,
-                file_attr=file_attr,
-                error_attr=error_attr,
-            )
+        self._queue_feedback_log(
+            memoryview(packet),
+            lock=lock,
+            file_attr="_feedback_log_file",
+            error_attr=error_attr,
+        )
 
     def _queue_feedback_log(
         self,

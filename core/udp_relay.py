@@ -19,6 +19,7 @@ except ImportError:
 
 from network import gazebo_relay_icd as relay_icd
 from .log_parsers import UNIFIED_CSV_HEADER, format_drone_csv_row
+from core.network import get_global_dispatcher
 
 
 class UdpRelay:
@@ -149,9 +150,21 @@ class UdpRelay:
 
         # Threads
         self.stop_ev = threading.Event()
-        self.th_gazebo: Optional[threading.Thread] = None
-        self.th_dist_udp: Optional[threading.Thread] = None
         self.th_hb: Optional[threading.Thread] = None
+
+        # Dispatcher integration
+        self._dispatcher = get_global_dispatcher()
+        self._gazebo_registered = False
+        self._distance_raw_registered = False
+        self._mav_udp_registered = False
+        self._ext_target_cache: Tuple[str, int] = ("", 0)
+        self._ext_target_generation_cache = -1
+        now = time.time()
+        self._dist_raw_rx_cnt = 0
+        self._dist_raw_last_log = now
+        self._dist_mav_rx_cnt = 0
+        self._dist_mav_last_log = now
+        self._dist_mav_last_rx_ts = 0.0
 
         # ---- Optical Flow 스케일/품질/하트비트 파라미터 (UI로부터 설정) ----
         # 스케일/품질
@@ -398,16 +411,56 @@ class UdpRelay:
         self._open_gazebo_log(reset_counter=True)
 
         self._gazebo_last_process_monotonic = 0.0
-        # 스레드 가동
-        self.th_gazebo = threading.Thread(target=self._gazebo_loop, daemon=True)
-        self.th_gazebo.start()
+        self._ext_target_generation_cache = -1
+        self._ext_target_cache = ("", 0)
+        now = time.time()
+        self._dist_raw_last_log = now
+        self._dist_raw_rx_cnt = 0
+        self._dist_mav_last_log = now
+        self._dist_mav_rx_cnt = 0
+        self._dist_mav_last_rx_ts = 0.0
+
+        try:
+            self._dispatcher.register(
+                self.sock_gazebo,
+                self._handle_gazebo_packet,
+                name="gazebo-relay",
+                idle_callback=None,
+                buffer_size=4096,
+            )
+            self._gazebo_registered = True
+        except Exception as exc:
+            self.log(f"[RELAY] Gazebo dispatcher registration failed: {exc}")
+            self.stop()
+            return
 
         if self.sock_dist:
-            self.th_dist_udp = threading.Thread(target=self._distance_raw_udp_loop, daemon=True)
-            self.th_dist_udp.start()
+            try:
+                self._dispatcher.register(
+                    self.sock_dist,
+                    self._handle_distance_raw_packet,
+                    name="distance-raw",
+                    idle_callback=None,
+                    buffer_size=2048,
+                )
+                self._distance_raw_registered = True
+            except Exception as exc:
+                self.log(f"[RELAY] Distance RAW dispatcher registration failed: {exc}")
         elif self.mav_udp:
-            self.th_dist_udp = threading.Thread(target=self._distance_mav_udp_loop, daemon=True)
-            self.th_dist_udp.start()
+            mav_sock = getattr(self.mav_udp, "port", None)
+            if mav_sock is not None:
+                try:
+                    self._dispatcher.register(
+                        mav_sock,
+                        self._handle_distance_mavlink_event,
+                        name="distance-mavlink",
+                        idle_callback=self._on_distance_mavlink_idle,
+                        idle_interval=0.5,
+                        buffer_size=relay_icd.DIST_HDR_SIZE + relay_icd.DIST_PAYLOAD_SIZE,
+                    )
+                    self._mav_udp_registered = True
+                except Exception as exc:
+                    self.log(f"[RELAY] Distance MAV dispatcher registration failed: {exc}")
 
         self.th_hb = threading.Thread(target=self._sensor_heartbeat_loop, daemon=True)
         self.th_hb.start()
@@ -419,6 +472,27 @@ class UdpRelay:
         self.stop_ev.set()
         with self._lock:
             self.running = False
+
+        if self._gazebo_registered and self.sock_gazebo:
+            try:
+                self._dispatcher.unregister(self.sock_gazebo)
+            except Exception:
+                pass
+            self._gazebo_registered = False
+        if self._distance_raw_registered and self.sock_dist:
+            try:
+                self._dispatcher.unregister(self.sock_dist)
+            except Exception:
+                pass
+            self._distance_raw_registered = False
+        if self._mav_udp_registered and self.mav_udp is not None:
+            mav_sock = getattr(self.mav_udp, "port", None)
+            if mav_sock is not None:
+                try:
+                    self._dispatcher.unregister(mav_sock)
+                except Exception:
+                    pass
+            self._mav_udp_registered = False
 
         # 소켓/링크 정리
         try:
@@ -843,72 +917,207 @@ class UdpRelay:
             return True
         return False
 
-    # ------------- Gazebo 루프 -------------
-    def _gazebo_loop(self) -> None:
-        """
-        - Gazebo UDP 패킷 수신:
-            * 그대로 ExternalCtrl 목적지로 relay (지연 최소)
-            * 동시에 OPTICAL_FLOW(#100) 값 생성해 시리얼 송신
-        """
-        buffer = bytearray(4096)
-        view = memoryview(buffer)
-        cached_target: Tuple[str, int] = ("", 0)
-        cached_generation = -1
+    # ------------- Gazebo Packet Handler -------------
+    def _handle_gazebo_packet(
+        self,
+        packet: bytes,
+        _addr: Tuple[str, int],
+        _timestamp: float,
+    ) -> None:
+        if not packet:
+            return
 
-        while not self.stop_ev.is_set():
-            sock = self.sock_gazebo
-            if not sock:
-                break
-            if cached_generation != self._ext_udp_target_generation:
-                with self._ext_udp_target_lock:
-                    cached_target = self._ext_udp_target
-                    cached_generation = self._ext_udp_target_generation
-            dst_tuple = cached_target
+        if self._ext_target_generation_cache != self._ext_udp_target_generation:
+            with self._ext_udp_target_lock:
+                self._ext_target_cache = self._ext_udp_target
+                self._ext_target_generation_cache = self._ext_udp_target_generation
+        dst_tuple = self._ext_target_cache
+
+        payload_view = memoryview(packet)
+        ext_sock = self.sock_ext
+        forwarded = False
+        if dst_tuple[1] <= 0 or not dst_tuple[0]:
+            self._maybe_warn_missing_ext_target(time.time())
+        elif ext_sock:
             try:
-                size, _ = sock.recvfrom_into(view)
-            except OSError as exc:
-                if self.stop_ev.is_set():
-                    break
-                self.log(f"[RELAY] gazebo recv error: {exc}")
-                time.sleep(0.01)
-                continue
-            except Exception as e:
-                self.log(f"[RELAY] gazebo loop error: {e}")
-                continue
+                ext_sock.sendto(payload_view, dst_tuple)
+                forwarded = True
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"[RELAY] ext send error: {exc}")
 
-            if size <= 0:
-                continue
+        if forwarded:
+            with self._forward_stats_lock:
+                self._gazebo_forward_count += 1
+                self._gazebo_forward_last_ts = time.time()
 
-            payload_view = view[:size]
+        interval_sec = self._gazebo_process_interval_sec
+        if interval_sec > 0.0:
+            now_monotonic = time.perf_counter()
+            last_monotonic = self._gazebo_last_process_monotonic
+            if last_monotonic and now_monotonic - last_monotonic < interval_sec:
+                return
+            self._gazebo_last_process_monotonic = now_monotonic
+        else:
+            self._gazebo_last_process_monotonic = time.perf_counter()
 
-            ext_sock = self.sock_ext
-            forwarded = False
-            if dst_tuple[1] <= 0 or not dst_tuple[0]:
-                now = time.time()
-                self._maybe_warn_missing_ext_target(now)
-            elif ext_sock:
+        self._process_gazebo_payload(payload_view)
+
+    # ------------- Distance RAW Packet Handler -------------
+    def _handle_distance_raw_packet(
+        self,
+        packet: bytes,
+        _addr: Tuple[str, int],
+        _timestamp: float,
+    ) -> None:
+        if not packet:
+            return
+
+        payload = packet
+        length = len(payload)
+        if length == relay_icd.DIST_PAYLOAD_SIZE:
+            off = 0
+        elif length >= relay_icd.DIST_HDR_SIZE + relay_icd.DIST_PAYLOAD_SIZE:
+            try:
+                hdr_type, msg_type, msg_size, _reserved = struct.unpack_from(
+                    relay_icd.DIST_HDR_FMT,
+                    payload,
+                    0,
+                )
+            except struct.error:
+                return
+            if msg_type != relay_icd.DIST_MSG_TYPE or msg_size != relay_icd.DIST_PAYLOAD_SIZE:
+                return
+            off = relay_icd.DIST_HDR_SIZE
+        else:
+            return
+
+        try:
+            (
+                time_boot_ms,
+                min_cm,
+                max_cm,
+                cur_cm,
+                type_,
+                sid,
+                orientation,
+                covariance,
+                _hfov,
+                _vfov,
+                _qw,
+                _qx,
+                _qy,
+                _qz,
+                _sigq,
+            ) = struct.unpack_from(relay_icd.DIST_PAYLOAD_FMT, payload, off)
+        except struct.error:
+            return
+
+        with self._lock:
+            self.current_distance_m = float(cur_cm) / 100.0
+            self.last_distance_update = time.time()
+
+        self._ensure_serial_connection()
+        if self.mav_ser and self.enable_distance_serial:
+            try:
+                self.mav_ser.mav.distance_sensor_send(
+                    int(time_boot_ms),
+                    int(min_cm),
+                    int(max_cm),
+                    int(cur_cm),
+                    int(type_),
+                    int(sid),
+                    int(orientation),
+                    int(covariance),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._handle_serial_send_error("distance serial send", exc)
+
+        self._dist_raw_rx_cnt += 1
+        now = time.time()
+        if now - self._dist_raw_last_log > 3.0:
+            self.log(f"[RELAY] DIST RAW UDP rx {self._dist_raw_rx_cnt} msgs in last 3s")
+            self._dist_raw_rx_cnt = 0
+            self._dist_raw_last_log = now
+
+    # ------------- Distance MAVLink Packet Handler -------------
+    def _handle_distance_mavlink_event(
+        self,
+        packet: bytes,
+        _addr: Tuple[str, int],
+        _timestamp: float,
+    ) -> None:
+        mav = self.mav_udp
+        if not mav:
+            return
+
+        if packet:
+            try:
+                mav.pre_message()
+            except Exception:
+                pass
+            try:
+                if getattr(mav, "first_byte", False):
+                    mav.auto_mavlink_version(packet)
+            except Exception:
+                pass
+            for value in packet:
                 try:
-                    ext_sock.sendto(payload_view, dst_tuple)
-                    forwarded = True
-                except Exception as e:
-                    self.log(f"[RELAY] ext send error: {e}")
-
-            if forwarded:
-                with self._forward_stats_lock:
-                    self._gazebo_forward_count += 1
-                    self._gazebo_forward_last_ts = time.time()
-
-            interval_sec = self._gazebo_process_interval_sec
-            if interval_sec > 0.0:
-                now_monotonic = time.perf_counter()
-                last_monotonic = self._gazebo_last_process_monotonic
-                if last_monotonic and now_monotonic - last_monotonic < interval_sec:
+                    msg = mav.mav.parse_char(bytes([value]))
+                except Exception:
+                    msg = None
+                if msg is None:
                     continue
-                self._gazebo_last_process_monotonic = now_monotonic
-            else:
-                self._gazebo_last_process_monotonic = time.perf_counter()
+                try:
+                    mav.post_message(msg)
+                except Exception:
+                    pass
+                self._handle_distance_mavlink_message(msg)
 
-            self._process_gazebo_payload(payload_view)
+    def _handle_distance_mavlink_message(self, msg: mavutil.mavlink.MAVLink_message) -> None:
+        if msg.get_type() != "DISTANCE_SENSOR":
+            return
+
+        self._dist_mav_rx_cnt += 1
+        now = time.time()
+        self._dist_mav_last_rx_ts = now
+        min_cm = int(getattr(msg, "min_distance", 0))
+        max_cm = int(getattr(msg, "max_distance", 0))
+        cur = getattr(msg, "current_distance", 0)
+        if isinstance(cur, float):
+            cur_cm = int(cur * 100.0)
+        else:
+            cur_cm = int(cur if cur > 10 else cur * 100)
+
+        self._ensure_serial_connection()
+        if self.mav_ser and self.enable_distance_serial:
+            try:
+                self.mav_ser.mav.distance_sensor_send(
+                    int(getattr(msg, "time_boot_ms", 0)),
+                    min_cm,
+                    max_cm,
+                    cur_cm,
+                    int(getattr(msg, "type", 0)),
+                    int(getattr(msg, "id", 0)),
+                    int(getattr(msg, "orientation", 0)),
+                    int(getattr(msg, "covariance", 0)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._handle_serial_send_error("distance serial send", exc)
+
+        with self._lock:
+            self.current_distance_m = cur_cm / 100.0
+            self.last_distance_update = now
+
+        if now - self._dist_mav_last_log > 3.0:
+            self.log(f"[RELAY] DIST UDP(MAV) rx {self._dist_mav_rx_cnt} msgs in last 3s")
+            self._dist_mav_rx_cnt = 0
+            self._dist_mav_last_log = now
+
+    def _on_distance_mavlink_idle(self, _now: float) -> None:
+        now = time.time()
+        if now - self._dist_mav_last_rx_ts >= 3.0 and now - self._dist_mav_last_log >= 3.0:
+            self.log("[RELAY] DIST UDP(MAV) no msgs in last 3s")
+            self._dist_mav_last_log = now
 
     def _process_gazebo_payload(self, payload: Union[bytes, memoryview]) -> None:
         payload_view = memoryview(payload)
@@ -1081,139 +1290,11 @@ class UdpRelay:
 
     # ------------- Distance RAW UDP 루프 -------------
     def _distance_raw_udp_loop(self) -> None:
-        """
-        ImageGenerator → RAW UDP 거리센서 수신
-        - 39B payload-only (헤더 없음) 자동 인식
-        - 또는 10B 헤더 + 39B payload (msg_type=10708) 호환
-        → 상태 업데이트 + 공용 시리얼로 MAVLink DISTANCE_SENSOR 재송신
-        """
-        if not self.sock_dist:
-            return
-
-        last_log = time.time()
-        rx_cnt = 0
-
-        while not self.stop_ev.is_set():
-            try:
-                pkt, _ = self.sock_dist.recvfrom(2048)
-                if not pkt:
-                    continue
-
-                # 케이스 1: 39B 페이로드 단독
-                if len(pkt) == relay_icd.DIST_PAYLOAD_SIZE:
-                    off = 0
-
-                # 케이스 2: 10B 헤더 + 39B 페이로드
-                elif len(pkt) >= (relay_icd.DIST_HDR_SIZE + relay_icd.DIST_PAYLOAD_SIZE):
-                    try:
-                        hdr_type, msg_type, msg_size, reserved = struct.unpack_from(relay_icd.DIST_HDR_FMT, pkt, 0)
-                    except struct.error:
-                        continue
-                    if msg_type != relay_icd.DIST_MSG_TYPE or msg_size != relay_icd.DIST_PAYLOAD_SIZE:
-                        # 다른 타입이면 스킵
-                        continue
-                    off = relay_icd.DIST_HDR_SIZE
-                else:
-                    # 지원 길이 아님
-                    continue
-
-                # payload 파싱
-                try:
-                    (time_boot_ms,
-                     min_cm, max_cm, cur_cm,
-                     type_, sid, orientation, covariance,
-                     hfov, vfov,
-                     qw, qx, qy, qz,
-                     sigq) = struct.unpack_from(relay_icd.DIST_PAYLOAD_FMT, pkt, off)
-                except struct.error:
-                    continue
-
-                # 상태 업데이트 (m 단위)
-                with self._lock:
-                    self.current_distance_m = float(cur_cm) / 100.0
-                    self.last_distance_update = time.time()
-
-                # 시리얼로 MAVLink DISTANCE_SENSOR 표준 전송 (확장 필드는 시리얼 전송 생략)
-                self._ensure_serial_connection()
-                if self.mav_ser and self.enable_distance_serial:
-                    try:
-                        self.mav_ser.mav.distance_sensor_send(
-                            int(time_boot_ms), int(min_cm), int(max_cm), int(cur_cm),
-                            int(type_), int(sid), int(orientation), int(covariance)
-                        )
-                    except Exception as e:
-                        self._handle_serial_send_error("distance serial send", e)
-
-                rx_cnt += 1
-                if time.time() - last_log > 3.0:
-                    self.log(f"[RELAY] DIST RAW UDP rx {rx_cnt} msgs in last 3s")
-                    rx_cnt = 0
-                    last_log = time.time()
-
-            except OSError as exc:
-                if self.stop_ev.is_set():
-                    break
-                self.log(f"[RELAY] distance raw udp recv error: {exc}")
-                time.sleep(0.01)
-                continue
-            except Exception as e:
-                self.log(f"[RELAY] distance raw udp error: {e}")
+        raise RuntimeError("distance raw loop is managed by UdpDispatcher")
 
     # ------------- Distance MAVLink UDP 루프 (옵션) -------------
     def _distance_mav_udp_loop(self) -> None:
-        """
-        ImageGenerator가 UDP로 송출하는 MAVLink DISTANCE_SENSOR를 수신 → 시리얼로 재송신
-        (distance_mode='mavlink'일 때만 사용)
-        """
-        if not self.mav_udp:
-            return
-        last_log = time.time()
-        rx_cnt = 0
-        while not self.stop_ev.is_set():
-            try:
-                m = self.mav_udp.recv_match(blocking=True, timeout=0.2)
-                if not m:
-                    if time.time() - last_log > 3.0:
-                        self.log("[RELAY] DIST UDP(MAV) no msgs in last 3s")
-                        last_log = time.time()
-                    continue
-                if m.get_type() == "DISTANCE_SENSOR":
-                    rx_cnt += 1
-                    min_cm = int(getattr(m, "min_distance", 0))
-                    max_cm = int(getattr(m, "max_distance", 0))
-                    cur     = getattr(m, "current_distance", 0)
-
-                    # 단위 휴리스틱
-                    if isinstance(cur, float):
-                        cur_cm = int(cur * 100.0)
-                    else:
-                        cur_cm = int(cur if cur > 10 else cur * 100)
-
-                    self._ensure_serial_connection()
-                    if self.mav_ser and self.enable_distance_serial:
-                        try:
-                            self.mav_ser.mav.distance_sensor_send(
-                                int(getattr(m, "time_boot_ms", 0)),
-                                int(min_cm), int(max_cm), int(cur_cm),
-                                int(getattr(m, "type", 0)),
-                                int(getattr(m, "id", 0)),
-                                int(getattr(m, "orientation", 0)),
-                                int(getattr(m, "covariance", 0)),
-                            )
-                        except Exception as e:
-                            self._handle_serial_send_error("distance serial send", e)
-
-                    with self._lock:
-                        self.current_distance_m = cur_cm / 100.0
-                        self.last_distance_update = time.time()
-
-                if time.time() - last_log > 3.0:
-                    self.log(f"[RELAY] DIST UDP(MAV) rx {rx_cnt} msgs in last 3s")
-                    rx_cnt = 0
-                    last_log = time.time()
-
-            except Exception as e:
-                self.log(f"[RELAY] distance udp(mav) error: {e}")
+        raise RuntimeError("distance mavlink loop is managed by UdpDispatcher")
 
     # ------------- Heartbeat 루프 -------------
     def _sensor_heartbeat_loop(self) -> None:

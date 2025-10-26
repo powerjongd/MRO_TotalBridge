@@ -12,6 +12,8 @@ import time
 import datetime
 from typing import Callable, Optional, Dict, Any, Tuple, List
 
+from core.network import get_global_dispatcher
+
 try:
     from PIL import Image  # 미리보기 썸네일 생성에 사용될 수 있음(옵션)
     _HAS_PIL = True
@@ -142,7 +144,8 @@ class ImageStreamBridge:
         self._client_conn: Optional[socket.socket] = None
 
         self._tcp_thread: Optional[threading.Thread] = None
-        self._udp_thread: Optional[threading.Thread] = None
+        self._udp_registered = False
+        self._dispatcher = get_global_dispatcher()
 
         # UDP reassembly buffer
         self._reasm: Optional[Dict[str, Any]] = None
@@ -171,9 +174,23 @@ class ImageStreamBridge:
         self._open_tcp()
         self._open_udp()
         self._tcp_thread = threading.Thread(target=self._tcp_server_thread, daemon=True)
-        self._udp_thread = threading.Thread(target=self._udp_receiver_thread, daemon=True)
         self._tcp_thread.start()
-        self._udp_thread.start()
+        if self._udp_sock:
+            try:
+                self._dispatcher.register(
+                    self._udp_sock,
+                    self._handle_udp_packet,
+                    name=f"image-stream-{self.udp_port}",
+                    idle_callback=self._on_udp_idle,
+                    idle_interval=0.2,
+                    buffer_size=65535,
+                )
+                self._udp_registered = True
+            except Exception as exc:
+                self.log(f"[BRIDGE] UDP dispatcher registration failed: {exc}")
+                self._udp_registered = False
+                self._close_udp_socket()
+                raise
         self._emit_status("RUNNING")
         self.log(f"[BRIDGE] started at {self.ip} TCP:{self.tcp_port} UDP:{self.udp_port}")
 
@@ -634,118 +651,85 @@ class ImageStreamBridge:
         self._udp_sock = sock
         self.log(f"[BRIDGE] UDP listening: {self.ip}:{self.udp_port}")
 
-    def _udp_receiver_thread(self) -> None:
-        backoff = 0.2
-        while self.is_server_running.is_set():
-            sock = self._udp_sock
-            if sock is None:
-                if not self.is_server_running.is_set():
-                    break
-                try:
-                    self._open_udp()
-                    backoff = 0.2
-                except OSError as exc:
-                    self.log(
-                        f"[BRIDGE] UDP reopen failed: {exc}; retrying in {backoff:.1f}s"
-                    )
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, 2.0)
-                continue
+    def _handle_udp_packet(self, packet: bytes, _addr: Tuple[str, int], now: float) -> None:
+        header = parse_udp_header(packet)
+        if not header or header.get("msg_type") != 9:
+            return
 
-            try:
-                packet, _ = sock.recvfrom(65535)
-            except socket.timeout:
-                self._expire_stale_reassembly()
-                continue
-            except OSError as exc:
-                if not self.is_server_running.is_set():
-                    break
-                self.log(f"[BRIDGE] UDP socket error: {exc}; attempting to recover")
-                self._close_udp_socket()
-                self._expire_stale_reassembly(force=True)
-                time.sleep(0.2)
-                continue
-            except Exception as e:
-                self.log(f"[BRIDGE] UDP error: {e}")
-                time.sleep(0.05)
-                continue
+        self._expire_stale_reassembly(now=now)
 
-            header = parse_udp_header(packet)
-            if not header or header.get("msg_type") != 9:
-                continue
+        fi = header.get("frame_index", 0)
+        frames = header.get("msg_frames", 0)
+        fsize = header.get("frame_size", 0)
+        fpos = header.get("frame_pos", 0)
+        msg_size = header.get("msg_size", 0)
 
-            now = time.monotonic()
-            self._expire_stale_reassembly(now=now)
-
-            fi = header.get("frame_index", 0)
-            frames = header.get("msg_frames", 0)
-            fsize = header.get("frame_size", 0)
-            fpos = header.get("frame_pos", 0)
-            msg_size = header.get("msg_size", 0)
-
-            if fi == 1:
-                if self._reasm is not None:
-                    self._drop_reassembly("new frame start")
-                if not self._start_new_reassembly(header):
-                    self._reasm = None
-                    continue
-
-            reasm = self._reasm
-            if reasm is None:
-                continue
-
-            if frames <= 0 or msg_size <= 0:
-                self._drop_reassembly("invalid header values")
-                continue
-
-            if reasm["msg_size"] != msg_size or reasm["total"] != frames:
-                if fi == 1 and self._start_new_reassembly(header):
-                    reasm = self._reasm
-                else:
-                    self._drop_reassembly("metadata mismatch")
-                    continue
-
-            if fi < 1 or fi > reasm["total"]:
-                self._drop_reassembly(f"frame index out of range ({fi}/{reasm['total']})")
-                continue
-
-            if fsize <= 0 or fsize > self.MAX_UDP_FRAME_SIZE:
-                self._drop_reassembly(f"invalid frame_size {fsize}")
-                continue
-
-            if fpos < 0 or fpos > reasm["msg_size"]:
-                self._drop_reassembly(f"invalid frame_pos {fpos}")
-                continue
-
-            payload = packet[self.UDP_HEADER_SIZE : self.UDP_HEADER_SIZE + fsize]
-            if len(payload) != fsize:
-                self._drop_reassembly("payload truncated")
-                continue
-
-            endpos = fpos + fsize
-            if endpos > reasm["msg_size"]:
-                self._drop_reassembly("payload exceeds msg_size")
-                continue
-
-            reasm["buf"][fpos:endpos] = payload
-            reasm["recv"].add(fi)
-            reasm["frame_index"] = fi
-            if endpos > reasm["maxpos"]:
-                reasm["maxpos"] = endpos
-            reasm["last_update"] = now
-
-            if len(reasm["recv"]) == reasm["total"]:
-                data = bytes(reasm["buf"][: reasm["maxpos"]])
-                if len(data) >= 4 and data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9"):
-                    zoomed = self._publish_zoomed_frame(data, update_timestamp=True)
-                    elapsed = now - reasm["start_monotonic"]
-                    size_kb = len(zoomed) / 1024.0 if zoomed else len(data) / 1024.0
-                    self.log(
-                        f"[BRIDGE] image received: {size_kb:.1f} KB in {elapsed:.2f}s | next={self._next_image_number:03d}"
-                    )
-                else:
-                    self.log("[BRIDGE] invalid JPEG received")
+        if fi == 1:
+            if self._reasm is not None:
+                self._drop_reassembly("new frame start")
+            if not self._start_new_reassembly(header):
                 self._reasm = None
+                return
+
+        reasm = self._reasm
+        if reasm is None:
+            return
+
+        if frames <= 0 or msg_size <= 0:
+            self._drop_reassembly("invalid header values")
+            return
+
+        if reasm["msg_size"] != msg_size or reasm["total"] != frames:
+            if fi == 1 and self._start_new_reassembly(header):
+                reasm = self._reasm
+            else:
+                self._drop_reassembly("metadata mismatch")
+                return
+
+        if fi < 1 or fi > reasm["total"]:
+            self._drop_reassembly(f"frame index out of range ({fi}/{reasm['total']})")
+            return
+
+        if fsize <= 0 or fsize > self.MAX_UDP_FRAME_SIZE:
+            self._drop_reassembly(f"invalid frame_size {fsize}")
+            return
+
+        if fpos < 0 or fpos > reasm["msg_size"]:
+            self._drop_reassembly(f"invalid frame_pos {fpos}")
+            return
+
+        payload = packet[self.UDP_HEADER_SIZE : self.UDP_HEADER_SIZE + fsize]
+        if len(payload) != fsize:
+            self._drop_reassembly("payload truncated")
+            return
+
+        endpos = fpos + fsize
+        if endpos > reasm["msg_size"]:
+            self._drop_reassembly("payload exceeds msg_size")
+            return
+
+        reasm["buf"][fpos:endpos] = payload
+        reasm["recv"].add(fi)
+        reasm["frame_index"] = fi
+        if endpos > reasm["maxpos"]:
+            reasm["maxpos"] = endpos
+        reasm["last_update"] = now
+
+        if len(reasm["recv"]) == reasm["total"]:
+            data = bytes(reasm["buf"][: reasm["maxpos"]])
+            if len(data) >= 4 and data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9"):
+                zoomed = self._publish_zoomed_frame(data, update_timestamp=True)
+                elapsed = now - reasm["start_monotonic"]
+                size_kb = len(zoomed) / 1024.0 if zoomed else len(data) / 1024.0
+                self.log(
+                    f"[BRIDGE] image received: {size_kb:.1f} KB in {elapsed:.2f}s | next={self._next_image_number:03d}"
+                )
+            else:
+                self.log("[BRIDGE] invalid JPEG received")
+            self._reasm = None
+
+    def _on_udp_idle(self, now: float) -> None:
+        self._expire_stale_reassembly(now=now)
 
     def _start_new_reassembly(self, header: Dict[str, int]) -> bool:
         msg_size = header.get("msg_size", 0)
@@ -1001,6 +985,12 @@ class ImageStreamBridge:
         sock = self._udp_sock
         if not sock:
             return
+        if self._udp_registered:
+            try:
+                self._dispatcher.unregister(sock)
+            except Exception:
+                pass
+            self._udp_registered = False
         self._udp_sock = None
         try:
             sock.close()
