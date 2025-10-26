@@ -66,11 +66,49 @@ python main.py
 ### 3) Headless(무화면) 실행
 
 ```bash
-
-python main.py --nogui --ip 0.0.0.0 --tcp 9999 --udp 9998
+python main.py --no-gui --bridge-ip 0.0.0.0 --bridge-tcp 9999 --bridge-udp 9998
 ```
 
 인자를 주지 않거나 유효하지 않으면 콘솔에서 입력을 요청합니다.
+
+### 4) CLI 옵션
+
+`main.py`는 아래와 같은 실행 옵션을 제공합니다. 대부분은 저장된 설정을 덮어쓰며, 지정하지 않으면 기존 설정 값을 그대로 사용합니다.
+
+- **일반 실행 제어**
+  - `--no-gui` : 디스플레이가 있더라도 강제로 헤드리스 모드로 실행합니다.
+  - `--console-hud` / `--no-console-hud` : 콘솔 HUD(주기적으로 상태 출력)를 강제로 켜거나 끕니다.
+  - `--hud-interval <초>` : 콘솔 HUD의 출력 주기를 조정합니다. 기본 1.0초.
+  - `--console-log` / `--no-console-log` : 콘솔 로그 에코를 강제로 켜거나 끕니다. (미지정 시 설정 파일 값 사용)
+- **파일 로깅**
+  - `--log-file` : 실행 중 로그를 `savedata/logs/bridge.log`(로테이팅)으로 기록합니다.
+  - `--no-log-file` : 파일 로그를 비활성화합니다. 기본 동작입니다.
+  - `--log-file-path <경로>` : `--log-file`과 함께 사용 시 커스텀 로그 파일 경로를 지정합니다.
+- **브릿지(이미지 스트림) 파라미터**
+  - `--bridge-ip <ip>` / `--bridge-tcp <port>` / `--bridge-udp <port>` : 이미지 스트림 브릿지의 바인드 주소와 포트를 지정합니다.
+  - `--images <path>` : 구버전 호환용으로 실시간 저장 디렉터리(`SaveFile`)를 한 번에 지정합니다.
+  - `--realtime-dir <path>` / `--predefined-dir <path>` : 실시간/사전 이미지 디렉터리를 각각 지정합니다.
+  - `--image-source-mode {realtime,predefined}` : TCP 카메라 요청 시 사용할 이미지 소스를 선택합니다.
+- **짐벌 제어 파라미터**
+  - `--gimbal-bind-ip <ip>` / `--gimbal-bind-port <port>` : 짐벌 명령 수신 소켓(IP/포트)을 재지정합니다.
+  - `--gen-ip <ip>` / `--gen-port <port>` : 10706 UDP 목적지(Generator) 주소를 덮어씁니다.
+  - `--sensor-type <int>` / `--sensor-id <int>` : 기본 센서 타입/ID를 지정합니다.
+  - `--gimbal-control-method {tcp,mavlink}` : 짐벌 제어 전송 방식을 선택합니다.
+  - `--show-gimbal-packets` : GUI 로그 창에 10706 바이트 패킷을 그대로 출력합니다.
+- **Gazebo/릴레이 파라미터**
+  - `--relay-bind-ip <ip>` / `--relay-port <port>` : Gazebo 입력 소켓 바인드 정보를 조정합니다.
+  - `--relay-raw-ip <ip>` / `--relay-raw-port <port>` : RAW 릴레이 목적지 주소를 지정합니다.
+  - `--relay-proc-ip <ip>` / `--relay-proc-port <port>` : 처리된 패킷 릴레이 목적지를 지정합니다.
+
+예: 헤드리스 모드에서 파일 로깅을 켜고 로그 경로를 변경하려면 다음과 같이 실행할 수 있습니다.
+
+```bash
+python main.py --no-gui --log-file --log-file-path /var/log/mro/bridge.log
+```
+
+### 5) GUI 모드에서 로그 확인
+
+PyInstaller `--windowed` 빌드처럼 콘솔 창이 열리지 않는 환경에서도, 메인 GUI 우측의 **"실시간 로그 (콘솔 대체)"** 영역에서 동일한 로그를 확인할 수 있습니다. 앱 시작 직후 찍히는 초기화 로그도 자동으로 적재되며, 필요하면 `로그 복사` 버튼으로 전체 내용을 클립보드에 복사해 팀에 전달할 수 있습니다.
 
 ## PyInstaller 빌드 (파이썬/라이브러리 포함 EXE)
 
