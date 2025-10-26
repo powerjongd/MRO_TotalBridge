@@ -230,6 +230,10 @@ class ImageStreamBridge:
 
         self._close_sockets()
         self._stop_udp_worker()
+        thread = self._tcp_thread
+        self._tcp_thread = None
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.5)
         self._emit_status("STOPPED")
         self.log("[BRIDGE] stopped")
 

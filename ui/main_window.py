@@ -76,6 +76,8 @@ class PreviewLabel(QtWidgets.QLabel):
 class MainWindow(QtWidgets.QMainWindow):
     """PySide6 port of the Unified Bridge main window."""
 
+    zoom_changed = QtCore.Signal(float)
+
     def __init__(
         self,
         cfg: Dict[str, Any],
@@ -130,6 +132,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_preview_area()
         self._build_log_area()
 
+        self.zoom_changed.connect(self._apply_zoom_value)
         self._init_zoom_subscription()
         self._install_preview_bridge()
         self._refresh_status_labels()
@@ -307,10 +310,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         def _on_zoom(value: float) -> None:
-            self._current_zoom_value = value
-            self.lbl_zoom.setText(f"Zoom: {value:.2f}x")
+            self.zoom_changed.emit(value)
 
         self._zoom_unsubscribe = self.zoom_state.subscribe(_on_zoom)
+
+    @QtCore.Slot(float)
+    def _apply_zoom_value(self, value: float) -> None:
+        self._current_zoom_value = value
+        self.lbl_zoom.setText(f"Zoom: {value:.2f}x")
 
     def _install_preview_bridge(self) -> None:
         try:

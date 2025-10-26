@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+import threading
+from typing import Any, Dict, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from serial.tools import list_ports
@@ -24,6 +25,7 @@ class RelaySettingsDialog(QtWidgets.QDialog):
 
         rconf = cfg.get("relay", {})
         self.fields: Dict[str, QtWidgets.QWidget] = {}
+        self._stop_in_progress = False
 
         self._build_layout(rconf)
         self._status_timer = QtCore.QTimer(self)
@@ -381,11 +383,38 @@ class RelaySettingsDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Error", f"Start failed:\n{exc}")
 
     def on_stop(self) -> None:
-        try:
-            self.relay.stop()
+        if self._stop_in_progress:
+            return
+        self._stop_in_progress = True
+        self.btn_stop.setEnabled(False)
+        self.btn_start.setEnabled(False)
+
+        def worker() -> None:
+            error: Optional[Exception] = None
+            try:
+                self.relay.stop()
+            except Exception as exc:
+                error = exc
+            finally:
+                QtCore.QMetaObject.invokeMethod(
+                    self,
+                    "_on_stop_finished",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(object, error),
+                )
+
+        threading.Thread(target=worker, name="RelayStop", daemon=True).start()
+
+    @QtCore.Slot(object)
+    def _on_stop_finished(self, error: Optional[Exception]) -> None:
+        self._stop_in_progress = False
+        self.btn_stop.setEnabled(True)
+        self.btn_start.setEnabled(True)
+        if error is not None:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Stop failed:\n{error}")
+        else:
             QtWidgets.QMessageBox.information(self, "Relay", "Relay stopped.")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Error", f"Stop failed:\n{exc}")
+        self._refresh_status()
 
     def on_save(self) -> None:
         try:
