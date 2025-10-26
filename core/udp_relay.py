@@ -769,6 +769,22 @@ class UdpRelay:
             })
         return status
 
+    def get_logging_status(self) -> Dict[str, Any]:
+        """Expose a lightweight snapshot for UI logging indicators."""
+
+        with self._gazebo_log_lock:
+            active = bool(self.running and self._gazebo_log_file is not None)
+            status = {
+                "enable_gazebo_logging": self._gazebo_logging_enabled,
+                "gazebo_logging_active": active,
+                "gazebo_logged_count": self._gazebo_log_count,
+                "gazebo_log_path": self.gazebo_log_path,
+                "gazebo_log_last_write_ts": self._gazebo_log_last_ts if self._gazebo_log_last_ts else None,
+                "gazebo_log_block_reason": self._gazebo_log_block_reason,
+                "gazebo_log_error": self._gazebo_log_error,
+            }
+        return status
+
     # ------------- 내부 유틸 -------------
     def _open_serial_shared(self, force: bool = False) -> None:
         port = str(self.s.get("serial_port", "")).strip()

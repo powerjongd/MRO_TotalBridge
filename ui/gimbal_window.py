@@ -272,6 +272,7 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self.max_rate = _mk_spin(payload.max_rate_dps, 0.0, 720.0, 1.0)
         self.power_on = QtWidgets.QCheckBox("Power ON")
         self.power_on.setChecked(payload.power_on)
+        self.btn_apply_power = QtWidgets.QPushButton("Apply Power")
 
         self.serial_port = QtWidgets.QComboBox()
         self._refresh_serial_ports(default=payload.serial_port)
@@ -363,6 +364,7 @@ class GimbalControlsDialog(QtWidgets.QDialog):
 
         power_layout = QtWidgets.QHBoxLayout()
         power_layout.addWidget(self.power_on)
+        power_layout.addWidget(self.btn_apply_power)
         power_layout.addStretch()
         layout.addLayout(power_layout)
 
@@ -403,6 +405,7 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self.btn_open_serial.clicked.connect(self.on_connect_serial)
         self.btn_apply_ids.clicked.connect(self.on_apply_ids)
         self.applicable_combo.currentIndexChanged.connect(self.on_applicable_changed)
+        self.btn_apply_power.clicked.connect(self.on_apply_power)
 
     # ------------------------------------------------------------------
     def _refresh_serial_ports(self, default: str = "") -> None:
@@ -464,6 +467,40 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         values["generator_port"] = self.bundle.network.port
         return values
 
+    def _build_preset_storage(self) -> Dict[str, Any]:
+        slots = [preset.to_config() if preset else None for preset in self.bundle.presets]
+        storage = {
+            "preset_bundle": self.bundle.to_config(),
+            "presets": {"version": 2, "slots": slots, "selected": self.bundle.selected_index, "applicable": self.bundle.applicable_index},
+            "selected_preset": self.bundle.selected_index,
+            "mavlink_preset_index": self.bundle.applicable_index,
+        }
+        return storage
+
+    def _persist_bundle(self, values: Optional[Dict[str, Any]] = None, *, persist_to_disk: bool = True, show_error: bool = False) -> bool:
+        payload = self._build_preset_storage()
+        if values:
+            payload.update(values)
+        try:
+            self.cfg.setdefault("gimbal", {}).update(payload)
+            if persist_to_disk:
+                cm = ConfigManager()
+                app_cfg = cm.load().to_dict()
+                app_cfg.setdefault("gimbal", {}).update(payload)
+                cm.save(AppConfig.from_dict(app_cfg))
+        except Exception as exc:
+            try:
+                if hasattr(self.log, "exception"):
+                    self.log.exception("Failed to persist gimbal presets: %s", exc)
+                elif hasattr(self.log, "error"):
+                    self.log.error("Failed to persist gimbal presets: %s", exc)
+            except Exception:
+                pass
+            if show_error:
+                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to persist presets:\n{exc}")
+            return False
+        return True
+
     def _apply_to_runtime(self, values: Dict[str, Any]) -> None:
         try:
             if hasattr(self.gimbal, "update_settings"):
@@ -519,6 +556,8 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         preset = SensorPreset(name=name, data=data)
         self.bundle.presets[idx] = preset
         self._refresh_preset_buttons()
+        if not self._persist_bundle():
+            QtWidgets.QMessageBox.warning(self, "Warning", "Preset saved, but failed to persist to disk.")
 
     def on_clear_preset(self) -> None:
         idx = self.preset_group.checkedId()
@@ -526,6 +565,8 @@ class GimbalControlsDialog(QtWidgets.QDialog):
             return
         self.bundle.presets[idx] = None
         self._refresh_preset_buttons()
+        if not self._persist_bundle():
+            QtWidgets.QMessageBox.warning(self, "Warning", "Failed to persist preset removal to disk.")
 
     def on_apply_selected_preset(self) -> None:
         idx = self.preset_group.checkedId()
@@ -569,6 +610,27 @@ class GimbalControlsDialog(QtWidgets.QDialog):
     def on_applicable_changed(self, index: int) -> None:
         self.bundle.applicable_index = index
 
+    def on_apply_power(self) -> None:
+        desired = self.power_on.isChecked()
+        packet: Optional[bytes] = None
+        try:
+            if hasattr(self.gimbal, "send_power"):
+                packet = self.gimbal.send_power(desired)
+            elif hasattr(self.gimbal, "build_power_packet"):
+                packet = self.gimbal.build_power_packet(desired)  # type: ignore[attr-defined]
+            elif hasattr(self.gimbal, "get_power_packet_example"):
+                raw = self.gimbal.get_power_packet_example(desired)  # type: ignore[attr-defined]
+                packet = bytes(raw)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Power command failed:\n{exc}")
+            return
+
+        message = f"Sensor power {'ON' if desired else 'OFF'} applied."
+        if packet is not None:
+            hex_bytes = " ".join(f"0x{b:02X}" for b in packet)
+            message += f"\nPacket bytes: {hex_bytes}"
+        QtWidgets.QMessageBox.information(self, "Apply Power", message)
+
     def _on_preset_selected(self, idx: int, checked: bool) -> None:
         if not checked:
             return
@@ -602,15 +664,8 @@ class GimbalControlsDialog(QtWidgets.QDialog):
     def on_save(self) -> None:
         try:
             values = self._collect_current_values()
-            bundle = self.bundle.to_config()
-            payload = dict(values)
-            payload["preset_bundle"] = bundle
-            self.cfg.setdefault("gimbal", {}).update(payload)
-            cm = ConfigManager()
-            app_cfg = cm.load().to_dict()
-            app_cfg.setdefault("gimbal", {}).update(payload)
-            cm.save(AppConfig.from_dict(app_cfg))
-            QtWidgets.QMessageBox.information(self, "Saved", "Gimbal settings saved.")
+            if self._persist_bundle(values, show_error=True):
+                QtWidgets.QMessageBox.information(self, "Saved", "Gimbal settings saved.")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Error", f"Save failed:\n{exc}")
 
@@ -618,8 +673,8 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         try:
             values = self._collect_current_values()
             self.updated_config = dict(values)
-            self.updated_config["preset_bundle"] = self.bundle.to_config()
-            self.cfg.setdefault("gimbal", {}).update(self.updated_config)
+            self.updated_config.update(self._build_preset_storage())
+            self._persist_bundle(values, persist_to_disk=False)
             self._apply_to_runtime(values)
             self.accept()
         except Exception as exc:

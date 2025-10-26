@@ -238,8 +238,10 @@ class RelaySettingsDialog(QtWidgets.QDialog):
         # Status + Buttons
         self.status_label = QtWidgets.QLabel("Status: -")
         self.detail_label = QtWidgets.QLabel("-")
+        self.logging_label = QtWidgets.QLabel("Logging: Unknown")
         layout.addWidget(self.status_label)
         layout.addWidget(self.detail_label)
+        layout.addWidget(self.logging_label)
 
         btn_box = QtWidgets.QDialogButtonBox()
         self.btn_start = QtWidgets.QPushButton("Start Relay")
@@ -333,6 +335,23 @@ class RelaySettingsDialog(QtWidgets.QDialog):
             if serial:
                 detail.append(f"Serial: {serial}")
         self.detail_label.setText(" | ".join(detail) or "-")
+
+        try:
+            log_status = self.relay.get_logging_status() if hasattr(self.relay, "get_logging_status") else {}
+        except Exception:
+            log_status = {}
+        if isinstance(log_status, dict):
+            enabled = bool(log_status.get("enable_gazebo_logging", True))
+            active = bool(log_status.get("gazebo_logging_active"))
+            if not enabled:
+                text = "Logging: Disabled"
+            else:
+                text = "Logging: ON" if active else "Logging: OFF"
+            if log_status.get("gazebo_log_block_reason"):
+                text = f"{text} (Blocked)"
+        else:
+            text = "Logging: Unknown"
+        self.logging_label.setText(text)
 
     # ------------------------------------------------------------------
     def on_browse_log(self) -> None:
