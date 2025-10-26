@@ -41,6 +41,15 @@ class QtLogHandler(logging.Handler):
         self.widget.append(msg)
         self.widget.moveCursor(QtGui.QTextCursor.End)
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumSize(320, 240)
+        self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setStyleSheet("background-color: #202020; border: 1px solid #404040;")
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - GUI callback
+        super().resizeEvent(event)
+        self.resized.emit(event.size())
 
 class _PreviewBridge(QtCore.QObject):
     frame_ready = QtCore.Signal(bytes, float)
@@ -75,7 +84,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         super().__init__()
         self.setWindowTitle("Unified Bridge")
-        self.resize(1100, 780)
+        self.resize(960, 760)
 
         self.cfg = cfg
         self.bridge = bridge
@@ -114,7 +123,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_header(initial_method)
         self._build_preview_area()
-        self._build_status_area()
         self._build_log_area()
 
         self._init_zoom_subscription()
@@ -138,55 +146,115 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     def _build_header(self, initial_method: str) -> None:
         header = QtWidgets.QWidget()
-        grid = QtWidgets.QGridLayout(header)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(6)
+        header_layout = QtWidgets.QVBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(10)
+
+        # Image stream controls -------------------------------------------------
+        bridge_box = QtWidgets.QGroupBox("Image Stream")
+        bridge_layout = QtWidgets.QVBoxLayout(bridge_box)
+        bridge_layout.setContentsMargins(8, 8, 8, 8)
+        bridge_layout.setSpacing(6)
+
+        bridge_buttons = QtWidgets.QHBoxLayout()
+        bridge_buttons.setContentsMargins(0, 0, 0, 0)
+        bridge_buttons.setSpacing(6)
 
         self.btn_server = QtWidgets.QPushButton("Start Image Stream Module")
         self.btn_server.clicked.connect(self.on_toggle_server)
-        grid.addWidget(self.btn_server, 0, 0)
+        bridge_buttons.addWidget(self.btn_server)
 
-        self.btn_bridge = QtWidgets.QPushButton("Image Stream Module Settings")
+        self.btn_bridge = QtWidgets.QPushButton("Image Stream Settings")
         self.btn_bridge.clicked.connect(self.open_bridge_window)
-        grid.addWidget(self.btn_bridge, 0, 1)
+        bridge_buttons.addWidget(self.btn_bridge)
+        bridge_buttons.addStretch()
+        bridge_layout.addLayout(bridge_buttons)
 
-        self.lbl_bridge = QtWidgets.QLabel("Image Stream Module: Stopped (Realtime)")
-        grid.addWidget(self.lbl_bridge, 0, 2, 1, 2)
+        self.lbl_bridge = QtWidgets.QLabel("Image Stream: Stopped · Realtime")
+        self.lbl_bridge.setWordWrap(True)
+        bridge_layout.addWidget(self.lbl_bridge)
 
+        self.lbl_bridge_extra = QtWidgets.QLabel("TCP OFF / UDP OFF")
+        self.lbl_bridge_extra.setWordWrap(True)
+        self.lbl_bridge_extra.setStyleSheet("color: #888888;")
+        bridge_layout.addWidget(self.lbl_bridge_extra)
+
+        header_layout.addWidget(bridge_box)
+
+        # Gimbal controls -------------------------------------------------------
+        gimbal_box = QtWidgets.QGroupBox("Gimbal")
+        gimbal_layout = QtWidgets.QVBoxLayout(gimbal_box)
+        gimbal_layout.setContentsMargins(8, 8, 8, 8)
+        gimbal_layout.setSpacing(6)
+
+        gimbal_buttons = QtWidgets.QHBoxLayout()
+        gimbal_buttons.setContentsMargins(0, 0, 0, 0)
+        gimbal_buttons.setSpacing(6)
         self.btn_gimbal = QtWidgets.QPushButton("Gimbal Controls")
         self.btn_gimbal.clicked.connect(self.open_gimbal_window)
-        grid.addWidget(self.btn_gimbal, 1, 0)
+        gimbal_buttons.addWidget(self.btn_gimbal)
+        gimbal_buttons.addStretch()
+        gimbal_layout.addLayout(gimbal_buttons)
 
-        mode_group = QtWidgets.QGroupBox("Gimbal Control")
-        mode_layout = QtWidgets.QHBoxLayout(mode_group)
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.setSpacing(6)
+        mode_label = QtWidgets.QLabel("Control Mode:")
         self.rb_tcp = QtWidgets.QRadioButton("TCP/IP")
         self.rb_mav = QtWidgets.QRadioButton("MAVLink")
-        mode_layout.addWidget(self.rb_tcp)
-        mode_layout.addWidget(self.rb_mav)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.rb_tcp)
+        mode_row.addWidget(self.rb_mav)
+        mode_row.addStretch()
+        gimbal_layout.addLayout(mode_row)
         if initial_method == "mavlink":
             self.rb_mav.setChecked(True)
         else:
             self.rb_tcp.setChecked(True)
         self.rb_tcp.toggled.connect(self._on_gimbal_method_changed)
-        grid.addWidget(mode_group, 1, 1)
 
         self.lbl_gimbal = QtWidgets.QLabel("Gimbal: Deactivated")
-        grid.addWidget(self.lbl_gimbal, 1, 2)
+        self.lbl_gimbal.setWordWrap(True)
+        gimbal_layout.addWidget(self.lbl_gimbal)
 
+        header_layout.addWidget(gimbal_box)
+
+        # Relay controls --------------------------------------------------------
+        relay_box = QtWidgets.QGroupBox("Relay & Logging")
+        relay_layout = QtWidgets.QVBoxLayout(relay_box)
+        relay_layout.setContentsMargins(8, 8, 8, 8)
+        relay_layout.setSpacing(6)
+
+        relay_row = QtWidgets.QHBoxLayout()
+        relay_row.setContentsMargins(0, 0, 0, 0)
+        relay_row.setSpacing(6)
         self.btn_relay = QtWidgets.QPushButton("Relay Settings")
         self.btn_relay.clicked.connect(self.open_relay_window)
-        grid.addWidget(self.btn_relay, 2, 0)
-
+        relay_row.addWidget(self.btn_relay)
+        relay_row.addStretch()
         self.lbl_relay = QtWidgets.QLabel("Relay: Deactivated")
-        grid.addWidget(self.lbl_relay, 2, 1)
+        self.lbl_relay.setWordWrap(True)
+        relay_row.addWidget(self.lbl_relay)
+        relay_layout.addLayout(relay_row)
 
+        rover_row = QtWidgets.QHBoxLayout()
+        rover_row.setContentsMargins(0, 0, 0, 0)
+        rover_row.setSpacing(6)
         self.btn_rover = QtWidgets.QPushButton("Rover Relay Logging")
         self.btn_rover.clicked.connect(self.open_rover_window)
-        grid.addWidget(self.btn_rover, 2, 2)
-
+        rover_row.addWidget(self.btn_rover)
+        rover_row.addStretch()
         self.lbl_rover = QtWidgets.QLabel("Rover Logging: Idle")
-        grid.addWidget(self.lbl_rover, 2, 3)
+        self.lbl_rover.setWordWrap(True)
+        rover_row.addWidget(self.lbl_rover)
+        relay_layout.addLayout(rover_row)
+
+        self.lbl_relay_log = QtWidgets.QLabel("Gazebo Logging: Idle")
+        self.lbl_relay_log.setWordWrap(True)
+        self.lbl_relay_log.setStyleSheet("color: #888888;")
+        relay_layout.addWidget(self.lbl_relay_log)
+
+        header_layout.addWidget(relay_box)
 
         self._layout.addWidget(header)
 
@@ -210,21 +278,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         vbox.addLayout(info_layout)
         self._layout.addWidget(group, stretch=1)
-
-    def _build_status_area(self) -> None:
-        grid = QtWidgets.QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
-
-        self.lbl_relay_log = QtWidgets.QLabel("Gazebo Logging: Idle")
-        grid.addWidget(self.lbl_relay_log, 0, 0)
-
-        self.lbl_bridge_extra = QtWidgets.QLabel("")
-        grid.addWidget(self.lbl_bridge_extra, 0, 1)
-
-        self.lbl_preview_hint = QtWidgets.QLabel("")
-        grid.addWidget(self.lbl_preview_hint, 1, 0, 1, 2)
-
-        self._layout.addLayout(grid)
 
     def _build_log_area(self) -> None:
         group = QtWidgets.QGroupBox("Log Output")
@@ -355,7 +408,9 @@ class MainWindow(QtWidgets.QMainWindow):
         mode = st.get("image_source_mode", "Realtime")
         tcp_on = "ON" if st.get("tcp_listening") else "OFF"
         udp_on = "ON" if st.get("udp_listening") else "OFF"
-        self.lbl_bridge.setText(f"Image Stream Module: {'Running' if running else 'Stopped'} ({mode})")
+        mode_label = str(mode)
+        stream_state = "Running" if running else "Stopped"
+        self.lbl_bridge.setText(f"Image Stream: {stream_state} · {mode_label}")
         self.lbl_bridge_extra.setText(f"TCP {tcp_on} / UDP {udp_on}")
 
         gimbal_state = getattr(self.gimbal, "get_status", None)
