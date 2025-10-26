@@ -327,12 +327,29 @@ class GimbalControl:
         self._mav_stop.clear()
         self.hb_rx_ok = False
 
+    def _apply_pose_locked(
+        self,
+        position_xyz: Tuple[float, float, float],
+        bridge_rpy: Tuple[float, float, float],
+        *,
+        persist: bool = False,
+    ) -> None:
+        self.pos[:] = [float(position_xyz[0]), float(position_xyz[1]), float(position_xyz[2])]
+        self.rpy_tgt[:] = [float(bridge_rpy[0]), float(bridge_rpy[1]), float(bridge_rpy[2])]
+        if persist:
+            self.s["pos_x"], self.s["pos_y"], self.s["pos_z"] = self.pos
+            self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = self.rpy_tgt
+        self._last_sent_snapshot = None
+
     def set_target_pose(self, x, y, z, roll_deg, pitch_deg, yaw_deg) -> None:
         with self._lock:
-            self.pos[:] = [x, y, z]
-            self.rpy_tgt[:] = [roll_deg, pitch_deg, yaw_deg]
-            self._last_sent_snapshot = None
-        self.log(f"[GIMBAL] target pose set → xyz=({x:.2f},{y:.2f},{z:.2f}), rpy=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f})")
+            self._apply_pose_locked(
+                (x, y, z), (roll_deg, pitch_deg, yaw_deg), persist=False
+            )
+        self.log(
+            f"[GIMBAL] target pose set → xyz=({x:.2f},{y:.2f},{z:.2f}), "
+            f"rpy=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f})"
+        )
 
     def set_max_rate(self, rate_dps: float) -> None:
         with self._lock:
@@ -664,7 +681,11 @@ class GimbalControl:
                 return
             sensor_type = self._sanitize_sensor_code(target.sensor_type)
             sensor_id = self._sanitize_sensor_code(target.sensor_id)
-            px, py, pz = target.position_xyz
+            px, py, pz = (
+                float(target.position_xyz[0]),
+                float(target.position_xyz[1]),
+                float(target.position_xyz[2]),
+            )
             sim_r, sim_p, sim_y = (
                 float(target.sim_rpy[0]),
                 float(target.sim_rpy[1]),
@@ -674,17 +695,13 @@ class GimbalControl:
             with self._lock:
                 self.sensor_type = sensor_type
                 self.sensor_id = sensor_id
-                self.pos[:] = [px, py, pz]
-                self.rpy_tgt[:] = [r, p, y]
                 self.s["sensor_type"] = self.sensor_type
                 self.s["sensor_id"] = self.sensor_id
-                self.s["pos_x"], self.s["pos_y"], self.s["pos_z"] = self.pos
-                self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = self.rpy_tgt
-                self._last_sent_snapshot = None
+                self._apply_pose_locked((px, py, pz), (r, p, y), persist=True)
             self.log(
                 f"[GIMBAL] TCP target -> sensor={sensor_type}/{sensor_id} "
-                f"xyz=({px:.2f},{py:.2f},{pz:.2f}) sim_rpy=({sim_r:.2f},{sim_p:.2f},{sim_y:.2f}) "
-                f"bridge_rpy=({r:.2f},{p:.2f},{y:.2f})"
+                f"xyz=({px:.2f},{py:.2f},{pz:.2f}) bridge_rpy=({r:.2f},{p:.2f},{y:.2f}) "
+                f"sim_rpy=({sim_r:.2f},{sim_p:.2f},{sim_y:.2f})"
             )
             self._send_status_message(conn)
         elif command.cmd_id == TCP_CMD_SET_ZOOM:
@@ -749,6 +766,9 @@ class GimbalControl:
         period = 0.01  # 100 Hz
         while not self.stop_ev.is_set():
             t0 = time.time()
+            pkt: Optional[bytes] = None
+            target: Optional[Tuple[str, int]] = None
+            dump_ctrl = False
             with self._lock:
                 dt = max(1e-3, t0 - self._last_ts)
                 self._last_ts = t0
@@ -773,19 +793,20 @@ class GimbalControl:
                 )
                 if should_send:
                     pkt = self._pack_gimbal_ctrl(sensor_type, sensor_id, self.pos, self.rpy_cur)
-                    try:
-                        self.tx_sock.sendto(
-                            pkt,
-                            (
-                                self.s.get("generator_ip", "127.0.0.1"),
-                                int(self.s.get("generator_port", 15020)),
-                            ),
-                        )
-                        self._last_sent_snapshot = snapshot
-                        if self.debug_dump_packets:
-                            self._dump_packet_bytes("CTRL", pkt)
-                    except Exception as e:
-                        self.log(f"[GIMBAL] send 10706 error: {e}")
+                    target = (
+                        str(self.s.get("generator_ip", "127.0.0.1")),
+                        int(self.s.get("generator_port", 15020)),
+                    )
+                    dump_ctrl = self.debug_dump_packets
+                    self._last_sent_snapshot = snapshot
+
+            if pkt and target:
+                try:
+                    self.tx_sock.sendto(pkt, target)
+                    if dump_ctrl:
+                        self._dump_packet_bytes("CTRL", pkt)
+                except Exception as e:
+                    self.log(f"[GIMBAL] send 10706 error: {e}")
 
             time.sleep(max(0.0, period - (time.time() - t0)))
 
