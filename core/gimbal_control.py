@@ -110,9 +110,11 @@ class GimbalControl:
         self._tcp_thread: Optional[threading.Thread] = None
         self._tcp_sock: Optional[socket.socket] = None
         self._tcp_clients: Set[socket.socket] = set()
+        self._tcp_clients_lock = threading.Lock()
         self._tcp_stop = threading.Event()
         self._mav_stop = threading.Event()
 
+        self._mav_lock = threading.Lock()
         self.mav: Optional[mavutil.mavfile] = None
         self.serial_port = str(self.s.get("serial_port", "") or "").strip()
         self.s["serial_port"] = self.serial_port
@@ -306,8 +308,9 @@ class GimbalControl:
 
     def _stop_mavlink_threads(self) -> None:
         self._mav_stop.set()
-        mav = self.mav
-        self.mav = None
+        with self._mav_lock:
+            mav = self.mav
+            self.mav = None
         if mav:
             try:
                 mav.close()
@@ -486,11 +489,15 @@ class GimbalControl:
         if not self.serial_port:
             return
         try:
-            self.mav = mavutil.mavlink_connection(
-                self.serial_port, baud=self.serial_baud,
-                source_system=self.mav_sys_id, source_component=self.mav_comp_id
+            mav = mavutil.mavlink_connection(
+                self.serial_port,
+                baud=self.serial_baud,
+                source_system=self.mav_sys_id,
+                source_component=self.mav_comp_id,
             )
             self.log(f"[GIMBAL] MAVLink serial: {self.serial_port} @ {self.serial_baud} (sys={self.mav_sys_id}, comp={self.mav_comp_id})")
+            with self._mav_lock:
+                self.mav = mav
             self._mav_stop.clear()
             self.mav_rx_thread = threading.Thread(target=self._mav_rx_loop, daemon=True)
             self.mav_tx_thread = threading.Thread(target=self._mav_tx_loop, daemon=True)
@@ -502,6 +509,10 @@ class GimbalControl:
             self.log(f"[GIMBAL] mavlink open error: {e}")
 
     # -------- status --------
+    def _get_mavlink(self) -> Optional[mavutil.mavfile]:
+        with self._mav_lock:
+            return self.mav
+
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
             method_display = self.control_method.upper() if self.control_method else "CTRL"
@@ -557,12 +568,14 @@ class GimbalControl:
         except Exception:
             pass
         self._tcp_sock = None
-        for conn in list(self._tcp_clients):
+        with self._tcp_clients_lock:
+            clients = list(self._tcp_clients)
+            self._tcp_clients.clear()
+        for conn in clients:
             try:
                 conn.close()
             except Exception:
                 pass
-        self._tcp_clients.clear()
         self._tcp_thread = None
 
     def _open_tcp(self) -> None:
@@ -582,7 +595,14 @@ class GimbalControl:
                 self.log(f"[GIMBAL] TCP accept error: {exc}")
                 time.sleep(0.1)
                 continue
-            self._tcp_clients.add(conn)
+            if self._tcp_stop.is_set():
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                break
+            with self._tcp_clients_lock:
+                self._tcp_clients.add(conn)
             self.log(f"[GIMBAL] TCP client connected: {addr}")
             t = threading.Thread(target=self._handle_tcp_client, args=(conn, addr), daemon=True)
             t.start()
@@ -605,7 +625,8 @@ class GimbalControl:
                 conn.close()
             except Exception:
                 pass
-            self._tcp_clients.discard(conn)
+            with self._tcp_clients_lock:
+                self._tcp_clients.discard(conn)
             self.log(f"[GIMBAL] TCP client disconnected: {addr}")
 
     @staticmethod
@@ -758,9 +779,13 @@ class GimbalControl:
 
     # -------- MAVLink RX/TX --------
     def _mav_rx_loop(self) -> None:
-        while not self.stop_ev.is_set() and not self._mav_stop.is_set() and self.mav:
+        while not self.stop_ev.is_set() and not self._mav_stop.is_set():
+            mav = self._get_mavlink()
+            if not mav:
+                time.sleep(0.1)
+                continue
             try:
-                m = self.mav.recv_match(blocking=True, timeout=0.2)
+                m = mav.recv_match(blocking=True, timeout=0.2)
                 if not m:
                     continue
                 t = m.get_type()
@@ -794,12 +819,16 @@ class GimbalControl:
         period_status = 0.1
         last_status = 0.0
         t0 = time.time()
-        while not self.stop_ev.is_set() and not self._mav_stop.is_set() and self.mav:
+        while not self.stop_ev.is_set() and not self._mav_stop.is_set():
+            mav = self._get_mavlink()
+            if not mav:
+                time.sleep(0.1)
+                continue
             now = time.time()
             try:
                 if now >= next_hb:
                     # type=26, autopilot=8, base_mode=0, custom_mode=100, system_status=4
-                    self.mav.mav.heartbeat_send(26, 8, 0, 100, 4)
+                    mav.mav.heartbeat_send(26, 8, 0, 100, 4)
                     next_hb = now + 1.0
 
                 if now - last_status >= period_status:
@@ -814,7 +843,7 @@ class GimbalControl:
                     qx, qy, qz, qw = euler_to_quat(r_sim, p_sim, y_sim)
                     wx, wy, wz = self._bridge_to_sim_rpy(wx_b, wy_b, wz_b)
                     time_boot_ms = int((now - t0) * 1000.0)
-                    self.mav.mav.gimbal_device_attitude_status_send(
+                    mav.mav.gimbal_device_attitude_status_send(
                         self.mav_sys_id,
                         self.mav_comp_id,
                         time_boot_ms,
@@ -835,17 +864,19 @@ class GimbalControl:
 
     # -------- PARAM helpers --------
     def _send_param_list(self) -> None:
-        if not self.mav:
+        mav = self._get_mavlink()
+        if not mav:
             return
         for idx, (pid, val, ptype) in enumerate(PARAM_TABLE):
             try:
-                self.mav.mav.param_value_send(pid.encode("ascii"), float(val), ptype, PARAM_COUNT, idx)
+                mav.mav.param_value_send(pid.encode("ascii"), float(val), ptype, PARAM_COUNT, idx)
             except Exception as e:
                 self.log(f"[GIMBAL] PARAM_VALUE idx={idx} error: {e}")
             time.sleep(0.02)
 
     def _send_param_read(self, pid: str, pidx: int) -> None:
-        if not self.mav:
+        mav = self._get_mavlink()
+        if not mav:
             return
         if 0 <= pidx < PARAM_COUNT:
             name, val, ptype = PARAM_TABLE[pidx]
@@ -854,7 +885,7 @@ class GimbalControl:
             if not hit: return
             pidx, (name, val, ptype) = hit
         try:
-            self.mav.mav.param_value_send(name.encode("ascii"), float(val), ptype, PARAM_COUNT, pidx)
+            mav.mav.param_value_send(name.encode("ascii"), float(val), ptype, PARAM_COUNT, pidx)
         except Exception as e:
             self.log(f"[GIMBAL] PARAM_VALUE(read) error: {e}")
 
