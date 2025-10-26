@@ -9,12 +9,31 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from PySide6 import QtCore
+
 from core.network import get_global_dispatcher
 
 from .log_parsers import UNIFIED_CSV_HEADER, RoverFeedbackCsvFormatter
 
 
 _FEEDBACK_LOG_RESET = object()
+
+
+class _FeedbackLogWorker(QtCore.QObject):
+    """Qt worker that processes queued rover feedback log entries."""
+
+    finished = QtCore.Signal()
+
+    def __init__(self, owner: "RoverRelayLogger") -> None:
+        super().__init__()
+        self._owner = owner
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            self._owner._feedback_log_writer_loop()
+        finally:
+            self.finished.emit()
 
 
 class RoverRelayLogger:
@@ -54,12 +73,15 @@ class RoverRelayLogger:
         self._feedback_log_error = ""
         self._feedback_log_closing = False
         self._feedback_log_queue: "queue.Queue[object]" = queue.Queue()
-        self._feedback_log_worker = threading.Thread(
-            target=self._feedback_log_writer_loop,
-            name="rover-csv-writer",
-            daemon=True,
-        )
-        self._feedback_log_worker.start()
+        self._feedback_worker = _FeedbackLogWorker(self)
+        self._feedback_thread = QtCore.QThread()
+        self._feedback_thread.setObjectName("rover-csv-writer")
+        self._feedback_worker.moveToThread(self._feedback_thread)
+        self._feedback_thread.started.connect(self._feedback_worker.run)
+        self._feedback_worker.finished.connect(self._feedback_thread.quit)
+        self._feedback_worker.finished.connect(self._feedback_worker.deleteLater)
+        self._feedback_thread.start()
+        self._feedback_thread_shutdown = False
 
         self._dispatcher = get_global_dispatcher()
         self._feedback_registered = False
@@ -165,6 +187,22 @@ class RoverRelayLogger:
         if was_running:
             self._emit_status("STOPPED")
             self._log_status("stopped")
+
+    def close(self) -> None:
+        """Stop the feedback log worker thread gracefully."""
+
+        thread = getattr(self, "_feedback_thread", None)
+        if thread is None or self._feedback_thread_shutdown:
+            return
+        self._feedback_thread_shutdown = True
+        try:
+            self._feedback_log_queue.put(None)
+        except Exception:
+            pass
+        thread.wait(1500)
+        thread.deleteLater()
+        self._feedback_thread = None
+        self._feedback_worker = None
 
     def is_logging_active(self) -> bool:
         with self._feedback_log_lock:
