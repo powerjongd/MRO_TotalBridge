@@ -41,6 +41,15 @@ class QtLogHandler(logging.Handler):
         self.widget.append(msg)
         self.widget.moveCursor(QtGui.QTextCursor.End)
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumSize(320, 240)
+        self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setStyleSheet("background-color: #202020; border: 1px solid #404040;")
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - GUI callback
+        super().resizeEvent(event)
+        self.resized.emit(event.size())
 
 class _PreviewBridge(QtCore.QObject):
     frame_ready = QtCore.Signal(bytes, float)
