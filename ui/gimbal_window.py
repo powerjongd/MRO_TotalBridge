@@ -1,20 +1,18 @@
-# ui/gimbal_window.py
-# -*- coding: utf-8 -*-
+"""PySide6 dialog for gimbal control configuration."""
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
-import tkinter as tk
-from tkinter import ttk, messagebox
-from typing import Any, Dict, Iterable, List, Optional
+import logging
+from typing import Any, Dict, List, Optional
 
-
+from PySide6 import QtWidgets
 from serial.tools import list_ports
-from utils.settings import ConfigManager, AppConfig  # type: ignore
+
+from utils.settings import AppConfig, ConfigManager
+
 
 SENSOR_TYPES = ["Camera", "GPS", "LiDAR", "RADAR", "LRF", "IMU"]
-SENSOR_COMBO_VALUES = [f"{i}: {name}" for i, name in enumerate(SENSOR_TYPES)]
-
+SENSOR_COMBO_VALUES = [f"{idx}: {name}" for idx, name in enumerate(SENSOR_TYPES)]
 MAX_SENSOR_PRESETS = 6
 PRESET_VALUE_KEYS = [
     "sensor_type",
@@ -33,6 +31,7 @@ PRESET_VALUE_KEYS = [
     "mav_compid",
 ]
 
+
 def _as_int(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -45,12 +44,6 @@ def _as_float(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return default
-
-
-def _as_str(value: Any, default: str = "") -> str:
-    if value is None:
-        return default
-    return str(value)
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -67,6 +60,12 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _as_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
 @dataclass
 class NetworkSettings:
     ip: str = "127.0.0.1"
@@ -76,8 +75,8 @@ class NetworkSettings:
     def from_config(cls, gimbal_cfg: Dict[str, Any]) -> "NetworkSettings":
         network = gimbal_cfg.get("network") if isinstance(gimbal_cfg.get("network"), dict) else {}
         ip = _as_str(network.get("ip", gimbal_cfg.get("generator_ip", "127.0.0.1")))
-        port_source = network.get("port", gimbal_cfg.get("generator_port", 15020))
-        return cls(ip=ip, port=_as_int(port_source, 15020))
+        port_src = network.get("port", gimbal_cfg.get("generator_port", 15020))
+        return cls(ip=ip, port=_as_int(port_src, 15020))
 
     def to_config(self) -> Dict[str, Any]:
         return {"ip": self.ip, "port": self.port}
@@ -101,24 +100,24 @@ class SensorPresetData:
     mav_compid: int = 154
 
     @classmethod
-    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "SensorPresetData":
-        if not isinstance(data, dict):
+    def from_dict(cls, raw: Optional[Dict[str, Any]]) -> "SensorPresetData":
+        if not isinstance(raw, dict):
             return cls()
         return cls(
-            sensor_type=_as_int(data.get("sensor_type", 0), 0) & 0xFF,
-            sensor_id=_as_int(data.get("sensor_id", 0), 0) & 0xFF,
-            pos_x=_as_float(data.get("pos_x", 0.0), 0.0),
-            pos_y=_as_float(data.get("pos_y", 0.0), 0.0),
-            pos_z=_as_float(data.get("pos_z", 0.0), 0.0),
-            init_roll_deg=_as_float(data.get("init_roll_deg", 0.0), 0.0),
-            init_pitch_deg=_as_float(data.get("init_pitch_deg", 0.0), 0.0),
-            init_yaw_deg=_as_float(data.get("init_yaw_deg", 0.0), 0.0),
-            max_rate_dps=_as_float(data.get("max_rate_dps", 60.0), 60.0),
-            power_on=_as_bool(data.get("power_on", True), True),
-            serial_port=_as_str(data.get("serial_port", "")),
-            serial_baud=_as_int(data.get("serial_baud", 115200), 115200),
-            mav_sysid=_as_int(data.get("mav_sysid", 1), 1),
-            mav_compid=_as_int(data.get("mav_compid", 154), 154),
+            sensor_type=_as_int(raw.get("sensor_type", 0), 0) & 0xFF,
+            sensor_id=_as_int(raw.get("sensor_id", 0), 0) & 0xFF,
+            pos_x=_as_float(raw.get("pos_x", 0.0), 0.0),
+            pos_y=_as_float(raw.get("pos_y", 0.0), 0.0),
+            pos_z=_as_float(raw.get("pos_z", 0.0), 0.0),
+            init_roll_deg=_as_float(raw.get("init_roll_deg", 0.0), 0.0),
+            init_pitch_deg=_as_float(raw.get("init_pitch_deg", 0.0), 0.0),
+            init_yaw_deg=_as_float(raw.get("init_yaw_deg", 0.0), 0.0),
+            max_rate_dps=_as_float(raw.get("max_rate_dps", 60.0), 60.0),
+            power_on=_as_bool(raw.get("power_on", True), True),
+            serial_port=_as_str(raw.get("serial_port", "")),
+            serial_baud=_as_int(raw.get("serial_baud", 115200), 115200),
+            mav_sysid=_as_int(raw.get("mav_sysid", 1), 1),
+            mav_compid=_as_int(raw.get("mav_compid", 154), 154),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -187,10 +186,7 @@ class PresetBundle:
             raw_slots = raw_bundle.get("presets") or raw_bundle.get("slots")
             selected = _as_int(raw_bundle.get("selected", raw_bundle.get("selected_preset", selected)), selected)
             applicable = _as_int(
-                raw_bundle.get(
-                    "applicable",
-                    raw_bundle.get("applicable_preset", raw_bundle.get("mavlink_preset_index", applicable)),
-                ),
+                raw_bundle.get("applicable", raw_bundle.get("applicable_preset", raw_bundle.get("mavlink_preset_index", applicable))),
                 applicable,
             )
         if raw_slots is None:
@@ -198,821 +194,433 @@ class PresetBundle:
             if isinstance(legacy, dict):
                 raw_slots = legacy.get("slots")
                 selected = _as_int(legacy.get("selected", selected), selected)
-            elif isinstance(legacy, list):
-                raw_slots = legacy
-        slot_items: List[Any] = []
         if isinstance(raw_slots, list):
-            slot_items = raw_slots[:MAX_SENSOR_PRESETS]
-        elif isinstance(raw_slots, dict):
-            keys = set(raw_slots.keys())
-            zero_based = any(k in keys for k in (0, "0"))
-            for i in range(MAX_SENSOR_PRESETS):
-                candidates: List[Any] = []
-                if zero_based:
-                    candidates.extend([i, str(i)])
-                candidates.extend([i + 1, str(i + 1)])
-                candidates.extend([i, str(i)])
-                value = None
-                for key in candidates:
-                    if key in raw_slots:
-                        value = raw_slots[key]
-                        break
-                slot_items.append(value)
-        elif isinstance(raw_slots, Iterable):
-            slot_items = list(raw_slots)[:MAX_SENSOR_PRESETS]
-
-        for item in slot_items:
-            presets.append(SensorPreset.from_any(item))
+            for item in raw_slots:
+                presets.append(SensorPreset.from_any(item))
         while len(presets) < MAX_SENSOR_PRESETS:
             presets.append(None)
-        selected = max(0, min(MAX_SENSOR_PRESETS - 1, selected))
-        applicable = max(0, min(MAX_SENSOR_PRESETS - 1, applicable))
+        selected = max(0, min(selected, MAX_SENSOR_PRESETS - 1))
+        applicable = max(0, min(applicable, MAX_SENSOR_PRESETS - 1))
         return cls(network=network, presets=presets, selected_index=selected, applicable_index=applicable)
 
     def to_config(self) -> Dict[str, Any]:
         return {
             "network": self.network.to_config(),
             "presets": [preset.to_config() if preset else None for preset in self.presets],
-            "selected_preset": self.selected_index,
-            "applicable_preset": self.applicable_index,
+            "selected": self.selected_index,
+            "applicable": self.applicable_index,
         }
 
-    def set_preset(self, idx: int, preset: SensorPreset) -> None:
-        if 0 <= idx < MAX_SENSOR_PRESETS:
-            self.presets[idx] = preset
 
-    def clear_preset(self, idx: int) -> None:
-        if 0 <= idx < MAX_SENSOR_PRESETS:
-            self.presets[idx] = None
-
-    def get(self, idx: int) -> Optional[SensorPreset]:
-        if 0 <= idx < MAX_SENSOR_PRESETS:
-            return self.presets[idx]
-        return None
-
-
-
-class GimbalControlsWindow(tk.Toplevel):
-    def __init__(self, master: tk.Misc, cfg: Dict[str, Any], gimbal, log: logging.Logger) -> None:
-        super().__init__(master)
-        self.title("Gimbal Controls")
-        self.resizable(False, False)
+class GimbalControlsDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget,
+        cfg: Dict[str, Any],
+        gimbal,
+        log: logging.Logger,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Gimbal Controls")
+        self.resize(820, 720)
+        self.setModal(True)
 
         self.cfg = cfg
         self.gimbal = gimbal
         self.log = log
 
-        gimbal_cfg = cfg.get("gimbal", {})
+        gimbal_cfg = cfg.setdefault("gimbal", {})
         self.bundle = PresetBundle.from_config(gimbal_cfg)
+        payload = self.bundle.presets[self.bundle.selected_index].data if self.bundle.presets[self.bundle.selected_index] else SensorPresetData.from_dict(gimbal_cfg)
 
-        active_preset = self.bundle.get(self.bundle.selected_index)
-        if active_preset:
-            payload = active_preset.data
-        else:
-            payload = SensorPresetData.from_dict(gimbal_cfg)
+        self.updated_config: Dict[str, Any] = dict(gimbal_cfg)
 
-        self.v_preset_index = tk.IntVar(value=self.bundle.selected_index)
-        self.v_preset_name = tk.StringVar()
-        self._preset_radios: List[ttk.Radiobutton] = []
+        self.network_ip = QtWidgets.QLineEdit(self.bundle.network.ip)
+        self.network_port = QtWidgets.QSpinBox()
+        self.network_port.setRange(1, 65535)
+        self.network_port.setValue(self.bundle.network.port)
 
-        self.v_gen_ip = tk.StringVar(value=self.bundle.network.ip)
-        self.v_gen_port = tk.IntVar(value=self.bundle.network.port)
+        self.preset_buttons: List[QtWidgets.QRadioButton] = []
+        self.preset_group = QtWidgets.QButtonGroup(self)
+        self.preset_name = QtWidgets.QLineEdit()
+        self.btn_save_preset = QtWidgets.QPushButton("Save to Preset")
+        self.btn_clear_preset = QtWidgets.QPushButton("Clear Preset")
+        self.btn_apply_selected = QtWidgets.QPushButton("Apply Selected Preset")
+        self.btn_apply_all = QtWidgets.QPushButton("Apply All Presets")
 
-        self.v_sensor_type_combo = tk.StringVar(value=self._sensor_combo_label(payload.sensor_type))
-        self.v_sensor_id = tk.IntVar(value=payload.sensor_id)
+        self.sensor_type = QtWidgets.QComboBox()
+        self.sensor_type.addItems(SENSOR_COMBO_VALUES)
+        self.sensor_type.setCurrentIndex(payload.sensor_type)
+        self.sensor_id = QtWidgets.QSpinBox()
+        self.sensor_id.setRange(0, 255)
+        self.sensor_id.setValue(payload.sensor_id)
 
-        self.v_pos_x = tk.DoubleVar(value=payload.pos_x)
-        self.v_pos_y = tk.DoubleVar(value=payload.pos_y)
-        self.v_pos_z = tk.DoubleVar(value=payload.pos_z)
-        self.v_roll = tk.DoubleVar(value=payload.init_roll_deg)
-        self.v_pitch = tk.DoubleVar(value=payload.init_pitch_deg)
-        self.v_yaw = tk.DoubleVar(value=payload.init_yaw_deg)
+        def _mk_spin(value: float, minimum: float = -1000.0, maximum: float = 1000.0, step: float = 0.1) -> QtWidgets.QDoubleSpinBox:
+            w = QtWidgets.QDoubleSpinBox()
+            w.setDecimals(3)
+            w.setRange(minimum, maximum)
+            w.setSingleStep(step)
+            w.setValue(value)
+            return w
 
-        self.v_max_rate = tk.DoubleVar(value=payload.max_rate_dps)
-        self.v_power_on = tk.BooleanVar(value=payload.power_on)
+        self.pos_x = _mk_spin(payload.pos_x)
+        self.pos_y = _mk_spin(payload.pos_y)
+        self.pos_z = _mk_spin(payload.pos_z)
+        self.roll = _mk_spin(payload.init_roll_deg, -180.0, 180.0)
+        self.pitch = _mk_spin(payload.init_pitch_deg, -180.0, 180.0)
+        self.yaw = _mk_spin(payload.init_yaw_deg, -180.0, 180.0)
+        self.max_rate = _mk_spin(payload.max_rate_dps, 0.0, 720.0, 1.0)
+        self.power_on = QtWidgets.QCheckBox("Power ON")
+        self.power_on.setChecked(payload.power_on)
 
-        self.v_serial_port = tk.StringVar(value=payload.serial_port)
-        self.v_baud = tk.IntVar(value=payload.serial_baud)
-        self.v_mav_sysid = tk.IntVar(value=payload.mav_sysid)
-        self.v_mav_compid = tk.IntVar(value=payload.mav_compid)
-        self.v_applicable_preset = tk.StringVar()
-        self.cb_applicable_preset: Optional[ttk.Combobox] = None
+        self.serial_port = QtWidgets.QComboBox()
+        self._refresh_serial_ports(default=payload.serial_port)
+        self.serial_baud = QtWidgets.QSpinBox()
+        self.serial_baud.setRange(1, 1_000_000)
+        self.serial_baud.setValue(payload.serial_baud)
+        self.btn_refresh_ports = QtWidgets.QPushButton("Refresh Ports")
+        self.btn_open_serial = QtWidgets.QPushButton("Connect Serial")
 
-        self.cur_x = tk.StringVar(value="-")
-        self.cur_y = tk.StringVar(value="-")
-        self.cur_z = tk.StringVar(value="-")
-        # Bridge keeps roll/pitch/yaw in its own order; conversions to simulator axes
-        # happen inside the controller before quaternions are emitted.
-        self.cur_roll = tk.StringVar(value="-")
-        self.cur_pitch = tk.StringVar(value="-")
-        self.cur_yaw = tk.StringVar(value="-")
-        self.cur_wx = tk.StringVar(value="-")
-        self.cur_wy = tk.StringVar(value="-")
-        self.cur_wz = tk.StringVar(value="-")
+        self.mav_sysid = QtWidgets.QSpinBox()
+        self.mav_sysid.setRange(1, 255)
+        self.mav_sysid.setValue(payload.mav_sysid)
+        self.mav_compid = QtWidgets.QSpinBox()
+        self.mav_compid.setRange(1, 255)
+        self.mav_compid.setValue(payload.mav_compid)
+        self.btn_apply_ids = QtWidgets.QPushButton("Apply IDs")
+
+        self.applicable_combo = QtWidgets.QComboBox()
+        self._refresh_applicable_combo()
+        self.applicable_combo.setCurrentIndex(self.bundle.applicable_index)
+
+        self.status_label = QtWidgets.QLabel("Status: -")
 
         self._build_layout()
-        self._update_applicable_preset_dropdown()
-        self._load_selected_preset(self.bundle.selected_index, apply_runtime=False)
-        self._apply_applicable_preset_runtime(self.bundle.applicable_index)
-        self._write_back_state()
-
-        self._refresh_status_periodic()
+        self._connect_signals()
+        self._refresh_preset_buttons()
+        self._update_status()
 
     # ------------------------------------------------------------------
-    # UI construction helpers
     def _build_layout(self) -> None:
-        pad = dict(padx=6, pady=4)
-        root = ttk.Frame(self, padding=10)
-        root.grid(row=0, column=0, sticky="nsew")
+        layout = QtWidgets.QVBoxLayout(self)
 
-        row = 0
-        row = self._build_network_section(root, row, pad)
-        row = self._build_presets_section(root, row, pad)
-        row = self._build_sensor_section(root, row, pad)
-        row = self._build_pose_section(root, row, pad)
-        row = self._build_rate_section(root, row, pad)
-        row = self._build_power_section(root, row, pad)
-        row = self._build_serial_section(root, row, pad)
-        row = self._build_status_section(root, row, pad)
-        self._build_footer(root, row, pad)
+        net_group = QtWidgets.QGroupBox("Network Sensor Control")
+        net_form = QtWidgets.QFormLayout(net_group)
+        net_form.addRow("IP", self.network_ip)
+        net_form.addRow("Port", self.network_port)
+        layout.addWidget(net_group)
 
-    def _build_network_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
-        box = ttk.Labelframe(parent, text="Network Sensor Control")
-        box.grid(row=row, column=0, columnspan=4, sticky="ew", **pad)
-        ttk.Label(box, text="IP").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-        ttk.Entry(box, textvariable=self.v_gen_ip, width=18).grid(row=0, column=1, sticky="w", padx=4, pady=2)
-        ttk.Label(box, text="Port").grid(row=0, column=2, sticky="e", padx=4, pady=2)
-        ttk.Entry(box, textvariable=self.v_gen_port, width=8).grid(row=0, column=3, sticky="w", padx=4, pady=2)
-        return row + 1
-
-    def _build_presets_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
-        box = ttk.Labelframe(parent, text="Sensor Presets")
-        box.grid(row=row, column=0, columnspan=4, sticky="ew", **pad)
-        box.columnconfigure(1, weight=1)
-
-        rb_holder = ttk.Frame(box)
-        rb_holder.grid(row=0, column=0, columnspan=4, sticky="w", padx=4, pady=2)
+        preset_group = QtWidgets.QGroupBox("Sensor Presets")
+        preset_layout = QtWidgets.QVBoxLayout(preset_group)
+        preset_radio_layout = QtWidgets.QGridLayout()
         for idx in range(MAX_SENSOR_PRESETS):
-            btn = ttk.Radiobutton(
-                rb_holder,
-                text=f"Preset {idx + 1}",
+            btn = QtWidgets.QRadioButton(f"Preset {idx + 1}")
+            self.preset_buttons.append(btn)
+            self.preset_group.addButton(btn, idx)
+            preset_radio_layout.addWidget(btn, idx // 3, idx % 3)
+        preset_layout.addLayout(preset_radio_layout)
+        preset_form = QtWidgets.QFormLayout()
+        preset_form.addRow("Name", self.preset_name)
+        preset_layout.addLayout(preset_form)
+        preset_btn_row = QtWidgets.QHBoxLayout()
+        preset_btn_row.addWidget(self.btn_save_preset)
+        preset_btn_row.addWidget(self.btn_clear_preset)
+        preset_btn_row.addStretch()
+        preset_layout.addLayout(preset_btn_row)
+        apply_row = QtWidgets.QHBoxLayout()
+        apply_row.addStretch()
+        apply_row.addWidget(self.btn_apply_selected)
+        apply_row.addWidget(self.btn_apply_all)
+        preset_layout.addLayout(apply_row)
+        layout.addWidget(preset_group)
 
-                variable=self.v_preset_index,
-                value=idx,
-                command=lambda i=idx: self.on_select_preset(i),
-            )
-            btn.grid(row=0, column=idx, sticky="w", padx=2)
-            self._preset_radios.append(btn)
+        sensor_form = QtWidgets.QFormLayout()
+        sensor_form.addRow("Sensor", self.sensor_type)
+        sensor_form.addRow("ID", self.sensor_id)
 
+        pose_grid = QtWidgets.QGridLayout()
+        pose_grid.addWidget(QtWidgets.QLabel("x"), 0, 0)
+        pose_grid.addWidget(self.pos_x, 0, 1)
+        pose_grid.addWidget(QtWidgets.QLabel("y"), 0, 2)
+        pose_grid.addWidget(self.pos_y, 0, 3)
+        pose_grid.addWidget(QtWidgets.QLabel("z"), 0, 4)
+        pose_grid.addWidget(self.pos_z, 0, 5)
+        pose_grid.addWidget(QtWidgets.QLabel("Roll"), 1, 0)
+        pose_grid.addWidget(self.roll, 1, 1)
+        pose_grid.addWidget(QtWidgets.QLabel("Pitch"), 1, 2)
+        pose_grid.addWidget(self.pitch, 1, 3)
+        pose_grid.addWidget(QtWidgets.QLabel("Yaw"), 1, 4)
+        pose_grid.addWidget(self.yaw, 1, 5)
 
-        ttk.Label(box, text="Name").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-        ttk.Entry(box, textvariable=self.v_preset_name, width=24).grid(row=1, column=1, sticky="we", padx=4, pady=2)
-        ttk.Button(box, text="Save to Preset", command=self.on_save_preset).grid(row=1, column=2, sticky="w", padx=4, pady=2)
-        ttk.Button(box, text="Clear Preset", command=self.on_clear_preset).grid(row=1, column=3, sticky="w", padx=4, pady=2)
+        layout.addLayout(sensor_form)
+        layout.addLayout(pose_grid)
 
-        btn_row = ttk.Frame(box)
-        btn_row.grid(row=2, column=0, columnspan=4, sticky="e", padx=4, pady=(2, 4))
-        ttk.Button(btn_row, text="Apply Selected Preset", command=self.on_apply_selected_preset).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btn_row, text="Apply All Presets", command=self.on_apply_all_presets).pack(side=tk.RIGHT)
-        return row + 1
+        rate_layout = QtWidgets.QHBoxLayout()
+        rate_layout.addWidget(QtWidgets.QLabel("Max Angular Rate (deg/s)"))
+        rate_layout.addWidget(self.max_rate)
+        rate_layout.addStretch()
+        layout.addLayout(rate_layout)
 
-    def _build_sensor_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
-        ttk.Label(parent, text="Sensor").grid(row=row, column=0, sticky="e", **pad)
-        ttk.Combobox(parent, textvariable=self.v_sensor_type_combo, values=SENSOR_COMBO_VALUES, state="readonly", width=16).grid(row=row, column=1, sticky="w", **pad)
-        ttk.Label(parent, text="ID").grid(row=row, column=2, sticky="e", **pad)
-        ttk.Entry(parent, textvariable=self.v_sensor_id, width=8).grid(row=row, column=3, sticky="w", **pad)
-        row += 1
-        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=4, sticky="ew", pady=(6, 6))
-        return row + 1
+        power_layout = QtWidgets.QHBoxLayout()
+        power_layout.addWidget(self.power_on)
+        power_layout.addStretch()
+        layout.addLayout(power_layout)
 
-    def _build_pose_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
-        ttk.Label(parent, text="Target Pose (x, y, z, roll, pitch, yaw) [m / deg]").grid(row=row, column=0, columnspan=4, sticky="w", **pad)
-        row += 1
-        for label, var in (("x", self.v_pos_x), ("y", self.v_pos_y)):
-            ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "x" else 2), sticky="e", **pad)
-            ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "x" else 3), sticky="w", **pad)
-        row += 1
-        for label, var in (("z", self.v_pos_z), ("Roll", self.v_roll)):
-            ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "z" else 2), sticky="e", **pad)
-            ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "z" else 3), sticky="w", **pad)
-        row += 1
-        for label, var in (("Pitch", self.v_pitch), ("Yaw", self.v_yaw)):
-            ttk.Label(parent, text=label).grid(row=row, column=(0 if label == "Pitch" else 2), sticky="e", **pad)
-            ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=(1 if label == "Pitch" else 3), sticky="w", **pad)
+        serial_group = QtWidgets.QGroupBox("MAVLink Serial")
+        serial_form = QtWidgets.QFormLayout(serial_group)
+        serial_form.addRow("Applicable Preset", self.applicable_combo)
+        serial_form.addRow("Port", self.serial_port)
+        serial_form.addRow("Baud", self.serial_baud)
+        serial_form.addRow("System ID", self.mav_sysid)
+        serial_form.addRow("Component ID", self.mav_compid)
+        serial_btns = QtWidgets.QHBoxLayout()
+        serial_btns.addWidget(self.btn_refresh_ports)
+        serial_btns.addWidget(self.btn_open_serial)
+        serial_btns.addWidget(self.btn_apply_ids)
+        serial_form.addRow(serial_btns)
+        layout.addWidget(serial_group)
 
-        btns_pose = ttk.Frame(parent)
-        btns_pose.grid(row=row + 1, column=0, columnspan=4, sticky="e", **pad)
-        ttk.Button(btns_pose, text="Apply Pose", command=self.on_apply_pose).grid(row=0, column=0, padx=6)
-        tpl = ttk.Frame(parent)
-        tpl.grid(row=row + 2, column=0, columnspan=4, sticky="we", **pad)
-        ttk.Label(tpl, text="Templates:").pack(side=tk.LEFT)
-        ttk.Button(tpl, text="Home", command=lambda: self._set_tpl(0, 0, 0, 0, 0, 0)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(tpl, text="Forward", command=lambda: self._set_tpl(None, None, None, 0, 0, 0)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(tpl, text="Nadir", command=lambda: self._set_tpl(None, None, None, 0, -90, 0)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(tpl, text="Left", command=lambda: self._set_tpl(None, None, None, 0, 0, -90)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(tpl, text="Right", command=lambda: self._set_tpl(None, None, None, 0, 0, 90)).pack(side=tk.LEFT, padx=2)
-        return row + 3
+        layout.addWidget(self.status_label)
 
-    def _build_rate_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
-        ttk.Label(parent, text="Max Angular Rate (deg/s)").grid(row=row, column=0, sticky="e", **pad)
-        ttk.Entry(parent, textvariable=self.v_max_rate, width=10).grid(row=row, column=1, sticky="w", **pad)
-        ttk.Button(parent, text="Apply Max Rate", command=self.on_apply_max_rate).grid(row=row, column=3, sticky="e", **pad)
-        row += 1
-        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=4, sticky="ew", pady=(6, 6))
-        return row + 1
+        btn_box = QtWidgets.QDialogButtonBox()
+        btn_box.addButton("Save", QtWidgets.QDialogButtonBox.ActionRole)
+        btn_box.addButton(QtWidgets.QDialogButtonBox.Ok)
+        btn_box.addButton(QtWidgets.QDialogButtonBox.Cancel)
+        layout.addWidget(btn_box)
 
-    def _build_power_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
-        ttk.Checkbutton(parent, text="Power ON", variable=self.v_power_on).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Button(parent, text="Apply Power", command=self.on_apply_power).grid(row=row, column=3, sticky="e", **pad)
-        row += 1
-        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=4, sticky="ew", pady=(6, 6))
-        return row + 1
-
-    def _build_serial_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
-        ttk.Label(parent, text="MAVLink Serial").grid(row=row, column=0, columnspan=4, sticky="w", **pad)
-        row += 1
-        ttk.Label(parent, text="Applicable Preset").grid(row=row, column=0, sticky="e", **pad)
-        self.cb_applicable_preset = ttk.Combobox(
-            parent,
-            textvariable=self.v_applicable_preset,
-            state="readonly",
-            width=24,
-        )
-        self.cb_applicable_preset.grid(row=row, column=1, columnspan=3, sticky="we", **pad)
-        self.cb_applicable_preset.bind("<<ComboboxSelected>>", self.on_applicable_preset_changed)
-        row += 1
-        ttk.Label(parent, text="Port").grid(row=row, column=0, sticky="e", **pad)
-        self.cb_ports = ttk.Combobox(parent, textvariable=self.v_serial_port, values=self._enum_serial_ports(), width=18)
-        self.cb_ports.grid(row=row, column=1, sticky="w", **pad)
-        ttk.Label(parent, text="Baud").grid(row=row, column=2, sticky="e", **pad)
-        ttk.Entry(parent, textvariable=self.v_baud, width=10).grid(row=row, column=3, sticky="w", **pad)
-        row += 1
-        ttk.Label(parent, text="System ID").grid(row=row, column=0, sticky="e", **pad)
-        ttk.Entry(parent, textvariable=self.v_mav_sysid, width=10).grid(row=row, column=1, sticky="w", **pad)
-        ttk.Label(parent, text="Component ID").grid(row=row, column=2, sticky="e", **pad)
-        ttk.Entry(parent, textvariable=self.v_mav_compid, width=10).grid(row=row, column=3, sticky="w", **pad)
-        row += 1
-        btns = ttk.Frame(parent)
-        btns.grid(row=row, column=0, columnspan=4, sticky="e", **pad)
-        ttk.Button(btns, text="Apply IDs", command=self.on_apply_ids).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="Refresh Ports", command=self.on_refresh_ports).grid(row=0, column=1, padx=6)
-        ttk.Button(btns, text="Connect Serial", command=self.on_connect_serial).grid(row=0, column=2, padx=6)
-        row += 1
-        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=4, sticky="ew", pady=(6, 6))
-        return row + 1
-
-    def _build_status_section(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> int:
-        cur = ttk.Frame(parent)
-
-        cur.grid(row=row, column=0, columnspan=4, sticky="we", **pad)
-        ttk.Label(cur, text="Current Pose:").grid(row=0, column=0, sticky="w")
-        ttk.Label(cur, text="x").grid(row=1, column=0, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_x, width=10).grid(row=1, column=1, sticky="w")
-        ttk.Label(cur, text="y").grid(row=1, column=2, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_y, width=10).grid(row=1, column=3, sticky="w")
-        ttk.Label(cur, text="z").grid(row=1, column=4, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_z, width=10).grid(row=1, column=5, sticky="w")
-        ttk.Label(cur, text="Roll").grid(row=2, column=0, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_roll, width=10).grid(row=2, column=1, sticky="w")
-        ttk.Label(cur, text="Pitch").grid(row=2, column=2, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_pitch, width=10).grid(row=2, column=3, sticky="w")
-        ttk.Label(cur, text="Yaw").grid(row=2, column=4, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_yaw, width=10).grid(row=2, column=5, sticky="w")
-        ttk.Label(cur, text="ωx/ωy/ωz").grid(row=3, column=0, sticky="e")
-        ttk.Label(cur, textvariable=self.cur_wx, width=10).grid(row=3, column=1, sticky="w")
-        ttk.Label(cur, textvariable=self.cur_wy, width=10).grid(row=3, column=3, sticky="w")
-        ttk.Label(cur, textvariable=self.cur_wz, width=10).grid(row=3, column=5, sticky="w")
-        self.lbl_status = ttk.Label(parent, text="Status: -")
-        self.lbl_status.grid(row=row + 1, column=0, columnspan=4, sticky="w", **pad)
-        return row + 2
-
-    def _build_footer(self, parent: ttk.Frame, row: int, pad: Dict[str, int]) -> None:
-        btns = ttk.Frame(parent)
-        btns.grid(row=row, column=0, columnspan=4, sticky="e", **pad)
-        ttk.Button(btns, text="Save", command=self.on_save).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="Apply & Close", command=self.on_apply_close).grid(row=0, column=1, padx=6)
+        btn_box.button(QtWidgets.QDialogButtonBox.ActionRole).clicked.connect(self.on_save)
+        btn_box.accepted.connect(self.on_apply_close)
+        btn_box.rejected.connect(self.reject)
 
     # ------------------------------------------------------------------
-    # Internal helpers
-    def _enum_serial_ports(self) -> List[str]:
-        try:
-            return [p.device for p in list_ports.comports()]
-        except Exception:
-            return []
+    def _connect_signals(self) -> None:
+        self.preset_group.idToggled.connect(self._on_preset_selected)
+        self.btn_save_preset.clicked.connect(self.on_save_preset)
+        self.btn_clear_preset.clicked.connect(self.on_clear_preset)
+        self.btn_apply_selected.clicked.connect(self.on_apply_selected_preset)
+        self.btn_apply_all.clicked.connect(self.on_apply_all_presets)
+        self.btn_refresh_ports.clicked.connect(self.on_refresh_ports)
+        self.btn_open_serial.clicked.connect(self.on_connect_serial)
+        self.btn_apply_ids.clicked.connect(self.on_apply_ids)
+        self.applicable_combo.currentIndexChanged.connect(self.on_applicable_changed)
 
-    def _sensor_combo_label(self, code: int) -> str:
-        if 0 <= code < len(SENSOR_COMBO_VALUES):
-            return SENSOR_COMBO_VALUES[code]
-        return f"{code}: Sensor"
+    # ------------------------------------------------------------------
+    def _refresh_serial_ports(self, default: str = "") -> None:
+        ports = [port.device for port in list_ports.comports()]
+        if not ports:
+            ports = [default] if default else []
+        self.serial_port.clear()
+        self.serial_port.addItems(ports)
+        if default and default in ports:
+            self.serial_port.setCurrentText(default)
 
-    def _sensor_code_from_combo(self) -> int:
-        combo = (self.v_sensor_type_combo.get() or "0").split(":", 1)[0]
-        return _as_int(combo, 0)
+    def _refresh_preset_buttons(self) -> None:
+        for idx, btn in enumerate(self.preset_buttons):
+            preset = self.bundle.presets[idx]
+            if preset:
+                btn.setText(preset.label(idx))
+                btn.setEnabled(True)
+            else:
+                btn.setText(f"Preset {idx + 1}")
+                btn.setEnabled(True)
+        self.preset_group.button(self.bundle.selected_index).setChecked(True)
+        selected = self.bundle.presets[self.bundle.selected_index]
+        self.preset_name.setText(selected.name if selected else "")
+        self._refresh_applicable_combo()
 
-    def _applicable_combo_label(self, idx: int) -> str:
-        preset = self.bundle.get(idx)
-        label = preset.label(idx) if preset else self._default_preset_name(idx)
-        return f"{idx + 1}: {label}"
+    def _refresh_applicable_combo(self) -> None:
+        self.applicable_combo.blockSignals(True)
+        self.applicable_combo.clear()
+        for idx in range(MAX_SENSOR_PRESETS):
+            preset = self.bundle.presets[idx]
+            label = preset.label(idx) if preset else f"Preset {idx + 1}"
+            self.applicable_combo.addItem(label, idx)
+        current = max(0, min(self.bundle.applicable_index, MAX_SENSOR_PRESETS - 1))
+        self.applicable_combo.setCurrentIndex(current)
+        self.applicable_combo.blockSignals(False)
 
-    def _parse_applicable_index(self, value: str) -> int:
-        token = (value or "").split(":", 1)[0].strip()
-        idx = _as_int(token, self.bundle.applicable_index + 1) - 1
-        return max(0, min(MAX_SENSOR_PRESETS - 1, idx))
-
-    def _sync_applicable_index_from_var(self) -> int:
-        idx = self._parse_applicable_index(self.v_applicable_preset.get())
-        self.bundle.applicable_index = idx
-        return idx
-
-    def _update_applicable_preset_dropdown(self) -> None:
-        options = [self._applicable_combo_label(i) for i in range(MAX_SENSOR_PRESETS)]
-        if self.cb_applicable_preset is not None:
-            self.cb_applicable_preset.configure(values=options)
-        current = self._applicable_combo_label(self.bundle.applicable_index)
-        self.v_applicable_preset.set(current)
-
-    def _applicable_preset_data(self, idx: Optional[int] = None) -> SensorPresetData:
-        if idx is None:
-            idx = self.bundle.applicable_index
-        idx = max(0, min(MAX_SENSOR_PRESETS - 1, idx))
-        preset = self.bundle.get(idx)
-        if preset:
-            return preset.data
-        return SensorPresetData.from_dict(self.cfg.get("gimbal", {}))
-
-    def _apply_applicable_preset_runtime(self, idx: Optional[int] = None) -> None:
-        idx_to_use = self.bundle.applicable_index if idx is None else max(0, min(MAX_SENSOR_PRESETS - 1, idx))
-        data = self._applicable_preset_data(idx_to_use)
-        update_payload = {
-            "mavlink_preset_index": idx_to_use,
-            "mavlink_sensor_type": data.sensor_type & 0xFF,
-            "mavlink_sensor_id": data.sensor_id & 0xFF,
+    def _collect_current_values(self) -> Dict[str, Any]:
+        values = {
+            "network": {"ip": self.network_ip.text().strip(), "port": int(self.network_port.value())},
+            "sensor_type": int(self.sensor_type.currentIndex()),
+            "sensor_id": int(self.sensor_id.value()),
+            "pos_x": float(self.pos_x.value()),
+            "pos_y": float(self.pos_y.value()),
+            "pos_z": float(self.pos_z.value()),
+            "init_roll_deg": float(self.roll.value()),
+            "init_pitch_deg": float(self.pitch.value()),
+            "init_yaw_deg": float(self.yaw.value()),
+            "max_rate_dps": float(self.max_rate.value()),
+            "power_on": self.power_on.isChecked(),
+            "serial_port": self.serial_port.currentText().strip(),
+            "serial_baud": int(self.serial_baud.value()),
+            "mav_sysid": int(self.mav_sysid.value()),
+            "mav_compid": int(self.mav_compid.value()),
+            "mavlink_preset_index": int(self.applicable_combo.currentIndex()),
         }
-        try:
-            if hasattr(self.gimbal, "update_settings"):
-                self.gimbal.update_settings(update_payload)
-        except Exception as exc:
-            self.log.exception("Failed to update MAVLink preset settings: %s", exc)
-        try:
-            if hasattr(self.gimbal, "set_mavlink_target"):
-                self.gimbal.set_mavlink_target(idx_to_use, data.sensor_type, data.sensor_id)
-        except Exception as exc:
-            self.log.exception("Failed to apply MAVLink preset runtime: %s", exc)
-
-    def _var_get(self, variable: tk.Variable, fallback: Any) -> Any:
-        try:
-            return variable.get()
-        except Exception:
-            return fallback
-
-    def _default_preset_name(self, idx: int) -> str:
-        return f"Preset {idx + 1}"
-
-    def _update_preset_labels(self) -> None:
-        for idx, btn in enumerate(self._preset_radios):
-            preset = self.bundle.get(idx)
-            label = preset.label(idx) if preset else self._default_preset_name(idx)
-            btn.configure(text=label)
-        active = self.bundle.get(self.bundle.selected_index)
-        if active:
-            name = active.name.strip() or self._default_preset_name(self.bundle.selected_index)
-        else:
-            name = self._default_preset_name(self.bundle.selected_index)
-        self.v_preset_name.set(name)
-        self._update_applicable_preset_dropdown()
-
-    def _collect_payload_from_form(self) -> SensorPresetData:
-        return SensorPresetData(
-            sensor_type=self._sensor_code_from_combo() & 0xFF,
-            sensor_id=_as_int(self._var_get(self.v_sensor_id, 0), 0) & 0xFF,
-            pos_x=_as_float(self._var_get(self.v_pos_x, 0.0), 0.0),
-            pos_y=_as_float(self._var_get(self.v_pos_y, 0.0), 0.0),
-            pos_z=_as_float(self._var_get(self.v_pos_z, 0.0), 0.0),
-            init_roll_deg=_as_float(self._var_get(self.v_roll, 0.0), 0.0),
-            init_pitch_deg=_as_float(self._var_get(self.v_pitch, 0.0), 0.0),
-            init_yaw_deg=_as_float(self._var_get(self.v_yaw, 0.0), 0.0),
-            max_rate_dps=_as_float(self._var_get(self.v_max_rate, 60.0), 60.0),
-            power_on=_as_bool(self._var_get(self.v_power_on, True), True),
-            serial_port=_as_str(self._var_get(self.v_serial_port, "")).strip(),
-            serial_baud=_as_int(self._var_get(self.v_baud, 115200), 115200),
-            mav_sysid=_as_int(self._var_get(self.v_mav_sysid, 1), 1),
-            mav_compid=_as_int(self._var_get(self.v_mav_compid, 154), 154),
-        )
-
-    def _apply_payload_to_form(self, payload: SensorPresetData) -> None:
-        self.v_sensor_type_combo.set(self._sensor_combo_label(payload.sensor_type))
-        self.v_sensor_id.set(payload.sensor_id & 0xFF)
-        self.v_pos_x.set(payload.pos_x)
-        self.v_pos_y.set(payload.pos_y)
-        self.v_pos_z.set(payload.pos_z)
-        self.v_roll.set(payload.init_roll_deg)
-        self.v_pitch.set(payload.init_pitch_deg)
-        self.v_yaw.set(payload.init_yaw_deg)
-        self.v_max_rate.set(payload.max_rate_dps)
-        self.v_power_on.set(bool(payload.power_on))
-        self.v_serial_port.set(payload.serial_port)
-        self.v_baud.set(payload.serial_baud)
-        self.v_mav_sysid.set(payload.mav_sysid)
-        self.v_mav_compid.set(payload.mav_compid)
-
-    def _active_runtime_values(self) -> Dict[str, Any]:
-        payload = self._collect_payload_from_form()
-        self.bundle.network.ip = _as_str(self._var_get(self.v_gen_ip, self.bundle.network.ip), self.bundle.network.ip)
-        self.bundle.network.port = _as_int(self._var_get(self.v_gen_port, self.bundle.network.port), self.bundle.network.port)
-        values = payload.to_dict()
-        values.update({
-            "generator_ip": self.bundle.network.ip,
-            "generator_port": self.bundle.network.port,
-        })
-        app_idx = self._sync_applicable_index_from_var()
-        app_data = self._applicable_preset_data(app_idx)
-        values.update({
-            "mavlink_preset_index": app_idx,
-            "mavlink_sensor_type": app_data.sensor_type & 0xFF,
-            "mavlink_sensor_id": app_data.sensor_id & 0xFF,
-        })
+        self.bundle.network.ip = values["network"]["ip"]
+        self.bundle.network.port = values["network"]["port"]
+        values["generator_ip"] = self.bundle.network.ip
+        values["generator_port"] = self.bundle.network.port
         return values
 
-    def _write_back_state(self) -> None:
-        payload = self._collect_payload_from_form()
-        self.bundle.network.ip = _as_str(self._var_get(self.v_gen_ip, self.bundle.network.ip), self.bundle.network.ip)
-        self.bundle.network.port = _as_int(self._var_get(self.v_gen_port, self.bundle.network.port), self.bundle.network.port)
-        app_idx = self._sync_applicable_index_from_var()
-        bundle_dict = self.bundle.to_config()
-        gimbal_cfg = self.cfg.setdefault("gimbal", {})
-        gimbal_cfg.update(payload.to_dict())
-        gimbal_cfg["generator_ip"] = self.bundle.network.ip
-        gimbal_cfg["generator_port"] = self.bundle.network.port
-        gimbal_cfg["network"] = bundle_dict["network"]
-        app_data = self._applicable_preset_data(app_idx)
-        gimbal_cfg["preset_bundle"] = {
-            "network": bundle_dict["network"],
-            "presets": bundle_dict["presets"],
-            "selected": bundle_dict["selected_preset"],
-            "applicable": bundle_dict["applicable_preset"],
-            "applicable_preset": bundle_dict["applicable_preset"],
-        }
-        gimbal_cfg["presets"] = {"version": 2, "slots": bundle_dict["presets"]}
-        gimbal_cfg["selected_preset"] = bundle_dict["selected_preset"]
-        gimbal_cfg["mavlink_preset_index"] = bundle_dict["applicable_preset"]
-        gimbal_cfg["mavlink_sensor_type"] = app_data.sensor_type & 0xFF
-        gimbal_cfg["mavlink_sensor_id"] = app_data.sensor_id & 0xFF
-
-    def _send_udp_preset(self, idx: int, preset: SensorPreset, target_ip: str, target_port: int) -> None:
-        data = preset.data
-        name = preset.name.strip() or self._default_preset_name(idx)
+    def _apply_to_runtime(self, values: Dict[str, Any]) -> None:
         try:
-            self.gimbal.send_udp_preset(
-                data.sensor_type,
-                data.sensor_id,
-                data.pos_x,
-                data.pos_y,
-                data.pos_z,
-                data.init_roll_deg,
-                data.init_pitch_deg,
-                data.init_yaw_deg,
-                ip=target_ip,
-                port=target_port,
-            )
-            self.log.info("Preset %s (#%d) UDP sent to %s:%s", name, idx + 1, target_ip, target_port)
-        except Exception as exc:
-            self.log.exception("Failed to send preset %s (#%d) over UDP: %s", name, idx + 1, exc)
-
-    def _apply_runtime(self, values: Dict[str, Any]) -> None:
-        try:
-            if hasattr(self.gimbal, "update_settings"):
-                self.gimbal.update_settings(values)
-        except Exception as exc:
-            self.log.exception("Failed to update gimbal settings: %s", exc)
-        pose_keys = ("pos_x", "pos_y", "pos_z", "init_roll_deg", "init_pitch_deg", "init_yaw_deg")
-        if all(k in values for k in pose_keys) and hasattr(self.gimbal, "set_target_pose"):
-            try:
-                self.gimbal.set_target_pose(
-                    values["pos_x"],
-                    values["pos_y"],
-                    values["pos_z"],
-                    values["init_roll_deg"],
-                    values["init_pitch_deg"],
-                    values["init_yaw_deg"],
-                )
-            except Exception as exc:
-                self.log.exception("Failed to push preset pose to gimbal: %s", exc)
-        if "max_rate_dps" in values and hasattr(self.gimbal, "set_max_rate"):
-            try:
-                self.gimbal.set_max_rate(values["max_rate_dps"])
-            except Exception as exc:
-                self.log.exception("Failed to update gimbal max rate: %s", exc)
-        if "power_on" in values and hasattr(self.gimbal, "set_power"):
-            try:
-                self.gimbal.set_power(bool(values["power_on"]))
-            except Exception as exc:
-                self.log.exception("Failed to sync gimbal power state: %s", exc)
-        if {"mav_sysid", "mav_compid"}.issubset(values) and hasattr(self.gimbal, "set_mav_ids"):
-            try:
-                self.gimbal.set_mav_ids(values["mav_sysid"], values["mav_compid"])
-            except Exception as exc:
-                self.log.exception("Failed to set MAV IDs: %s", exc)
-        port = _as_str(values.get("serial_port", "")).strip()
-        if port and "serial_baud" in values and hasattr(self.gimbal, "open_serial"):
-            try:
-                self.gimbal.open_serial(port, _as_int(values["serial_baud"], 115200))
-            except Exception as exc:
-                self.log.exception("Failed to open serial from preset: %s", exc)
-
-    # ------------------------------------------------------------------
-    # Actions
-
-    def _set_tpl(self, x, y, z, roll, pitch, yaw):
-        if x is not None:
-            self.v_pos_x.set(x)
-        if y is not None:
-            self.v_pos_y.set(y)
-        if z is not None:
-            self.v_pos_z.set(z)
-        if roll is not None:
-            self.v_roll.set(roll)
-        if pitch is not None:
-            self.v_pitch.set(pitch)
-        if yaw is not None:
-            self.v_yaw.set(yaw)
-
-    def on_select_preset(self, idx: int) -> None:
-        """Handle user selection of a preset radio button."""
-
-        self._apply_preset(idx)
-
-    def _apply_preset(self, idx: int) -> None:
-        """Compatibility shim for legacy preset selection callbacks."""
-
-        idx = max(0, min(MAX_SENSOR_PRESETS - 1, idx))
-        self._load_selected_preset(idx, apply_runtime=False)
-
-    def on_applicable_preset_changed(self, event: Optional[tk.Event] = None) -> None:
-        idx = self._sync_applicable_index_from_var()
-        self._update_applicable_preset_dropdown()
-        self._write_back_state()
-        self._apply_applicable_preset_runtime(idx)
-
-    def _load_selected_preset(self, idx: int, apply_runtime: bool) -> None:
-        self.bundle.selected_index = idx
-        self.v_preset_index.set(idx)
-        preset = self.bundle.get(idx)
-        if preset:
-            self._apply_payload_to_form(preset.data)
-            name = preset.name.strip() or self._default_preset_name(idx)
-        else:
-            name = self._default_preset_name(idx)
-        self.v_preset_name.set(name)
-        self._update_preset_labels()
-        self._write_back_state()
-        if apply_runtime:
-            self._apply_runtime(self._active_runtime_values())
-
-    def on_save_preset(self) -> None:
-        idx = self.bundle.selected_index
-        try:
-            payload = self._collect_payload_from_form()
-        except Exception as exc:
-            messagebox.showerror("Error", f"Save preset failed:\n{exc}")
-            return
-        name = self.v_preset_name.get().strip() or self._default_preset_name(idx)
-        self.bundle.set_preset(idx, SensorPreset(name=name, data=payload))
-        self.v_preset_name.set(name)
-        self._update_preset_labels()
-        self._write_back_state()
-        messagebox.showinfo("Saved", f"Preset {idx + 1} saved.")
-
-    def on_clear_preset(self) -> None:
-        idx = self.bundle.selected_index
-        self.bundle.clear_preset(idx)
-        self.v_preset_name.set(self._default_preset_name(idx))
-        self._update_preset_labels()
-        self._write_back_state()
-        messagebox.showinfo("Cleared", f"Preset {idx + 1} cleared.")
-
-    def on_apply_selected_preset(self) -> None:
-        idx = self.bundle.selected_index
-        if not hasattr(self.gimbal, "send_udp_preset"):
-            messagebox.showerror(
-                "Error",
-                "Current gimbal backend does not support broadcasting presets over UDP.",
-            )
-            return
-
-        try:
-            values = self._active_runtime_values()
-        except Exception as exc:
-            messagebox.showerror("Error", f"Invalid preset values:\n{exc}")
-            return
-
-        target_ip = self.bundle.network.ip
-        target_port = self.bundle.network.port
-
-        self._write_back_state()
-        self._apply_runtime(values)
-
-        try:
-            self.gimbal.send_udp_preset(
-                values["sensor_type"],
-                values["sensor_id"],
-                values["pos_x"],
-                values["pos_y"],
-                values["pos_z"],
-                values["init_roll_deg"],
-                values["init_pitch_deg"],
-                values["init_yaw_deg"],
-                ip=target_ip,
-                port=target_port,
-            )
-        except Exception as exc:
-            messagebox.showerror("Error", f"Failed to send preset:\n{exc}")
-            return
-
-        preset = self.bundle.get(idx)
-        name = preset.name.strip() if preset else ""
-        label = name or self._default_preset_name(idx)
-        messagebox.showinfo(
-            "Apply Preset",
-            f"Preset {idx + 1} ({label}) applied to {target_ip}:{target_port}.",
-        )
-
-    def on_apply_all_presets(self) -> None:
-        saved_presets = [
-            (idx, preset)
-            for idx, preset in enumerate(self.bundle.presets)
-            if preset is not None
-        ]
-        if not saved_presets:
-            messagebox.showinfo("Apply All Presets", "There are no saved presets to send.")
-            return
-
-        if not hasattr(self.gimbal, "send_udp_preset"):
-            messagebox.showerror(
-                "Error",
-                "Current gimbal backend does not support broadcasting presets over UDP.",
-            )
-            return
-
-        try:
-            target_ip = _as_str(self._var_get(self.v_gen_ip, self.bundle.network.ip), self.bundle.network.ip)
-            target_port = _as_int(self._var_get(self.v_gen_port, self.bundle.network.port), self.bundle.network.port)
-        except Exception as exc:
-            messagebox.showerror("Error", f"Invalid network target:\n{exc}")
-            return
-
-        # Persist the latest network settings so future sends stay in sync.
-        self.bundle.network.ip = target_ip
-        self.bundle.network.port = target_port
-        self._write_back_state()
-
-        delay_ms = 0
-        for idx, preset in saved_presets:
-            self.after(
-                delay_ms,
-                lambda i=idx, p=preset, tip=target_ip, tport=target_port: self._send_udp_preset(i, p, tip, tport),
-            )
-            delay_ms += 100
-
-        messagebox.showinfo(
-            "Apply All Presets",
-            f"Queued {len(saved_presets)} preset UDP message(s) to MORAI.",
-        )
-
-    def on_apply_pose(self) -> None:
-        try:
-            values = self._active_runtime_values()
-            self._write_back_state()
             if hasattr(self.gimbal, "update_settings"):
                 self.gimbal.update_settings(values)
             if hasattr(self.gimbal, "set_target_pose"):
                 self.gimbal.set_target_pose(
-                    values["pos_x"], values["pos_y"], values["pos_z"],
-                    values["init_roll_deg"], values["init_pitch_deg"], values["init_yaw_deg"],
+                    values.get("pos_x", 0.0),
+                    values.get("pos_y", 0.0),
+                    values.get("pos_z", 0.0),
+                    values.get("init_roll_deg", 0.0),
+                    values.get("init_pitch_deg", 0.0),
+                    values.get("init_yaw_deg", 0.0),
                 )
-            messagebox.showinfo("OK", "Target pose applied (controller will drive to target).")
-        except Exception as exc:
-            messagebox.showerror("Error", f"Apply pose failed:\n{exc}")
-
-    def on_apply_max_rate(self) -> None:
-        try:
-            values = self._active_runtime_values()
-            self._write_back_state()
-            if hasattr(self.gimbal, "update_settings"):
-                self.gimbal.update_settings(values)
             if hasattr(self.gimbal, "set_max_rate"):
-                self.gimbal.set_max_rate(values["max_rate_dps"])
-            messagebox.showinfo("OK", "Max angular rate updated.")
-        except Exception as exc:
-            messagebox.showerror("Error", f"Apply max rate failed:\n{exc}")
-
-    def on_apply_power(self) -> None:
-        try:
-            values = self._active_runtime_values()
-            self._write_back_state()
-            on = bool(values.get("power_on", True))
-            if hasattr(self.gimbal, "update_settings"):
-                self.gimbal.update_settings(values)
+                self.gimbal.set_max_rate(values.get("max_rate_dps", 60.0))
             if hasattr(self.gimbal, "set_power"):
-                self.gimbal.set_power(on)
-            if hasattr(self.gimbal, "send_power"):
-                self.gimbal.send_power(on)
-            messagebox.showinfo("OK", f"Power {'ON' if on else 'OFF'} applied.")
-        except Exception as exc:
-            messagebox.showerror("Error", f"Apply Power failed:\n{exc}")
+                self.gimbal.set_power(bool(values.get("power_on", True)))
+            if hasattr(self.gimbal, "set_mav_ids"):
+                self.gimbal.set_mav_ids(values.get("mav_sysid", 1), values.get("mav_compid", 154))
+        except Exception:
+            pass
 
-    def on_connect_serial(self) -> None:
+    def _update_status(self) -> None:
         try:
-            values = self._active_runtime_values()
-            self._write_back_state()
-            if hasattr(self.gimbal, "update_settings"):
-                self.gimbal.update_settings(values)
-            if hasattr(self.gimbal, "open_serial"):
-                self.gimbal.open_serial(values["serial_port"], values["serial_baud"])
-            messagebox.showinfo("OK", f"Serial connected: {values['serial_port']} @ {values['serial_baud']}")
-        except Exception as exc:
-            messagebox.showerror("Error", f"Serial connect failed:\n{exc}")
+            status = self.gimbal.get_status() if hasattr(self.gimbal, "get_status") else {}
+        except Exception:
+            status = {}
+        text = status if isinstance(status, str) else status.get("text", "-") if isinstance(status, dict) else "-"
+        self.status_label.setText(f"Status: {text}")
+
+    # ------------------------------------------------------------------
+    def on_save_preset(self) -> None:
+        idx = self.preset_group.checkedId()
+        if idx < 0:
+            return
+        name = self.preset_name.text().strip()
+        data = SensorPresetData(
+            sensor_type=int(self.sensor_type.currentIndex()),
+            sensor_id=int(self.sensor_id.value()),
+            pos_x=float(self.pos_x.value()),
+            pos_y=float(self.pos_y.value()),
+            pos_z=float(self.pos_z.value()),
+            init_roll_deg=float(self.roll.value()),
+            init_pitch_deg=float(self.pitch.value()),
+            init_yaw_deg=float(self.yaw.value()),
+            max_rate_dps=float(self.max_rate.value()),
+            power_on=self.power_on.isChecked(),
+            serial_port=self.serial_port.currentText().strip(),
+            serial_baud=int(self.serial_baud.value()),
+            mav_sysid=int(self.mav_sysid.value()),
+            mav_compid=int(self.mav_compid.value()),
+        )
+        preset = SensorPreset(name=name, data=data)
+        self.bundle.presets[idx] = preset
+        self._refresh_preset_buttons()
+
+    def on_clear_preset(self) -> None:
+        idx = self.preset_group.checkedId()
+        if idx < 0:
+            return
+        self.bundle.presets[idx] = None
+        self._refresh_preset_buttons()
+
+    def on_apply_selected_preset(self) -> None:
+        idx = self.preset_group.checkedId()
+        if idx < 0:
+            return
+        preset = self.bundle.presets[idx]
+        if not preset:
+            return
+        self._load_from_preset(preset)
+        values = self._collect_current_values()
+        self._apply_to_runtime(values)
+
+    def on_apply_all_presets(self) -> None:
+        for preset in self.bundle.presets:
+            if not preset:
+                continue
+            values = preset.data.to_dict()
+            self._apply_to_runtime(values)
 
     def on_refresh_ports(self) -> None:
-        try:
-            self.cb_ports["values"] = self._enum_serial_ports()
-        except Exception as exc:
-            messagebox.showerror("Error", f"Port refresh failed:\n{exc}")
+        self._refresh_serial_ports(default=self.serial_port.currentText())
+
+    def on_connect_serial(self) -> None:
+        port = self.serial_port.currentText().strip()
+        baud = int(self.serial_baud.value())
+        if port and hasattr(self.gimbal, "open_serial"):
+            try:
+                self.gimbal.open_serial(port, baud)
+            except Exception:
+                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to open serial {port}")
 
     def on_apply_ids(self) -> None:
-        try:
-            sysid = _as_int(self._var_get(self.v_mav_sysid, 1), 1)
-            compid = _as_int(self._var_get(self.v_mav_compid, 154), 154)
-            if hasattr(self.gimbal, "set_mav_ids"):
+        sysid = int(self.mav_sysid.value())
+        compid = int(self.mav_compid.value())
+        if hasattr(self.gimbal, "set_mav_ids"):
+            try:
                 self.gimbal.set_mav_ids(sysid, compid)
-            messagebox.showinfo("OK", f"MAV IDs applied: sys={sysid}, comp={compid}")
-        except Exception as exc:
-            messagebox.showerror("Error", f"Apply IDs failed:\n{exc}")
+            except Exception:
+                pass
+
+    def on_applicable_changed(self, index: int) -> None:
+        self.bundle.applicable_index = index
+
+    def _on_preset_selected(self, idx: int, checked: bool) -> None:
+        if not checked:
+            return
+        self.bundle.selected_index = idx
+        preset = self.bundle.presets[idx]
+        self.preset_name.setText(preset.name if preset else "")
+        if preset:
+            self._load_from_preset(preset)
+        self._refresh_applicable_combo()
+
+    def _load_from_preset(self, preset: SensorPreset) -> None:
+        data = preset.data
+        self.sensor_type.setCurrentIndex(data.sensor_type)
+        self.sensor_id.setValue(data.sensor_id)
+        self.pos_x.setValue(data.pos_x)
+        self.pos_y.setValue(data.pos_y)
+        self.pos_z.setValue(data.pos_z)
+        self.roll.setValue(data.init_roll_deg)
+        self.pitch.setValue(data.init_pitch_deg)
+        self.yaw.setValue(data.init_yaw_deg)
+        self.max_rate.setValue(data.max_rate_dps)
+        self.power_on.setChecked(data.power_on)
+        if data.serial_port:
+            idx = self.serial_port.findText(data.serial_port)
+            if idx >= 0:
+                self.serial_port.setCurrentIndex(idx)
+        self.serial_baud.setValue(data.serial_baud)
+        self.mav_sysid.setValue(data.mav_sysid)
+        self.mav_compid.setValue(data.mav_compid)
 
     def on_save(self) -> None:
         try:
-            self._write_back_state()
+            values = self._collect_current_values()
+            bundle = self.bundle.to_config()
+            payload = dict(values)
+            payload["preset_bundle"] = bundle
+            self.cfg.setdefault("gimbal", {}).update(payload)
             cm = ConfigManager()
-            ac = cm.load()
-            data = ac.to_dict()
-            data.setdefault("gimbal", {}).update(self.cfg.get("gimbal", {}))
-            cm.save(AppConfig.from_dict(data))
-            messagebox.showinfo("Saved", "Gimbal settings saved.")
+            app_cfg = cm.load().to_dict()
+            app_cfg.setdefault("gimbal", {}).update(payload)
+            cm.save(AppConfig.from_dict(app_cfg))
+            QtWidgets.QMessageBox.information(self, "Saved", "Gimbal settings saved.")
         except Exception as exc:
-            messagebox.showerror("Error", f"Save failed:\n{exc}")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Save failed:\n{exc}")
 
     def on_apply_close(self) -> None:
         try:
-            values = self._active_runtime_values()
-            self._write_back_state()
-            if hasattr(self.gimbal, "update_settings"):
-                self.gimbal.update_settings(values)
+            values = self._collect_current_values()
+            self.updated_config = dict(values)
+            self.updated_config["preset_bundle"] = self.bundle.to_config()
+            self.cfg.setdefault("gimbal", {}).update(self.updated_config)
+            self._apply_to_runtime(values)
+            self.accept()
         except Exception as exc:
-            messagebox.showerror("Error", f"Apply failed:\n{exc}")
-
-            return
-        self.destroy()
-
-    # ------------------------------------------------------------------
-    # Status polling
-    def _refresh_status_periodic(self) -> None:
-        try:
-            status = self.gimbal.get_status() if hasattr(self.gimbal, "get_status") else {}
-            act = status.get("activated", True)
-            method = str(status.get("control_method", "")).lower()
-            raw_mode = status.get("control_mode", "CTRL")
-            mode = method.upper() if method else str(raw_mode or "CTRL").upper()
-            sim_roll = status.get("current_roll_deg", 0.0)
-            sim_pitch = status.get("current_pitch_deg", 0.0)
-            sim_yaw = status.get("current_yaw_deg", 0.0)
-            x = status.get("current_x", 0.0)
-            yx = status.get("current_y", 0.0)
-            z = status.get("current_z", 0.0)
-            wx = status.get("wx", 0.0)
-            wy = status.get("wy", 0.0)
-            wz = status.get("wz", 0.0)
-            mrate = status.get("max_rate_dps", self.v_max_rate.get())
-            ser = status.get("serial_state", "-")
-            hb = status.get("hb_rx_ok", False)
-            sysid = status.get("mav_sysid", self.v_mav_sysid.get())
-            compid = status.get("mav_compid", self.v_mav_compid.get())
-
-            self.cur_x.set(f"{x:.2f}")
-            self.cur_y.set(f"{yx:.2f}")
-            self.cur_z.set(f"{z:.2f}")
-            self.cur_roll.set(f"{sim_roll:.1f}")
-            self.cur_pitch.set(f"{sim_pitch:.1f}")
-            self.cur_yaw.set(f"{sim_yaw:.1f}")
-            self.cur_wx.set(f"{wx:.2f}")
-            self.cur_wy.set(f"{wy:.2f}")
-            self.cur_wz.set(f"{wz:.2f}")
-
-            self.lbl_status.configure(
-                text=(
-                    f"Status: {'On' if act else 'Off'} | Mode={mode} | "
-                    f"Sys/Comp={sysid}/{compid} | MaxRate={mrate:.1f} dps | "
-                    f"Serial={ser} | HB={hb}"
-                )
-            )
-        except Exception:
-            pass
-        self.after(100, self._refresh_status_periodic)
+            QtWidgets.QMessageBox.critical(self, "Error", f"Apply failed:\n{exc}")

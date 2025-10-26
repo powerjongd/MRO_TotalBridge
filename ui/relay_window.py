@@ -1,507 +1,409 @@
-# ui/relay_window.py
-# -*- coding: utf-8 -*-
+"""PySide6 dialog for relay configuration."""
 from __future__ import annotations
 
 import logging
-import os
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-from typing import Dict, Any
+from typing import Any, Dict
 
+from PySide6 import QtCore, QtGui, QtWidgets
 from serial.tools import list_ports
-from utils.settings import ConfigManager, AppConfig  # type: ignore
+
+from utils.settings import AppConfig, ConfigManager
 
 
-class RelaySettingsWindow(tk.Toplevel):
-    """
-    Gazebo UDP → ExternalCtrl UDP로 릴레이
-               → Optical Flow 변환 후 공용 Serial로 MAVLink OPTICAL_FLOW 송신
-    Image Generator의 Distance를 RAW UDP(기본) 또는 MAVLink로 수신 → 동일 Serial로 중계
-    - Serial 포트는 OpticalFlow/Distance 모두 ‘공유’
-    - 상태표시 2줄
-    - Auto-Start on Launch
-    - Optical Flow 스케일/품질 파라미터
-    - OpticalFlow / Distance 각각의 Heartbeat 파라미터
-    - Distance 수신 모드 선택(raw/mavlink)
-    """
-
-    def __init__(self, master: tk.Misc, cfg: Dict[str, Any], relay, log: logging.Logger) -> None:
-        super().__init__(master)
-        self.title("Gazebo Relay")
-        self.resizable(False, False)
+class RelaySettingsDialog(QtWidgets.QDialog):
+    def __init__(self, parent: QtWidgets.QWidget, cfg: Dict[str, Any], relay, rover, log: logging.Logger) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Gazebo Relay")
+        self.resize(720, 820)
+        self.setModal(True)
 
         self.cfg = cfg
         self.relay = relay
+        self.rover = rover
         self.log = log
 
         rconf = cfg.get("relay", {})
+        self.fields: Dict[str, QtWidgets.QWidget] = {}
 
-        # --- Gazebo 입력 (수신)
-        self.v_gz_ip   = tk.StringVar(value=rconf.get("gazebo_listen_ip", "0.0.0.0"))
-        self.v_gz_port = tk.IntVar(value=int(rconf.get("gazebo_listen_port", 17000)))
+        self._build_layout(rconf)
+        self._status_timer = QtCore.QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._refresh_status)
+        self._status_timer.start()
+        self._refresh_status()
 
-        # --- ExternalCtrl 출력 (원본 릴레이) — 기본 포트 9091
-        self.v_ext_ip   = tk.StringVar(value=rconf.get("ext_udp_ip", "127.0.0.1"))
-        self.v_ext_port = tk.IntVar(value=int(rconf.get("ext_udp_port", 9091)))
+    # ------------------------------------------------------------------
+    def _build_layout(self, rconf: Dict[str, Any]) -> None:
+        layout = QtWidgets.QVBoxLayout(self)
 
-        # --- Distance 입력 (RAW 기본, 또는 MAVLink)
-        self.v_dist_mode = tk.StringVar(value=(rconf.get("distance_mode", "raw")))
-        self.v_dist_ip   = tk.StringVar(value=rconf.get("distance_udp_listen_ip", "0.0.0.0"))
-        self.v_dist_port = tk.IntVar(value=int(rconf.get("distance_udp_listen_port", 14650)))
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QtWidgets.QWidget()
+        scroll.setWidget(content)
+        form_layout = QtWidgets.QVBoxLayout(content)
 
-        # --- 공용 Serial (OpticalFlow + Distance out)
-        self.v_serial_port = tk.StringVar(value=rconf.get("serial_port", ""))
-        self.v_baud        = tk.IntVar(value=int(rconf.get("serial_baud", 115200)))
-        self.v_flow_id     = tk.IntVar(value=int(rconf.get("flow_sensor_id", 0)))
-        self.v_enable_of_processing = tk.BooleanVar(value=bool(rconf.get("enable_optical_flow_processing", False)))
-        self.v_enable_of_serial = tk.BooleanVar(value=bool(rconf.get("enable_optical_flow_serial", True)))
-        self.v_enable_distance_serial = tk.BooleanVar(value=bool(rconf.get("enable_distance_serial", True)))
-        self.v_log_path    = tk.StringVar(value=rconf.get("gazebo_log_path", ""))
-        self.v_enable_gz_log = tk.BooleanVar(value=bool(rconf.get("enable_gazebo_logging", True)))
+        # Gazebo input
+        gazebo_group = QtWidgets.QGroupBox("Gazebo Input (UDP)")
+        gz_form = QtWidgets.QFormLayout(gazebo_group)
+        self.fields["gazebo_listen_ip"] = QtWidgets.QLineEdit(str(rconf.get("gazebo_listen_ip", "0.0.0.0")))
+        gz_form.addRow("Listen IP", self.fields["gazebo_listen_ip"])
+        ip_port = QtWidgets.QSpinBox()
+        ip_port.setRange(1, 65535)
+        ip_port.setValue(int(rconf.get("gazebo_listen_port", 17000)))
+        self.fields["gazebo_listen_port"] = ip_port
+        gz_form.addRow("Port", ip_port)
+        form_layout.addWidget(gazebo_group)
 
-        # --- Auto-start
-        self.v_autostart = tk.BooleanVar(value=bool(rconf.get("autostart", False)))
+        # External relay
+        ext_group = QtWidgets.QGroupBox("ExternalCtrl Output (UDP Relay)")
+        ext_form = QtWidgets.QFormLayout(ext_group)
+        self.fields["ext_udp_ip"] = QtWidgets.QLineEdit(str(rconf.get("ext_udp_ip", "127.0.0.1")))
+        ext_form.addRow("Dest IP", self.fields["ext_udp_ip"])
+        ext_port = QtWidgets.QSpinBox(); ext_port.setRange(1, 65535)
+        ext_port.setValue(int(rconf.get("ext_udp_port", 9091)))
+        self.fields["ext_udp_port"] = ext_port
+        ext_form.addRow("Port", ext_port)
+        form_layout.addWidget(ext_group)
 
-        # --- Optical Flow 스케일 & 품질 모델 파라미터
-        self.v_of_scale_pix   = tk.DoubleVar(value=float(rconf.get("of_scale_pix", 100.0)))
-        self.v_q_base         = tk.IntVar(value=int(rconf.get("q_base", 255)))
-        self.v_q_min          = tk.IntVar(value=int(rconf.get("q_min", 0)))
-        self.v_q_max          = tk.IntVar(value=int(rconf.get("q_max", 255)))
-        self.v_accel_thr      = tk.DoubleVar(value=float(rconf.get("accel_thresh", 5.0)))
-        self.v_gyro_thr       = tk.DoubleVar(value=float(rconf.get("gyro_thresh", 2.0)))
-        self.v_accel_penalty  = tk.DoubleVar(value=float(rconf.get("accel_penalty", 20.0)))  # per (|a|-thr)
-        self.v_gyro_penalty   = tk.DoubleVar(value=float(rconf.get("gyro_penalty", 30.0)))   # per (|w|-thr)
+        # Distance input
+        dist_group = QtWidgets.QGroupBox("Distance Sensor Input")
+        dist_form = QtWidgets.QFormLayout(dist_group)
+        mode = QtWidgets.QComboBox()
+        mode.addItems(["raw", "mavlink"])
+        current_mode = str(rconf.get("distance_mode", "raw"))
+        mode.setCurrentText(current_mode if current_mode in {"raw", "mavlink"} else "raw")
+        self.fields["distance_mode"] = mode
+        dist_form.addRow("Mode", mode)
+        self.fields["distance_udp_listen_ip"] = QtWidgets.QLineEdit(str(rconf.get("distance_udp_listen_ip", "0.0.0.0")))
+        dist_form.addRow("Listen IP", self.fields["distance_udp_listen_ip"])
+        dist_port = QtWidgets.QSpinBox(); dist_port.setRange(1, 65535)
+        dist_port.setValue(int(rconf.get("distance_udp_listen_port", 14650)))
+        self.fields["distance_udp_listen_port"] = dist_port
+        dist_form.addRow("Port", dist_port)
+        form_layout.addWidget(dist_group)
 
-        # --- Heartbeat 파라미터 (Optical Flow)
-        self.v_hb_of_rate     = tk.DoubleVar(value=float(rconf.get("hb_of_rate_hz", 1.0)))
-        self.v_hb_of_sysid    = tk.IntVar(value=int(rconf.get("hb_of_sysid", 42)))
-        self.v_hb_of_compid   = tk.IntVar(value=int(rconf.get("hb_of_compid", 199)))
-        self.v_hb_of_type     = tk.IntVar(value=int(rconf.get("hb_of_type", 18)))
-        self.v_hb_of_autop    = tk.IntVar(value=int(rconf.get("hb_of_autopilot", 8)))
-        self.v_hb_of_mode     = tk.IntVar(value=int(rconf.get("hb_of_base_mode", 0)))
-        self.v_hb_of_cus      = tk.IntVar(value=int(rconf.get("hb_of_custom_mode", 0)))
-        self.v_hb_of_stat     = tk.IntVar(value=int(rconf.get("hb_of_system_status", 4)))
+        # Serial settings
+        serial_group = QtWidgets.QGroupBox("Shared Serial (OpticalFlow + Distance Out)")
+        serial_form = QtWidgets.QFormLayout(serial_group)
+        ports = [port.device for port in list_ports.comports()]
+        port_combo = QtWidgets.QComboBox()
+        port_combo.addItems(ports)
+        default_port = str(rconf.get("serial_port", ""))
+        if default_port:
+            idx = port_combo.findText(default_port)
+            if idx >= 0:
+                port_combo.setCurrentIndex(idx)
+            else:
+                port_combo.insertItem(0, default_port)
+                port_combo.setCurrentIndex(0)
+        self.fields["serial_port"] = port_combo
+        serial_form.addRow("Port", port_combo)
+        baud = QtWidgets.QSpinBox(); baud.setRange(1, 1_000_000)
+        baud.setValue(int(rconf.get("serial_baud", 115200)))
+        self.fields["serial_baud"] = baud
+        serial_form.addRow("Baud", baud)
+        flow_id = QtWidgets.QSpinBox(); flow_id.setRange(0, 255)
+        flow_id.setValue(int(rconf.get("flow_sensor_id", 0)))
+        self.fields["flow_sensor_id"] = flow_id
+        serial_form.addRow("OpticalFlow Sensor ID", flow_id)
+        flags_layout = QtWidgets.QHBoxLayout()
+        enable_of_serial = QtWidgets.QCheckBox("Optical Flow → MAVLink")
+        enable_of_serial.setChecked(bool(rconf.get("enable_optical_flow_serial", True)))
+        self.fields["enable_optical_flow_serial"] = enable_of_serial
+        flags_layout.addWidget(enable_of_serial)
+        enable_dist_serial = QtWidgets.QCheckBox("Distance → MAVLink")
+        enable_dist_serial.setChecked(bool(rconf.get("enable_distance_serial", True)))
+        self.fields["enable_distance_serial"] = enable_dist_serial
+        flags_layout.addWidget(enable_dist_serial)
+        flags_layout.addStretch()
+        serial_form.addRow(flags_layout)
+        enable_of_processing = QtWidgets.QCheckBox("Optical Flow 계산 활성화")
+        enable_of_processing.setChecked(bool(rconf.get("enable_optical_flow_processing", False)))
+        self.fields["enable_optical_flow_processing"] = enable_of_processing
+        serial_form.addRow(enable_of_processing)
+        autostart = QtWidgets.QCheckBox("Auto-Start on Launch")
+        autostart.setChecked(bool(rconf.get("autostart", False)))
+        self.fields["autostart"] = autostart
+        serial_form.addRow(autostart)
 
-        # --- Heartbeat 파라미터 (Distance Sensor)
-        self.v_hb_ds_rate     = tk.DoubleVar(value=float(rconf.get("hb_ds_rate_hz", 1.0)))
-        self.v_hb_ds_sysid    = tk.IntVar(value=int(rconf.get("hb_ds_sysid", 43)))
-        self.v_hb_ds_compid   = tk.IntVar(value=int(rconf.get("hb_ds_compid", 200)))
-        self.v_hb_ds_type     = tk.IntVar(value=int(rconf.get("hb_ds_type", 18)))
-        self.v_hb_ds_autop    = tk.IntVar(value=int(rconf.get("hb_ds_autopilot", 8)))
-        self.v_hb_ds_mode     = tk.IntVar(value=int(rconf.get("hb_ds_base_mode", 0)))
-        self.v_hb_ds_cus      = tk.IntVar(value=int(rconf.get("hb_ds_custom_mode", 0)))
-        self.v_hb_ds_stat     = tk.IntVar(value=int(rconf.get("hb_ds_system_status", 4)))
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_refresh_ports = QtWidgets.QPushButton("Refresh Ports")
+        self.btn_open_serial = QtWidgets.QPushButton("Open Serial Now")
+        btn_row.addWidget(self.btn_refresh_ports)
+        btn_row.addWidget(self.btn_open_serial)
+        btn_row.addStretch()
+        serial_form.addRow(btn_row)
+        form_layout.addWidget(serial_group)
 
-        self._updating_log_toggle = False
+        # Optical flow parameters
+        of_group = QtWidgets.QGroupBox("Optical Flow Parameters")
+        of_form = QtWidgets.QFormLayout(of_group)
+        of_scale = QtWidgets.QDoubleSpinBox(); of_scale.setRange(0.01, 10000.0); of_scale.setDecimals(3)
+        of_scale.setValue(float(rconf.get("of_scale_pix", 100.0)))
+        self.fields["of_scale_pix"] = of_scale
+        of_form.addRow("Pixel Scale", of_scale)
+        q_box = QtWidgets.QWidget(); q_layout = QtWidgets.QHBoxLayout(q_box); q_layout.setContentsMargins(0, 0, 0, 0)
+        for key in ("q_base", "q_min", "q_max"):
+            spin = QtWidgets.QSpinBox(); spin.setRange(0, 255)
+            spin.setValue(int(rconf.get(key, 255 if key == "q_base" else 0 if key == "q_min" else 255)))
+            self.fields[key] = spin
+            q_layout.addWidget(spin)
+        of_form.addRow("Q Base / Min / Max", q_box)
+        accel_thr = QtWidgets.QDoubleSpinBox(); accel_thr.setRange(0.0, 1000.0); accel_thr.setDecimals(3)
+        accel_thr.setValue(float(rconf.get("accel_thresh", 5.0)))
+        self.fields["accel_thresh"] = accel_thr
+        accel_penalty = QtWidgets.QDoubleSpinBox(); accel_penalty.setRange(0.0, 1000.0); accel_penalty.setDecimals(3)
+        accel_penalty.setValue(float(rconf.get("accel_penalty", 20.0)))
+        self.fields["accel_penalty"] = accel_penalty
+        of_form.addRow("Accel Thr / Penalty", self._pair_widget(accel_thr, accel_penalty))
+        gyro_thr = QtWidgets.QDoubleSpinBox(); gyro_thr.setRange(0.0, 1000.0); gyro_thr.setDecimals(3)
+        gyro_thr.setValue(float(rconf.get("gyro_thresh", 2.0)))
+        self.fields["gyro_thresh"] = gyro_thr
+        gyro_penalty = QtWidgets.QDoubleSpinBox(); gyro_penalty.setRange(0.0, 1000.0); gyro_penalty.setDecimals(3)
+        gyro_penalty.setValue(float(rconf.get("gyro_penalty", 30.0)))
+        self.fields["gyro_penalty"] = gyro_penalty
+        of_form.addRow("Gyro Thr / Penalty", self._pair_widget(gyro_thr, gyro_penalty))
+        form_layout.addWidget(of_group)
 
-        self._build_layout()
-        self._refresh_status_periodic()
+        # Heartbeat (Optical flow)
+        hb_of_group = QtWidgets.QGroupBox("Heartbeat (Optical Flow)")
+        hb_of_form = QtWidgets.QFormLayout(hb_of_group)
+        hb_rate = QtWidgets.QDoubleSpinBox(); hb_rate.setRange(0.01, 100.0); hb_rate.setDecimals(3)
+        hb_rate.setValue(float(rconf.get("hb_of_rate_hz", 1.0)))
+        self.fields["hb_of_rate_hz"] = hb_rate
+        hb_of_form.addRow("Rate (Hz)", hb_rate)
+        self.fields["hb_of_sysid"] = self._spin_box(rconf.get("hb_of_sysid", 42))
+        self.fields["hb_of_compid"] = self._spin_box(rconf.get("hb_of_compid", 199))
+        hb_of_form.addRow("Sys / Comp", self._pair_widget(self.fields["hb_of_sysid"], self.fields["hb_of_compid"]))
+        self.fields["hb_of_type"] = self._spin_box(rconf.get("hb_of_type", 18))
+        self.fields["hb_of_autopilot"] = self._spin_box(rconf.get("hb_of_autopilot", 8))
+        hb_of_form.addRow("Type / Autopilot", self._pair_widget(self.fields["hb_of_type"], self.fields["hb_of_autopilot"]))
+        self.fields["hb_of_base_mode"] = self._spin_box(rconf.get("hb_of_base_mode", 0))
+        self.fields["hb_of_custom_mode"] = self._spin_box(rconf.get("hb_of_custom_mode", 0))
+        self.fields["hb_of_system_status"] = self._spin_box(rconf.get("hb_of_system_status", 4))
+        row_box = self._triple_widget(
+            self.fields["hb_of_base_mode"],
+            self.fields["hb_of_custom_mode"],
+            self.fields["hb_of_system_status"],
+        )
+        hb_of_form.addRow("Base / Custom / Status", row_box)
+        form_layout.addWidget(hb_of_group)
 
-    # ---------------- UI ----------------
-    def _build_layout(self) -> None:
-        pad = dict(padx=6, pady=4)
-        frm = ttk.Frame(self, padding=10)
-        frm.grid(row=0, column=0, sticky="nsew")
+        # Heartbeat (Distance)
+        hb_ds_group = QtWidgets.QGroupBox("Heartbeat (Distance Sensor)")
+        hb_ds_form = QtWidgets.QFormLayout(hb_ds_group)
+        ds_rate = QtWidgets.QDoubleSpinBox(); ds_rate.setRange(0.01, 100.0); ds_rate.setDecimals(3)
+        ds_rate.setValue(float(rconf.get("hb_ds_rate_hz", 1.0)))
+        self.fields["hb_ds_rate_hz"] = ds_rate
+        hb_ds_form.addRow("Rate (Hz)", ds_rate)
+        self.fields["hb_ds_sysid"] = self._spin_box(rconf.get("hb_ds_sysid", 43))
+        self.fields["hb_ds_compid"] = self._spin_box(rconf.get("hb_ds_compid", 200))
+        hb_ds_form.addRow("Sys / Comp", self._pair_widget(self.fields["hb_ds_sysid"], self.fields["hb_ds_compid"]))
+        self.fields["hb_ds_type"] = self._spin_box(rconf.get("hb_ds_type", 18))
+        self.fields["hb_ds_autopilot"] = self._spin_box(rconf.get("hb_ds_autopilot", 8))
+        hb_ds_form.addRow("Type / Autopilot", self._pair_widget(self.fields["hb_ds_type"], self.fields["hb_ds_autopilot"]))
+        self.fields["hb_ds_base_mode"] = self._spin_box(rconf.get("hb_ds_base_mode", 0))
+        self.fields["hb_ds_custom_mode"] = self._spin_box(rconf.get("hb_ds_custom_mode", 0))
+        self.fields["hb_ds_system_status"] = self._spin_box(rconf.get("hb_ds_system_status", 4))
+        hb_ds_form.addRow(
+            "Base / Custom / Status",
+            self._triple_widget(
+                self.fields["hb_ds_base_mode"],
+                self.fields["hb_ds_custom_mode"],
+                self.fields["hb_ds_system_status"],
+            ),
+        )
+        form_layout.addWidget(hb_ds_group)
 
-        # --- Gazebo (input)
-        ttk.Label(frm, text="Gazebo Input (UDP)").grid(row=0, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Listen IP").grid(row=1, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_gz_ip, width=16).grid(row=1, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Port").grid(row=1, column=2, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_gz_port, width=10).grid(row=1, column=3, sticky="w", **pad)
+        # Logging section
+        log_group = QtWidgets.QGroupBox("Gazebo Logging")
+        log_form = QtWidgets.QFormLayout(log_group)
+        self.log_path_edit = QtWidgets.QLineEdit(str(rconf.get("gazebo_log_path", "")))
+        browse_btn = QtWidgets.QPushButton("Browse")
+        browse_btn.clicked.connect(self.on_browse_log)
+        path_row = QtWidgets.QHBoxLayout()
+        path_row.addWidget(self.log_path_edit)
+        path_row.addWidget(browse_btn)
+        log_form.addRow("Log Path", path_row)
+        self.enable_gz_log = QtWidgets.QCheckBox("Enable Gazebo Logging")
+        self.enable_gz_log.setChecked(bool(rconf.get("enable_gazebo_logging", True)))
+        log_form.addRow(self.enable_gz_log)
+        form_layout.addWidget(log_group)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        form_layout.addStretch()
+        layout.addWidget(scroll)
 
-        # --- ExternalCtrl (output relay)
-        ttk.Label(frm, text="ExternalCtrl Output (UDP Relay)").grid(row=3, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Dest IP").grid(row=4, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_ext_ip, width=16).grid(row=4, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Port").grid(row=4, column=2, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_ext_port, width=10).grid(row=4, column=3, sticky="w", **pad)
+        # Status + Buttons
+        self.status_label = QtWidgets.QLabel("Status: -")
+        self.detail_label = QtWidgets.QLabel("-")
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.detail_label)
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        btn_box = QtWidgets.QDialogButtonBox()
+        self.btn_start = QtWidgets.QPushButton("Start Relay")
+        self.btn_stop = QtWidgets.QPushButton("Stop Relay")
+        self.btn_start_log = QtWidgets.QPushButton("Start Logging")
+        self.btn_stop_log = QtWidgets.QPushButton("Stop Logging")
+        btn_box.addButton(self.btn_start, QtWidgets.QDialogButtonBox.ActionRole)
+        btn_box.addButton(self.btn_stop, QtWidgets.QDialogButtonBox.ActionRole)
+        btn_box.addButton(self.btn_start_log, QtWidgets.QDialogButtonBox.ActionRole)
+        btn_box.addButton(self.btn_stop_log, QtWidgets.QDialogButtonBox.ActionRole)
+        save_btn = btn_box.addButton("Save", QtWidgets.QDialogButtonBox.ActionRole)
+        btn_box.addButton(QtWidgets.QDialogButtonBox.Ok)
+        btn_box.addButton(QtWidgets.QDialogButtonBox.Cancel)
+        layout.addWidget(btn_box)
 
-        # --- Distance (input from generator)
-        ttk.Label(frm, text="Distance Sensor Input").grid(row=6, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Mode").grid(row=7, column=0, sticky="e", **pad)
-        ttk.Combobox(frm, textvariable=self.v_dist_mode, values=["raw", "mavlink"], width=10, state="readonly").grid(row=7, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Listen IP").grid(row=8, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_dist_ip, width=16).grid(row=8, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Port").grid(row=8, column=2, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_dist_port, width=10).grid(row=8, column=3, sticky="w", **pad)
+        self.btn_refresh_ports.clicked.connect(self.on_refresh_ports)
+        self.btn_open_serial.clicked.connect(self.on_open_serial)
+        self.btn_start.clicked.connect(self.on_start)
+        self.btn_stop.clicked.connect(self.on_stop)
+        self.btn_start_log.clicked.connect(lambda: self._apply_logging(True))
+        self.btn_stop_log.clicked.connect(lambda: self._apply_logging(False))
+        self.enable_gz_log.toggled.connect(lambda state: self._apply_logging(state, announce=False))
 
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=9, column=0, columnspan=4, sticky="ew", pady=(6,6))
+        save_btn.clicked.connect(self.on_save)
+        btn_box.accepted.connect(self.on_apply_close)
+        btn_box.rejected.connect(self.reject)
 
-        # --- Shared Serial (OF + Distance out)
-        ttk.Label(frm, text="Shared Serial (OpticalFlow + Distance Out)").grid(row=10, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Port").grid(row=11, column=0, sticky="e", **pad)
-        self.cb_ports = ttk.Combobox(frm, textvariable=self.v_serial_port, values=self._enum_serial_ports(), width=18)
-        self.cb_ports.grid(row=11, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Baud").grid(row=11, column=2, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_baud, width=10).grid(row=11, column=3, sticky="w", **pad)
+    # ------------------------------------------------------------------
+    def _pair_widget(self, left: QtWidgets.QWidget, right: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(left)
+        layout.addWidget(right)
+        return widget
 
-        ttk.Label(frm, text="OpticalFlow Sensor ID").grid(row=12, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_flow_id, width=10).grid(row=12, column=1, sticky="w", **pad)
+    def _triple_widget(self, a: QtWidgets.QWidget, b: QtWidgets.QWidget, c: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(a)
+        layout.addWidget(b)
+        layout.addWidget(c)
+        return widget
 
-        # Auto-start
-        ttk.Checkbutton(frm, text="Auto-Start on Launch", variable=self.v_autostart).grid(row=12, column=2, columnspan=2, sticky="w", **pad)
+    def _spin_box(self, value: int) -> QtWidgets.QSpinBox:
+        spin = QtWidgets.QSpinBox()
+        spin.setRange(0, 65535)
+        spin.setValue(int(value))
+        return spin
 
-        serial_flags = ttk.Frame(frm)
-        serial_flags.grid(row=13, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Checkbutton(
-            serial_flags,
-            text="Optical Flow → MAVLink",
-            variable=self.v_enable_of_serial,
-        ).pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Checkbutton(
-            serial_flags,
-            text="Distance → MAVLink",
-            variable=self.v_enable_distance_serial,
-        ).pack(side=tk.LEFT)
-
-        btns_serial = ttk.Frame(frm)
-        btns_serial.grid(row=14, column=0, columnspan=4, sticky="e", **pad)
-        ttk.Button(btns_serial, text="Refresh Ports", command=self.on_refresh_ports).grid(row=0, column=0, padx=6)
-        ttk.Button(btns_serial, text="Open Serial Now", command=self.on_open_serial).grid(row=0, column=1, padx=6)
-
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=15, column=0, columnspan=4, sticky="ew", pady=(6,6))
-
-        # --- Optical Flow Scale & Quality Model
-        ttk.Label(frm, text="Optical Flow Parameters").grid(row=16, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Checkbutton(
-            frm,
-            text="Optical Flow 계산 활성화",
-            variable=self.v_enable_of_processing,
-        ).grid(row=16, column=2, columnspan=2, sticky="w", **pad)
-        ttk.Label(frm, text="Pixel Scale").grid(row=17, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_of_scale_pix, width=10).grid(row=17, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Q Base / Min / Max").grid(row=17, column=2, sticky="e", **pad)
-        row16 = ttk.Frame(frm); row16.grid(row=17, column=3, sticky="w")
-        ttk.Entry(row16, textvariable=self.v_q_base, width=4).pack(side=tk.LEFT, padx=(0,2))
-        ttk.Entry(row16, textvariable=self.v_q_min,  width=4).pack(side=tk.LEFT, padx=(0,2))
-        ttk.Entry(row16, textvariable=self.v_q_max,  width=4).pack(side=tk.LEFT)
-
-        ttk.Label(frm, text="Accel Thr / Penalty").grid(row=18, column=0, sticky="e", **pad)
-        row17 = ttk.Frame(frm); row17.grid(row=18, column=1, sticky="w")
-        ttk.Entry(row17, textvariable=self.v_accel_thr,     width=8).pack(side=tk.LEFT, padx=(0,4))
-        ttk.Entry(row17, textvariable=self.v_accel_penalty, width=8).pack(side=tk.LEFT)
-
-        ttk.Label(frm, text="Gyro Thr / Penalty").grid(row=18, column=2, sticky="e", **pad)
-        row17b = ttk.Frame(frm); row17b.grid(row=18, column=3, sticky="w")
-        ttk.Entry(row17b, textvariable=self.v_gyro_thr,     width=8).pack(side=tk.LEFT, padx=(0,4))
-        ttk.Entry(row17b, textvariable=self.v_gyro_penalty, width=8).pack(side=tk.LEFT)
-
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=19, column=0, columnspan=4, sticky="ew", pady=(6,6))
-
-        # --- Heartbeat params (Optical Flow)
-        ttk.Label(frm, text="Heartbeat (Optical Flow)").grid(row=20, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Rate (Hz)").grid(row=21, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_hb_of_rate, width=8).grid(row=21, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Sys / Comp").grid(row=21, column=2, sticky="e", **pad)
-        row20 = ttk.Frame(frm); row20.grid(row=21, column=3, sticky="w")
-        ttk.Entry(row20, textvariable=self.v_hb_of_sysid,  width=5).pack(side=tk.LEFT, padx=(0,4))
-        ttk.Entry(row20, textvariable=self.v_hb_of_compid, width=5).pack(side=tk.LEFT)
-
-        ttk.Label(frm, text="Type / Autopilot").grid(row=22, column=0, sticky="e", **pad)
-        row21 = ttk.Frame(frm); row21.grid(row=22, column=1, sticky="w")
-        ttk.Entry(row21, textvariable=self.v_hb_of_type,  width=5).pack(side=tk.LEFT, padx=(0,4))
-        ttk.Entry(row21, textvariable=self.v_hb_of_autop, width=5).pack(side=tk.LEFT)
-        ttk.Label(frm, text="Base / Custom / Status").grid(row=22, column=2, sticky="e", **pad)
-        row21b = ttk.Frame(frm); row21b.grid(row=22, column=3, sticky="w")
-        ttk.Entry(row21b, textvariable=self.v_hb_of_mode, width=5).pack(side=tk.LEFT, padx=(0,2))
-        ttk.Entry(row21b, textvariable=self.v_hb_of_cus,  width=5).pack(side=tk.LEFT, padx=(0,2))
-        ttk.Entry(row21b, textvariable=self.v_hb_of_stat, width=5).pack(side=tk.LEFT)
-
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=23, column=0, columnspan=4, sticky="ew", pady=(6,6))
-
-        # --- Heartbeat params (Distance Sensor)
-        ttk.Label(frm, text="Heartbeat (Distance Sensor)").grid(row=24, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Rate (Hz)").grid(row=25, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_hb_ds_rate, width=8).grid(row=25, column=1, sticky="w", **pad)
-        ttk.Label(frm, text="Sys / Comp").grid(row=25, column=2, sticky="e", **pad)
-        row24 = ttk.Frame(frm); row24.grid(row=25, column=3, sticky="w")
-        ttk.Entry(row24, textvariable=self.v_hb_ds_sysid,  width=5).pack(side=tk.LEFT, padx=(0,4))
-        ttk.Entry(row24, textvariable=self.v_hb_ds_compid, width=5).pack(side=tk.LEFT)
-
-        ttk.Label(frm, text="Type / Autopilot").grid(row=26, column=0, sticky="e", **pad)
-        row25 = ttk.Frame(frm); row25.grid(row=26, column=1, sticky="w")
-        ttk.Entry(row25, textvariable=self.v_hb_ds_type,  width=5).pack(side=tk.LEFT, padx=(0,4))
-        ttk.Entry(row25, textvariable=self.v_hb_ds_autop, width=5).pack(side=tk.LEFT)
-        ttk.Label(frm, text="Base / Custom / Status").grid(row=26, column=2, sticky="e", **pad)
-        row25b = ttk.Frame(frm); row25b.grid(row=26, column=3, sticky="w")
-        ttk.Entry(row25b, textvariable=self.v_hb_ds_mode, width=5).pack(side=tk.LEFT, padx=(0,2))
-        ttk.Entry(row25b, textvariable=self.v_hb_ds_cus,  width=5).pack(side=tk.LEFT, padx=(0,2))
-        ttk.Entry(row25b, textvariable=self.v_hb_ds_stat, width=5).pack(side=tk.LEFT)
-
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=27, column=0, columnspan=4, sticky="ew", pady=(6,6))
-
-        # --- Gazebo Logging ---
-        ttk.Label(frm, text="Gazebo Logging").grid(row=28, column=0, columnspan=4, sticky="w", **pad)
-        ttk.Label(frm, text="Log File").grid(row=29, column=0, sticky="e", **pad)
-        ttk.Entry(frm, textvariable=self.v_log_path, width=32).grid(row=29, column=1, columnspan=2, sticky="we", **pad)
-        ttk.Button(frm, text="Browse...", command=self.on_browse_log).grid(row=29, column=3, sticky="w", **pad)
-
-        ttk.Checkbutton(
-            frm,
-            text="Enable Gazebo Logging",
-            variable=self.v_enable_gz_log,
-            command=self.on_toggle_logging,
-        ).grid(row=30, column=0, columnspan=4, sticky="w", **pad)
-
-        log_ctrl = ttk.Frame(frm)
-        log_ctrl.grid(row=31, column=0, columnspan=4, sticky="e", **pad)
-        ttk.Button(log_ctrl, text="Start Logging", command=self.on_start_logging).grid(row=0, column=0, padx=6)
-        ttk.Button(log_ctrl, text="Stop Logging", command=self.on_stop_logging).grid(row=0, column=1, padx=6)
-
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=32, column=0, columnspan=4, sticky="ew", pady=(6,6))
-
-        # --- Control
-        ctrl = ttk.Frame(frm)
-        ctrl.grid(row=33, column=0, columnspan=4, sticky="e", **pad)
-        ttk.Button(ctrl, text="Start Relay", command=self.on_start).grid(row=0, column=0, padx=6)
-        ttk.Button(ctrl, text="Stop Relay",  command=self.on_stop).grid(row=0, column=1, padx=6)
-
-        # Save/Apply
-        save = ttk.Frame(frm)
-        save.grid(row=34, column=0, columnspan=4, sticky="e", **pad)
-        ttk.Button(save, text="Save", command=self.on_save).grid(row=0, column=0, padx=6)
-        ttk.Button(save, text="Apply & Close", command=self.on_apply_close).grid(row=0, column=1, padx=6)
-
-        ttk.Separator(frm, orient=tk.HORIZONTAL).grid(row=35, column=0, columnspan=4, sticky="ew", pady=(6,6))
-
-        # --- Status (3 lines)
-        self.lbl_status1 = ttk.Label(frm, text="Status: -")
-        self.lbl_status1.grid(row=36, column=0, columnspan=4, sticky="w", **pad)
-        self.lbl_status2 = ttk.Label(frm, text="-")
-        self.lbl_status2.grid(row=37, column=0, columnspan=4, sticky="w", **pad)
-        self.lbl_status3 = ttk.Label(frm, text="-")
-        self.lbl_status3.grid(row=38, column=0, columnspan=4, sticky="w", **pad)
-
-    # ---------------- Helpers ----------------
-    def _enum_serial_ports(self):
-        try:
-            return [p.device for p in list_ports.comports()]
-        except Exception:
-            return []
-
+    # ------------------------------------------------------------------
     def _collect_values(self) -> Dict[str, Any]:
-        return {
-            # Gazebo/Ext/Distance
-            "gazebo_listen_ip": self.v_gz_ip.get(),
-            "gazebo_listen_port": int(self.v_gz_port.get()),
-            "ext_udp_ip": self.v_ext_ip.get(),
-            "ext_udp_port": int(self.v_ext_port.get()),
-            "distance_mode": self.v_dist_mode.get(),
-            "distance_udp_listen_ip": self.v_dist_ip.get(),
-            "distance_udp_listen_port": int(self.v_dist_port.get()),
-            # Serial & Flow ID
-            "serial_port": self.v_serial_port.get().strip(),
-            "serial_baud": int(self.v_baud.get()),
-            "flow_sensor_id": int(self.v_flow_id.get()),
-            "enable_optical_flow_processing": bool(self.v_enable_of_processing.get()),
-            "enable_optical_flow_serial": bool(self.v_enable_of_serial.get()),
-            "enable_distance_serial": bool(self.v_enable_distance_serial.get()),
-            "gazebo_log_path": self.v_log_path.get().strip(),
-            "enable_gazebo_logging": bool(self.v_enable_gz_log.get()),
-            # Autostart
-            "autostart": bool(self.v_autostart.get()),
-            # OF scale & quality
-            "of_scale_pix": float(self.v_of_scale_pix.get()),
-            "q_base": int(self.v_q_base.get()),
-            "q_min": int(self.v_q_min.get()),
-            "q_max": int(self.v_q_max.get()),
-            "accel_thresh": float(self.v_accel_thr.get()),
-            "gyro_thresh": float(self.v_gyro_thr.get()),
-            "accel_penalty": float(self.v_accel_penalty.get()),
-            "gyro_penalty": float(self.v_gyro_penalty.get()),
-            # HB OF
-            "hb_of_rate_hz": float(self.v_hb_of_rate.get()),
-            "hb_of_sysid": int(self.v_hb_of_sysid.get()),
-            "hb_of_compid": int(self.v_hb_of_compid.get()),
-            "hb_of_type": int(self.v_hb_of_type.get()),
-            "hb_of_autopilot": int(self.v_hb_of_autop.get()),
-            "hb_of_base_mode": int(self.v_hb_of_mode.get()),
-            "hb_of_custom_mode": int(self.v_hb_of_cus.get()),
-            "hb_of_system_status": int(self.v_hb_of_stat.get()),
-            # HB Distance
-            "hb_ds_rate_hz": float(self.v_hb_ds_rate.get()),
-            "hb_ds_sysid": int(self.v_hb_ds_sysid.get()),
-            "hb_ds_compid": int(self.v_hb_ds_compid.get()),
-            "hb_ds_type": int(self.v_hb_ds_type.get()),
-            "hb_ds_autopilot": int(self.v_hb_ds_autop.get()),
-            "hb_ds_base_mode": int(self.v_hb_ds_mode.get()),
-            "hb_ds_custom_mode": int(self.v_hb_ds_cus.get()),
-            "hb_ds_system_status": int(self.v_hb_ds_stat.get()),
-        }
+        values: Dict[str, Any] = {}
+        for key, widget in self.fields.items():
+            if isinstance(widget, QtWidgets.QLineEdit):
+                values[key] = widget.text().strip()
+            elif isinstance(widget, QtWidgets.QComboBox):
+                values[key] = widget.currentText()
+            elif isinstance(widget, QtWidgets.QSpinBox):
+                values[key] = int(widget.value())
+            elif isinstance(widget, QtWidgets.QDoubleSpinBox):
+                values[key] = float(widget.value())
+            elif isinstance(widget, QtWidgets.QCheckBox):
+                values[key] = widget.isChecked()
+        values["gazebo_log_path"] = self.log_path_edit.text().strip()
+        values["enable_gazebo_logging"] = self.enable_gz_log.isChecked()
+        return values
 
     def _apply_to_runtime(self) -> None:
-        v = self._collect_values()
-        self.cfg.setdefault("relay", {}).update(v)
-        self.relay.update_settings(v)
+        values = self._collect_values()
+        self.cfg.setdefault("relay", {}).update(values)
+        self.relay.update_settings(values)
 
-    # ---------------- Actions ----------------
-    def on_browse_log(self) -> None:
+    def _refresh_status(self) -> None:
         try:
-            current = self.v_log_path.get().strip()
+            st = self.relay.get_status() if hasattr(self.relay, "get_status") else {}
         except Exception:
-            current = ""
-        initial_dir = os.path.dirname(current) if current else ""
-        initial_file = os.path.basename(current) if current else ""
-        path = filedialog.asksaveasfilename(
-            parent=self,
-            title="Select Gazebo log file",
-            defaultextension=".txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-            initialfile=initial_file or None,
-            initialdir=initial_dir or None,
-        )
+            st = {}
+        text = st.get("status", "-") if isinstance(st, dict) else str(st)
+        self.status_label.setText(f"Status: {text}")
+        detail = []
+        if isinstance(st, dict):
+            dist = st.get("distance_m")
+            if dist is not None:
+                detail.append(f"Distance: {dist}")
+            q = st.get("of_quality")
+            if q is not None:
+                detail.append(f"OF Quality: {q}")
+            serial = st.get("serial")
+            if serial:
+                detail.append(f"Serial: {serial}")
+        self.detail_label.setText(" | ".join(detail) or "-")
+
+    # ------------------------------------------------------------------
+    def on_browse_log(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select Gazebo log file", "", "Text files (*.txt);;All files (*)")
         if path:
-            self.v_log_path.set(path)
+            self.log_path_edit.setText(path)
 
     def on_refresh_ports(self) -> None:
-        try:
-            self.cb_ports["values"] = self._enum_serial_ports()
-        except Exception as e:
-            messagebox.showerror("Error", f"Port refresh failed:\n{e}")
+        ports = [port.device for port in list_ports.comports()]
+        combo = self.fields.get("serial_port")
+        if isinstance(combo, QtWidgets.QComboBox):
+            combo.clear()
+            combo.addItems(ports)
 
     def on_open_serial(self) -> None:
         try:
             self._apply_to_runtime()
-            self.relay._open_serial_shared(force=True)
-            messagebox.showinfo("OK", f"Serial open attempted on {self.v_serial_port.get()} @ {self.v_baud.get()}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Open serial failed:\n{e}")
+            if hasattr(self.relay, "_open_serial_shared"):
+                self.relay._open_serial_shared(force=True)
+            QtWidgets.QMessageBox.information(
+                self,
+                "Serial",
+                f"Serial open attempted on {self.fields['serial_port'].currentText()} @ {self.fields['serial_baud'].value()}",
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Open serial failed:\n{exc}")
 
-    def _set_log_toggle(self, value: bool) -> None:
-        self._updating_log_toggle = True
-        try:
-            self.v_enable_gz_log.set(value)
-        finally:
-            self._updating_log_toggle = False
-
-    def _apply_logging_state(self, enable: bool, announce: bool) -> None:
-        previous = bool(self.v_enable_gz_log.get())
-        if enable and not self.v_log_path.get().strip():
-            messagebox.showerror("로그 경로 필요", "로그 파일 경로를 먼저 지정하세요.")
-            self._set_log_toggle(previous)
+    def _apply_logging(self, enable: bool, announce: bool = True) -> None:
+        if enable and not self.log_path_edit.text().strip():
+            QtWidgets.QMessageBox.critical(self, "Error", "로그 파일 경로를 먼저 지정하세요.")
+            self.enable_gz_log.setChecked(False)
             return
-
-        self._set_log_toggle(enable)
+        self.enable_gz_log.setChecked(enable)
         try:
             self._apply_to_runtime()
-        except Exception as e:
-            messagebox.showerror("오류", f"로깅 상태 변경 실패:\n{e}")
-            self._set_log_toggle(previous)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"로깅 상태 변경 실패:\n{exc}")
             return
-
         if announce:
-            if enable:
-                messagebox.showinfo("Gazebo 로깅", "로그 기록을 시작했습니다.")
-            else:
-                messagebox.showinfo("Gazebo 로깅", "로그 기록을 중지했습니다.")
-
-    def on_toggle_logging(self) -> None:
-        if self._updating_log_toggle:
-            return
-        self._apply_logging_state(bool(self.v_enable_gz_log.get()), announce=False)
-
-    def on_start_logging(self) -> None:
-        self._apply_logging_state(True, announce=True)
-
-    def on_stop_logging(self) -> None:
-        self._apply_logging_state(False, announce=True)
+            QtWidgets.QMessageBox.information(self, "Gazebo 로깅", "로그 기록을 시작했습니다." if enable else "로그 기록을 중지했습니다.")
 
     def on_start(self) -> None:
         try:
             self._apply_to_runtime()
             self.relay.start()
-            messagebox.showinfo("Relay", "Relay started.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Start failed:\n{e}")
+            QtWidgets.QMessageBox.information(self, "Relay", "Relay started.")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Start failed:\n{exc}")
 
     def on_stop(self) -> None:
         try:
             self.relay.stop()
-            messagebox.showinfo("Relay", "Relay stopped.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Stop failed:\n{e}")
+            QtWidgets.QMessageBox.information(self, "Relay", "Relay stopped.")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Stop failed:\n{exc}")
 
     def on_save(self) -> None:
         try:
             self._apply_to_runtime()
-            cm = ConfigManager(); ac = cm.load(); d = ac.to_dict()
-            d.setdefault("relay", {}).update(self._collect_values())
-            cm.save(AppConfig.from_dict(d))
-            messagebox.showinfo("Saved", "Relay settings saved.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Save failed:\n{e}")
+            cm = ConfigManager(); ac = cm.load(); data = ac.to_dict()
+            data.setdefault("relay", {}).update(self._collect_values())
+            cm.save(AppConfig.from_dict(data))
+            QtWidgets.QMessageBox.information(self, "Saved", "Relay settings saved.")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Save failed:\n{exc}")
 
     def on_apply_close(self) -> None:
         try:
             self._apply_to_runtime()
-        except Exception as e:
-            messagebox.showerror("Error", f"Apply failed:\n{e}")
-            return
-        self.destroy()
+            self.accept()
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Apply failed:\n{exc}")
 
-    # ---------------- Status (2 lines) ----------------
-    def _refresh_status_periodic(self) -> None:
-        try:
-            st = self.relay.get_status() if hasattr(self.relay, "get_status") else {}
-            act = st.get("activated", False)
-            dist = st.get("distance_m", 0.0)
-            dage = st.get("distance_age_s", -1.0)
-            q = st.get("of_quality", 0)
-            h = st.get("of_ground_dist", 0.0)
-            of_age = st.get("of_last_send_age_s", -1.0)
-            serial = st.get("serial", "-")
-            gz = st.get("gazebo_listen", "-")
-            ext = st.get("ext_dst", "-")
-            dup = st.get("dist_udp", "-")
-            serial_connected = bool(st.get("serial_connected", False))
-            proc_enabled = bool(st.get("of_processing_enabled", False))
-            of_enabled = bool(st.get("of_serial_enabled", False))
-            dist_enabled = bool(st.get("distance_serial_enabled", False))
-            log_active = bool(st.get("gazebo_logging_active", False))
-            log_path = st.get("gazebo_log_path", "") or ""
-            log_count = st.get("gazebo_logged_count")
-            log_error = st.get("gazebo_log_error")
-            desired_enable = bool(st.get("enable_gazebo_logging", True))
-            if bool(self.v_enable_gz_log.get()) != desired_enable:
-                self._set_log_toggle(desired_enable)
-
-            line1 = (
-                f"Status: {'Running' if act else 'Stopped'} | "
-                f"Dist={dist:.2f} m (age {dage:.1f}s) | "
-                f"OF(proc={'ON' if proc_enabled else 'OFF'}) q={q} h={h:.2f} (age {of_age:.1f}s)"
-            )
-            serial_info = f"COM={serial}"
-            if serial_connected:
-                svc = [
-                    "Proc=ON" if proc_enabled else "Proc=OFF",
-                    "OF=ON" if of_enabled else "OF=OFF",
-                    "Dist=ON" if dist_enabled else "Dist=OFF",
-                ]
-                serial_info += f" [{', '.join(svc)}]"
-            else:
-                serial_info += " (closed)"
-            line2 = f"GZ={gz} → EXT={ext} | UDPdist={dup} | {serial_info}"
-            if log_active and log_path:
-                disp = os.path.basename(log_path) or log_path
-                if isinstance(log_count, (int, float)):
-                    log_line = f"Log: Recording ({int(log_count)}) → {disp}"
-                else:
-                    log_line = f"Log: Recording → {disp}"
-            elif log_error:
-                log_line = f"Log: Error ({log_error})"
-            elif log_path:
-                disp = os.path.basename(log_path) or log_path
-                log_line = f"Log: Ready → {disp}"
-            else:
-                log_line = "Log: Disabled"
-            self.lbl_status1.configure(text=line1)
-            self.lbl_status2.configure(text=line2)
-            self.lbl_status3.configure(text=log_line)
-        except Exception:
-            pass
-        self.after(1000, self._refresh_status_periodic)
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - GUI callback
+        self._status_timer.stop()
+        super().closeEvent(event)
