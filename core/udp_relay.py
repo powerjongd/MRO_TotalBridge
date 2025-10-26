@@ -165,6 +165,18 @@ class UdpRelay:
         self._dist_mav_rx_cnt = 0
         self._dist_mav_last_log = now
         self._dist_mav_last_rx_ts = 0.0
+        self._gazebo_queue: Optional[queue.Queue[bytes]] = None
+        self._gazebo_worker: Optional[threading.Thread] = None
+        self._gazebo_queue_drop_count = 0
+        self._gazebo_queue_last_log = 0.0
+        self._distance_raw_queue: Optional[queue.Queue[bytes]] = None
+        self._distance_raw_worker: Optional[threading.Thread] = None
+        self._distance_raw_drop_count = 0
+        self._distance_raw_last_log = 0.0
+        self._distance_mav_queue: Optional[queue.Queue[bytes]] = None
+        self._distance_mav_worker: Optional[threading.Thread] = None
+        self._distance_mav_drop_count = 0
+        self._distance_mav_last_log = 0.0
 
         # ---- Optical Flow 스케일/품질/하트비트 파라미터 (UI로부터 설정) ----
         # 스케일/품질
@@ -338,6 +350,189 @@ class UdpRelay:
         if should_warn:
             self.log("[RELAY] ExternalCtrl UDP target not set; relay skipped")
 
+    def _start_gazebo_worker(self) -> None:
+        if self._gazebo_worker and self._gazebo_worker.is_alive():
+            return
+        self._gazebo_queue = queue.Queue(maxsize=512)
+        self._gazebo_queue_drop_count = 0
+        self._gazebo_queue_last_log = 0.0
+        self._gazebo_worker = threading.Thread(
+            target=self._gazebo_worker_loop,
+            name="gazebo-dispatch-worker",
+            daemon=True,
+        )
+        self._gazebo_worker.start()
+
+    def _start_distance_raw_worker(self) -> None:
+        if self._distance_raw_worker and self._distance_raw_worker.is_alive():
+            return
+        self._distance_raw_queue = queue.Queue(maxsize=256)
+        self._distance_raw_drop_count = 0
+        self._distance_raw_last_log = 0.0
+        self._distance_raw_worker = threading.Thread(
+            target=self._distance_raw_worker_loop,
+            name="distance-raw-worker",
+            daemon=True,
+        )
+        self._distance_raw_worker.start()
+
+    def _start_distance_mav_worker(self) -> None:
+        if self._distance_mav_worker and self._distance_mav_worker.is_alive():
+            return
+        self._distance_mav_queue = queue.Queue(maxsize=256)
+        self._distance_mav_drop_count = 0
+        self._distance_mav_last_log = 0.0
+        self._distance_mav_worker = threading.Thread(
+            target=self._distance_mav_worker_loop,
+            name="distance-mav-worker",
+            daemon=True,
+        )
+        self._distance_mav_worker.start()
+
+    def _stop_gazebo_worker(self) -> None:
+        worker = self._gazebo_worker
+        queue_obj = self._gazebo_queue
+        self._gazebo_worker = None
+        if queue_obj is not None:
+            try:
+                while not queue_obj.empty():
+                    queue_obj.get_nowait()
+                    queue_obj.task_done()
+            except Exception:
+                pass
+        if worker and worker.is_alive():
+            worker.join(timeout=1.5)
+        self._gazebo_queue = None
+        if self._gazebo_queue_drop_count:
+            self.log(
+                f"[RELAY] Gazebo queue dropped {self._gazebo_queue_drop_count} packets before shutdown"
+            )
+            self._gazebo_queue_drop_count = 0
+
+    def _stop_distance_raw_worker(self) -> None:
+        worker = self._distance_raw_worker
+        queue_obj = self._distance_raw_queue
+        self._distance_raw_worker = None
+        if queue_obj is not None:
+            try:
+                while not queue_obj.empty():
+                    queue_obj.get_nowait()
+                    queue_obj.task_done()
+            except Exception:
+                pass
+        if worker and worker.is_alive():
+            worker.join(timeout=1.5)
+        self._distance_raw_queue = None
+        if self._distance_raw_drop_count:
+            self.log(
+                f"[RELAY] Distance RAW queue dropped {self._distance_raw_drop_count} packets before shutdown"
+            )
+            self._distance_raw_drop_count = 0
+
+    def _stop_distance_mav_worker(self) -> None:
+        worker = self._distance_mav_worker
+        queue_obj = self._distance_mav_queue
+        self._distance_mav_worker = None
+        if queue_obj is not None:
+            try:
+                while not queue_obj.empty():
+                    queue_obj.get_nowait()
+                    queue_obj.task_done()
+            except Exception:
+                pass
+        if worker and worker.is_alive():
+            worker.join(timeout=1.5)
+        self._distance_mav_queue = None
+        if self._distance_mav_drop_count:
+            self.log(
+                f"[RELAY] Distance MAV queue dropped {self._distance_mav_drop_count} packets before shutdown"
+            )
+            self._distance_mav_drop_count = 0
+
+    def _record_gazebo_queue_drop(self, now: float) -> None:
+        self._gazebo_queue_drop_count += 1
+        if now - self._gazebo_queue_last_log >= 1.0:
+            dropped = self._gazebo_queue_drop_count
+            self.log(f"[RELAY] Gazebo queue overflow; dropped {dropped} packets")
+            self._gazebo_queue_last_log = now
+            self._gazebo_queue_drop_count = 0
+
+    def _record_distance_raw_queue_drop(self, now: float) -> None:
+        self._distance_raw_drop_count += 1
+        if now - self._distance_raw_last_log >= 1.0:
+            dropped = self._distance_raw_drop_count
+            self.log(f"[RELAY] Distance RAW queue overflow; dropped {dropped} packets")
+            self._distance_raw_last_log = now
+            self._distance_raw_drop_count = 0
+
+    def _record_distance_mav_queue_drop(self, now: float) -> None:
+        self._distance_mav_drop_count += 1
+        if now - self._distance_mav_last_log >= 1.0:
+            dropped = self._distance_mav_drop_count
+            self.log(f"[RELAY] Distance MAV queue overflow; dropped {dropped} packets")
+            self._distance_mav_last_log = now
+            self._distance_mav_drop_count = 0
+
+    def _gazebo_worker_loop(self) -> None:
+        queue_obj = self._gazebo_queue
+        if queue_obj is None:
+            return
+        while True:
+            running = not self.stop_ev.is_set()
+            try:
+                packet = queue_obj.get(timeout=0.1)
+            except queue.Empty:
+                if not running and queue_obj.empty():
+                    break
+                continue
+            try:
+                if packet:
+                    self._process_gazebo_datagram(packet)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"[RELAY] Gazebo worker error: {exc}")
+            finally:
+                queue_obj.task_done()
+
+    def _distance_raw_worker_loop(self) -> None:
+        queue_obj = self._distance_raw_queue
+        if queue_obj is None:
+            return
+        while True:
+            running = not self.stop_ev.is_set()
+            try:
+                packet = queue_obj.get(timeout=0.1)
+            except queue.Empty:
+                if not running and queue_obj.empty():
+                    break
+                continue
+            try:
+                if packet:
+                    self._process_distance_raw_datagram(packet)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"[RELAY] Distance RAW worker error: {exc}")
+            finally:
+                queue_obj.task_done()
+
+    def _distance_mav_worker_loop(self) -> None:
+        queue_obj = self._distance_mav_queue
+        if queue_obj is None:
+            return
+        while True:
+            running = not self.stop_ev.is_set()
+            try:
+                packet = queue_obj.get(timeout=0.1)
+            except queue.Empty:
+                if not running and queue_obj.empty():
+                    break
+                continue
+            try:
+                if packet:
+                    self._process_distance_mav_event(packet)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"[RELAY] Distance MAV worker error: {exc}")
+            finally:
+                queue_obj.task_done()
+
     # ------------- 라이프사이클 -------------
     def start(self) -> None:
         with self._lock:
@@ -420,6 +615,7 @@ class UdpRelay:
         self._dist_mav_rx_cnt = 0
         self._dist_mav_last_rx_ts = 0.0
 
+        self._start_gazebo_worker()
         try:
             self._dispatcher.register(
                 self.sock_gazebo,
@@ -435,6 +631,7 @@ class UdpRelay:
             return
 
         if self.sock_dist:
+            self._start_distance_raw_worker()
             try:
                 self._dispatcher.register(
                     self.sock_dist,
@@ -449,6 +646,7 @@ class UdpRelay:
         elif self.mav_udp:
             mav_sock = getattr(self.mav_udp, "port", None)
             if mav_sock is not None:
+                self._start_distance_mav_worker()
                 try:
                     self._dispatcher.register(
                         mav_sock,
@@ -493,6 +691,10 @@ class UdpRelay:
                 except Exception:
                     pass
             self._mav_udp_registered = False
+
+        self._stop_gazebo_worker()
+        self._stop_distance_raw_worker()
+        self._stop_distance_mav_worker()
 
         # 소켓/링크 정리
         try:
@@ -926,6 +1128,17 @@ class UdpRelay:
     ) -> None:
         if not packet:
             return
+        queue_obj = self._gazebo_queue
+        if queue_obj is None:
+            return
+        try:
+            queue_obj.put_nowait(packet)
+        except queue.Full:
+            self._record_gazebo_queue_drop(time.monotonic())
+
+    def _process_gazebo_datagram(self, packet: bytes) -> None:
+        if not packet:
+            return
 
         if self._ext_target_generation_cache != self._ext_udp_target_generation:
             with self._ext_udp_target_lock:
@@ -969,6 +1182,18 @@ class UdpRelay:
         _addr: Tuple[str, int],
         _timestamp: float,
     ) -> None:
+        if not packet:
+            return
+
+        queue_obj = self._distance_raw_queue
+        if queue_obj is None:
+            return
+        try:
+            queue_obj.put_nowait(packet)
+        except queue.Full:
+            self._record_distance_raw_queue_drop(time.monotonic())
+
+    def _process_distance_raw_datagram(self, packet: bytes) -> None:
         if not packet:
             return
 
@@ -1046,6 +1271,18 @@ class UdpRelay:
         _addr: Tuple[str, int],
         _timestamp: float,
     ) -> None:
+        if not packet:
+            return
+
+        queue_obj = self._distance_mav_queue
+        if queue_obj is None:
+            return
+        try:
+            queue_obj.put_nowait(packet)
+        except queue.Full:
+            self._record_distance_mav_queue_drop(time.monotonic())
+
+    def _process_distance_mav_event(self, packet: bytes) -> None:
         mav = self.mav_udp
         if not mav:
             return

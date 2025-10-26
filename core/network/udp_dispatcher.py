@@ -26,6 +26,7 @@ class _HandlerState:
     packets: int = 0
     bytes: int = 0
     errors: int = 0
+    last_slow_log: float = 0.0
 
     def should_run_idle(self, now: float) -> bool:
         if self.idle_callback is None or self.idle_interval is None:
@@ -42,6 +43,7 @@ class UdpDispatcher:
         name: str = "udp-dispatcher",
         log: Optional[Callable[[str], None]] = None,
         default_idle: float = 0.5,
+        slow_callback_warn: float = 0.02,
     ) -> None:
         self._selector = selectors.DefaultSelector()
         self._name = name
@@ -51,6 +53,7 @@ class UdpDispatcher:
         self._thread: Optional[threading.Thread] = None
         self._handlers: Dict[socket.socket, _HandlerState] = {}
         self._default_idle = max(0.05, float(default_idle))
+        self._slow_callback_warn = max(0.0, float(slow_callback_warn))
         self._logger = logging.getLogger(name)
         if log is not None:
             def _proxy(message: str, *args: object) -> None:
@@ -203,6 +206,7 @@ class UdpDispatcher:
                     continue
                 state: _HandlerState = key.data
                 sock = key.fileobj
+                start_call = time.monotonic()
                 try:
                     data, addr = sock.recvfrom(state.buffer_size)
                 except BlockingIOError:
@@ -222,11 +226,25 @@ class UdpDispatcher:
                 state.packets += 1
                 state.bytes += len(data)
                 state.last_activity = now
+                slow_warn = self._slow_callback_warn
                 try:
                     state.callback(data, addr, now)
                 except Exception as exc:  # noqa: BLE001
                     state.errors += 1
                     self._log_error("[UDP-DISPATCH] handler %s raised: %s", state.name, exc)
+                finally:
+                    if slow_warn > 0.0:
+                        elapsed = time.monotonic() - start_call
+                        if elapsed >= slow_warn:
+                            log_now = time.monotonic()
+                            # 최소 1초 간격으로 경고를 내보낸다.
+                            if log_now - state.last_slow_log >= 1.0:
+                                self._logger.warning(
+                                    "[UDP-DISPATCH] handler %s slow: %.3fs",
+                                    state.name,
+                                    elapsed,
+                                )
+                                state.last_slow_log = log_now
             self._run_idle_callbacks(time.monotonic())
 
     def _run_idle_callbacks(self, now: float) -> None:

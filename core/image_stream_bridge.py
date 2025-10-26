@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import queue
 import shutil
 import socket
 import struct
@@ -146,6 +147,10 @@ class ImageStreamBridge:
         self._tcp_thread: Optional[threading.Thread] = None
         self._udp_registered = False
         self._dispatcher = get_global_dispatcher()
+        self._udp_queue: Optional[queue.Queue[bytes]] = None
+        self._udp_worker: Optional[threading.Thread] = None
+        self._udp_queue_drop_count = 0
+        self._udp_queue_last_log = 0.0
 
         # UDP reassembly buffer
         self._reasm: Optional[Dict[str, Any]] = None
@@ -177,18 +182,20 @@ class ImageStreamBridge:
         self._tcp_thread.start()
         if self._udp_sock:
             try:
+                self._start_udp_worker()
                 self._dispatcher.register(
                     self._udp_sock,
                     self._handle_udp_packet,
                     name=f"image-stream-{self.udp_port}",
-                    idle_callback=self._on_udp_idle,
-                    idle_interval=0.2,
+                    idle_callback=None,
                     buffer_size=65535,
                 )
                 self._udp_registered = True
             except Exception as exc:
                 self.log(f"[BRIDGE] UDP dispatcher registration failed: {exc}")
                 self._udp_registered = False
+                self.is_server_running.clear()
+                self._stop_udp_worker()
                 self._close_udp_socket()
                 raise
         self._emit_status("RUNNING")
@@ -222,6 +229,7 @@ class ImageStreamBridge:
                 pass
 
         self._close_sockets()
+        self._stop_udp_worker()
         self._emit_status("STOPPED")
         self.log("[BRIDGE] stopped")
 
@@ -651,11 +659,86 @@ class ImageStreamBridge:
         self._udp_sock = sock
         self.log(f"[BRIDGE] UDP listening: {self.ip}:{self.udp_port}")
 
-    def _handle_udp_packet(self, packet: bytes, _addr: Tuple[str, int], now: float) -> None:
+    def _start_udp_worker(self) -> None:
+        if self._udp_worker and self._udp_worker.is_alive():
+            return
+        self._udp_queue = queue.Queue(maxsize=512)
+        self._udp_queue_drop_count = 0
+        self._udp_queue_last_log = 0.0
+        self._udp_worker = threading.Thread(
+            target=self._udp_worker_loop,
+            name=f"image-udp-worker-{self.udp_port}",
+            daemon=True,
+        )
+        self._udp_worker.start()
+
+    def _stop_udp_worker(self) -> None:
+        worker = self._udp_worker
+        queue_obj = self._udp_queue
+        self._udp_worker = None
+        if queue_obj is not None:
+            # Drop any queued packets so the worker can exit promptly.
+            try:
+                while not queue_obj.empty():
+                    queue_obj.get_nowait()
+                    queue_obj.task_done()
+            except Exception:
+                pass
+        if worker and worker.is_alive():
+            worker.join(timeout=1.5)
+        self._udp_queue = None
+        if self._udp_queue_drop_count:
+            self.log(
+                f"[BRIDGE] UDP queue dropped {self._udp_queue_drop_count} packets before shutdown"
+            )
+            self._udp_queue_drop_count = 0
+
+    def _udp_worker_loop(self) -> None:
+        queue_obj = self._udp_queue
+        if queue_obj is None:
+            return
+        while True:
+            running = self.is_server_running.is_set()
+            try:
+                packet = queue_obj.get(timeout=0.2)
+            except queue.Empty:
+                if not running and queue_obj.empty():
+                    break
+                self._expire_stale_reassembly(now=time.monotonic())
+                continue
+            if packet is None:
+                continue
+            try:
+                self._process_udp_datagram(packet)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"[BRIDGE] UDP worker error: {exc}")
+            finally:
+                queue_obj.task_done()
+        self._expire_stale_reassembly(force=True)
+
+    def _record_udp_queue_drop(self, now: float) -> None:
+        self._udp_queue_drop_count += 1
+        if now - self._udp_queue_last_log >= 1.0:
+            dropped = self._udp_queue_drop_count
+            self.log(f"[BRIDGE] UDP queue overflow; dropped {dropped} packets")
+            self._udp_queue_drop_count = 0
+            self._udp_queue_last_log = now
+
+    def _handle_udp_packet(self, packet: bytes, _addr: Tuple[str, int], _now: float) -> None:
+        queue_obj = self._udp_queue
+        if queue_obj is None or not packet:
+            return
+        try:
+            queue_obj.put_nowait(packet)
+        except queue.Full:
+            self._record_udp_queue_drop(time.monotonic())
+
+    def _process_udp_datagram(self, packet: bytes) -> None:
         header = parse_udp_header(packet)
         if not header or header.get("msg_type") != 9:
             return
 
+        now = time.monotonic()
         self._expire_stale_reassembly(now=now)
 
         fi = header.get("frame_index", 0)
@@ -727,9 +810,6 @@ class ImageStreamBridge:
             else:
                 self.log("[BRIDGE] invalid JPEG received")
             self._reasm = None
-
-    def _on_udp_idle(self, now: float) -> None:
-        self._expire_stale_reassembly(now=now)
 
     def _start_new_reassembly(self, header: Dict[str, int]) -> bool:
         msg_size = header.get("msg_size", 0)
