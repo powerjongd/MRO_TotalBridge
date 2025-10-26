@@ -22,11 +22,22 @@ class _LogEmitter(QtCore.QObject):
 class QtLogHandler(logging.Handler):
     """Logging handler that forwards records to a QTextEdit in a thread-safe way."""
 
-    def __init__(self, widget: QtWidgets.QTextEdit) -> None:
-        super().__init__()
-        self.widget = widget
+    def __init__(
+        self,
+        widget: Optional[QtWidgets.QTextEdit] = None,
+        level: int = logging.NOTSET,
+    ) -> None:
+        super().__init__(level)
+        self.widget: Optional[QtWidgets.QTextEdit] = None
         self._emitter = _LogEmitter()
         self._emitter.message.connect(self._append)
+        if widget is not None:
+            self.set_widget(widget)
+
+    def set_widget(self, widget: QtWidgets.QTextEdit) -> None:
+        """Attach the QTextEdit sink after construction."""
+
+        self.widget = widget
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -38,18 +49,11 @@ class QtLogHandler(logging.Handler):
 
     @QtCore.Slot(str)
     def _append(self, msg: str) -> None:
+        if self.widget is None:
+            return
         self.widget.append(msg)
         self.widget.moveCursor(QtGui.QTextCursor.End)
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.setMinimumSize(320, 240)
-        self.setAlignment(QtCore.Qt.AlignCenter)
-        self.setStyleSheet("background-color: #202020; border: 1px solid #404040;")
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - GUI callback
-        super().resizeEvent(event)
-        self.resized.emit(event.size())
 
 class _PreviewBridge(QtCore.QObject):
     frame_ready = QtCore.Signal(bytes, float)
