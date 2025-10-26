@@ -50,6 +50,27 @@ def parse_args() -> argparse.Namespace:
     log_group.add_argument("--no-console-log", dest="console_log", action="store_false", help="Disable console log output.")
     p.set_defaults(console_log=None)
 
+    # optional file logging
+    file_log_group = p.add_mutually_exclusive_group()
+    file_log_group.add_argument(
+        "--log-file",
+        dest="log_file",
+        action="store_true",
+        help="Enable rotating file logging to savedata/logs/bridge.log.",
+    )
+    file_log_group.add_argument(
+        "--no-log-file",
+        dest="log_file",
+        action="store_false",
+        help="Disable file logging (default).",
+    )
+    p.set_defaults(log_file=False)
+    p.add_argument(
+        "--log-file-path",
+        type=str,
+        help="Custom file path used when --log-file is specified.",
+    )
+
     # Bridge overrides
     p.add_argument("--bridge-ip", type=str, help="Bridge bind IP (TCP/UDP).")
     p.add_argument("--bridge-tcp", type=int, help="Bridge TCP port.")
@@ -185,30 +206,23 @@ def apply_cli_overrides(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
 
 
 def make_log_cb(logger, prefix: str, enabled: bool):
-    if not enabled:
-        def _noop(*_args, **_kwargs) -> None:
-            return None
-
-        return _noop
-
     def _log(msg: str, *args, **kwargs) -> None:
         """Proxy logger that enforces a prefix while supporting %-style args."""
 
+        extra = dict(kwargs.pop("extra", {}) or {})
+        extra.setdefault("console", enabled)
         if args:
-            logger.info("%s " + msg, prefix, *args, **kwargs)
+            logger.info("%s " + msg, prefix, *args, extra=extra, **kwargs)
         else:
             # msg 자체에 prefix가 있을 수 있지만, 통일된 앞머리 보장을 위해 강제 prefix
-            logger.info("%s %s", prefix, msg, **kwargs)
+            logger.info("%s %s", prefix, msg, extra=extra, **kwargs)
 
     return _log
 
 
 def make_status_cb(logger, name: str, enabled: bool):
-    if not enabled:
-        return lambda *_args, **_kwargs: None
-
     def _status(s: str) -> None:
-        logger.info("[%s][STATUS] %s", name, s)
+        logger.info("[%s][STATUS] %s", name, s, extra={"console": enabled})
 
     return _status
 
@@ -218,7 +232,16 @@ def make_status_cb(logger, name: str, enabled: bool):
 # -----------------------------
 def main() -> None:
     args = parse_args()
-    log = get_logger("unified-bridge")
+    log_file_override = getattr(args, "log_file_path", None)
+    enable_file_log = bool(getattr(args, "log_file", False)) or bool(log_file_override)
+    log = get_logger(
+        "unified-bridge",
+        enable_file_log=enable_file_log,
+        log_file_path=log_file_override,
+    )
+    log_file_path = getattr(log, "log_file_path", None)
+    if log_file_path:
+        log.info("[MAIN] Writing logs to %s", log_file_path)
 
     # 1) 설정 로드
     cfg_mgr = ConfigManager()
