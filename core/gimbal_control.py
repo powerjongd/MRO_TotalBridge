@@ -344,24 +344,36 @@ class GimbalControl:
             self.power_on = bool(on)
         self.log(f"[GIMBAL] power state updated (no send) -> {'ON' if on else 'OFF'}")
 
-    def send_power(self, on: bool) -> None:
-        flag = int(bool(on))
+    def build_power_packet(self, on: bool) -> bytes:
+        """Return the raw SensorPowerCtrl packet for the current sensor."""
+
         with self._lock:
-            self.power_on = bool(flag)
+            sensor_type, sensor_id = self._active_sensor_codes_locked()
+        return self._pack_power_ctrl(sensor_type, sensor_id, int(bool(on)))
+
+    def get_power_packet_example(self, on: bool) -> bytearray:
+        """Provide a bytearray sample for UI inspection."""
+
+        return bytearray(self.build_power_packet(on))
+
+    def send_power(self, on: bool) -> bytes:
+        packet = self.build_power_packet(on)
+        with self._lock:
+            self.power_on = bool(on)
             sensor_type, sensor_id = self._active_sensor_codes_locked()
             target_ip = str(self.s.get("generator_ip", "127.0.0.1"))
             target_port = int(self.s.get("generator_port", 15020))
-        pkt = self._pack_power_ctrl(sensor_type, sensor_id, flag)
         try:
-            self.tx_sock.sendto(pkt, (target_ip, target_port))
+            self.tx_sock.sendto(packet, (target_ip, target_port))
             self.log(
                 f"[GIMBAL] POWER {'ON' if on else 'OFF'} sent -> "
                 f"sensor={sensor_type}/{sensor_id} target={target_ip}:{target_port}"
             )
             if self.debug_dump_packets:
-                self._dump_packet_bytes("POWER", pkt)
+                self._dump_packet_bytes("POWER", packet)
         except Exception as e:
             self.log(f"[GIMBAL] power send error: {e}")
+        return packet
 
     def send_udp_preset(
         self,
