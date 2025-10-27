@@ -180,33 +180,82 @@ def wrap_angle_deg(angle: float) -> float:
     return wrapped
 
 
-def euler_to_quat(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Tuple[float, float, float, float]:
+def euler_to_quat(
+    roll_deg: float,
+    pitch_deg: float,
+    yaw_deg: float,
+    *,
+    order: str = "ZYX",
+) -> Tuple[float, float, float, float]:
+    """Convert Euler angles (degrees) into a quaternion following the desired order.
+
+    Parameters
+    ----------
+    roll_deg, pitch_deg, yaw_deg:
+        Bridge-native roll/pitch/yaw angles expressed in degrees.
+    order:
+        Rotation order string.  Only ``"ZYX"`` (intrinsic yaw → pitch → roll) is
+        supported at the moment because the Unreal Engine ``FRotator`` applies
+        rotations in that order.  Passing another value raises ``ValueError`` so
+        call sites never accidentally fall back to a different convention.
+
+    Returns
+    -------
+    Tuple[float, float, float, float]
+        Quaternion in ``(x, y, z, w)`` form that matches the supplied rotation.
+        The scalar component ``w`` is always non-negative so downstream
+        interpolation picks the shortest arc.
     """
-    ZYX(roll=X, pitch=Y, yaw=Z) 회전 순서 기준 쿼터니언 변환.
-    입력 deg는 내부에서 [-180°, 180°]로 래핑되어 180° 이상 입력도 안정적으로 처리한다.
-    반환: (x, y, z, w)
-    """
+
+    order = order.upper()
+    if order != "ZYX":
+        raise ValueError(f"Unsupported Euler order '{order}'. Only 'ZYX' is allowed.")
+
+    # Unreal Engine는 좌표계를 Z(위) → Y(우) → X(앞) 축 기준 내적 회전(intrinsic ZYX)
+    # 순서로 적용한다.  따라서 입력된 roll/pitch/yaw를 순서대로 roll(X), pitch(Y),
+    # yaw(Z) 축 회전에 대응시킨 뒤 yaw → pitch → roll 순으로 조합한다.
+
     r = math.radians(wrap_angle_deg(roll_deg))
     p = math.radians(wrap_angle_deg(pitch_deg))
     y = math.radians(wrap_angle_deg(yaw_deg))
 
-    cr = math.cos(r * 0.5)
-    sr = math.sin(r * 0.5)
-    cp = math.cos(p * 0.5)
-    sp = math.sin(p * 0.5)
-    cy = math.cos(y * 0.5)
-    sy = math.sin(y * 0.5)
+    # Build individual axis quaternions.  Each quaternion is normalized so the
+    # final multiplication stays numerically stable even near 180° inputs.
+    sr, cr = math.sin(r * 0.5), math.cos(r * 0.5)
+    sp, cp = math.sin(p * 0.5), math.cos(p * 0.5)
+    sy, cy = math.sin(y * 0.5), math.cos(y * 0.5)
 
-    qw = cy * cp * cr + sy * sp * sr
-    qx = cy * cp * sr - sy * sp * cr
-    qy = sy * cp * sr + cy * sp * cr
-    qz = sy * cp * cr - cy * sp * sr
+    q_roll = (sr, 0.0, 0.0, cr)
+    q_pitch = (0.0, sp, 0.0, cp)
+    q_yaw = (0.0, 0.0, sy, cy)
+
+    def _quat_mul(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+        ax, ay, az, aw = a
+        bx, by, bz, bw = b
+        return (
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        )
+
+    # Intrinsic rotations multiply in reverse axis order (Z → Y → X).
+    qx, qy, qz, qw = _quat_mul(_quat_mul(q_yaw, q_pitch), q_roll)
 
     norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) or 1.0
     qw /= norm
     qx /= norm
     qy /= norm
     qz /= norm
+
+    # ``q``와 ``-q``는 동일한 회전을 나타내므로, 스칼라부(w)를 양수로 맞춰
+    # 표현을 고정해 둔다. 이후 보간 시 음수 스칼라로 인해 긴 경로를 선택하는
+    # 일을 피할 수 있다.
+    if qw < 0.0:
+        qw = -qw
+        qx = -qx
+        qy = -qy
+        qz = -qz
 
     def _zero_if_close(value: float) -> float:
         return 0.0 if abs(value) < 1e-12 else value

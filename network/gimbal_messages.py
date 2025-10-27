@@ -27,10 +27,11 @@ _SET_TARGET_FMT = "<hh3d3f"
 class SetTargetPayload:
     """Decoded payload for :data:`TCP_CMD_SET_TARGET`.
 
-    The ``sim_rpy`` tuple stores the simulator's rotation angles in the Unreal
-    ``FRotator`` order of (Pitch, Yaw, Roll).  Callers that operate in the
-    bridge/UI roll-pitch-yaw order should permute the values accordingly before
-    constructing the payload.
+    The underlying TCP command still transmits angles in the legacy
+    roll-pitch-yaw order for backward compatibility.  The ``sim_rpy`` tuple
+    normalizes those angles into the Unreal ``FRotator`` ordering of
+    (Pitch, Yaw, Roll) so downstream code can reason about the simulator
+    convention without worrying about the on-wire layout.
     """
     sensor_type: int
     sensor_id: int
@@ -117,16 +118,19 @@ def parse_set_target(command: BridgeTcpCommand) -> Optional[SetTargetPayload]:
     if command.cmd_id != TCP_CMD_SET_TARGET or len(command.body) < struct.calcsize(_SET_TARGET_FMT):
         return None
     try:
-        sensor_type, sensor_id, px, py, pz, r_sim, p_sim, y_sim = struct.unpack(
+        sensor_type, sensor_id, px, py, pz, roll_sim, pitch_sim, yaw_sim = struct.unpack(
             _SET_TARGET_FMT, command.body[: struct.calcsize(_SET_TARGET_FMT)]
         )
     except struct.error:
         return None
+    sim_pitch = float(pitch_sim)
+    sim_yaw = float(yaw_sim)
+    sim_roll = float(roll_sim)
     return SetTargetPayload(
         sensor_type=int(sensor_type),
         sensor_id=int(sensor_id),
         position_xyz=(float(px), float(py), float(pz)),
-        sim_rpy=(float(r_sim), float(p_sim), float(y_sim)),
+        sim_rpy=(sim_pitch, sim_yaw, sim_roll),
     )
 
 

@@ -510,9 +510,9 @@ class GimbalControlsDialog(QtWidgets.QDialog):
                     values.get("pos_x", 0.0),
                     values.get("pos_y", 0.0),
                     values.get("pos_z", 0.0),
-                    values.get("init_roll_deg", 0.0),
                     values.get("init_pitch_deg", 0.0),
                     values.get("init_yaw_deg", 0.0),
+                    values.get("init_roll_deg", 0.0),
                 )
             if hasattr(self.gimbal, "set_max_rate"):
                 self.gimbal.set_max_rate(values.get("max_rate_dps", 60.0))
