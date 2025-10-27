@@ -7,6 +7,7 @@ import socket
 import struct
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, Optional, Dict, Any, List, Set, Tuple
 
 from pymavlink import mavutil
@@ -34,20 +35,106 @@ from network.gimbal_messages import (
     parse_set_target,
     parse_set_zoom,
 )
+@dataclass(frozen=True)
+class _SimOrientation:
+    """Container describing a simulator pose and its quaternion."""
+
+    sim_pitch: float
+    sim_yaw: float
+    sim_roll: float
+    bridge_roll: float
+    bridge_pitch: float
+    bridge_yaw: float
+    quat_xyzw: Tuple[float, float, float, float]
+
+    @property
+    def sim_rpy(self) -> Tuple[float, float, float]:
+        return (self.sim_pitch, self.sim_yaw, self.sim_roll)
+
+    @property
+    def bridge_rpy(self) -> Tuple[float, float, float]:
+        return (self.bridge_roll, self.bridge_pitch, self.bridge_yaw)
 
 
-def _quat_to_euler_deg(qx: float, qy: float, qz: float, qw: float):
-    n = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw) or 1.0
-    x, y, z, w = qx/n, qy/n, qz/n, qw/n
-    sinr_cosp = 2.0 * (w*x + y*z)
-    cosr_cosp = 1.0 - 2.0 * (x*x + y*y)
+class _SimOrientationPipeline:
+    """Normalize simulator angles and emit consistent quaternions per channel."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_quat: Dict[str, Tuple[float, float, float, float]] = {}
+
+    def reset(self, channel: Optional[str] = None) -> None:
+        """Clear cached quaternions used for shortest-arc enforcement."""
+
+        with self._lock:
+            if channel is None:
+                self._last_quat.clear()
+            else:
+                self._last_quat.pop(channel, None)
+
+    def build_from_sim(
+        self,
+        sim_pitch: float,
+        sim_yaw: float,
+        sim_roll: float,
+        *,
+        channel: Optional[str] = None,
+    ) -> _SimOrientation:
+        pitch = wrap_angle_deg(float(sim_pitch))
+        yaw = wrap_angle_deg(float(sim_yaw))
+        roll = wrap_angle_deg(float(sim_roll))
+
+        bridge_roll = roll
+        bridge_pitch = pitch
+        bridge_yaw = yaw
+
+        quat = euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
+
+        if channel:
+            with self._lock:
+                prev = self._last_quat.get(channel)
+                if prev is not None:
+                    dot = sum(a * b for a, b in zip(quat, prev))
+                    if dot < 0.0:
+                        quat = tuple(-a for a in quat)
+                self._last_quat[channel] = tuple(quat)
+        else:
+            quat = tuple(quat)
+
+        return _SimOrientation(
+            sim_pitch=pitch,
+            sim_yaw=yaw,
+            sim_roll=roll,
+            bridge_roll=bridge_roll,
+            bridge_pitch=bridge_pitch,
+            bridge_yaw=bridge_yaw,
+            quat_xyzw=quat,
+        )
+
+
+def _quat_to_frotator_deg(qx: float, qy: float, qz: float, qw: float) -> Tuple[float, float, float]:
+    """Return Unreal-style ``(Pitch, Yaw, Roll)`` angles derived from ``(x, y, z, w)``."""
+
+    n = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw) or 1.0
+    x, y, z, w = qx / n, qy / n, qz / n, qw / n
+
+    # Standard roll (X), pitch (Y), yaw (Z) extraction.
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
     roll = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
-    sinp = 2.0 * (w*y - z*x)
-    pitch = math.degrees(math.copysign(math.pi/2, sinp)) if abs(sinp) >= 1 else math.degrees(math.asin(sinp))
-    siny_cosp = 2.0 * (w*z + x*y)
-    cosy_cosp = 1.0 - 2.0 * (y*y + z*z)
+
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1:
+        pitch = math.degrees(math.copysign(math.pi / 2, sinp))
+    else:
+        pitch = math.degrees(math.asin(sinp))
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
-    return roll, pitch, yaw
+
+    # Unreal's ``FRotator`` stores angles as (Pitch, Yaw, Roll).
+    return pitch, yaw, roll
 class GimbalControl:
     def __init__(
         self,
@@ -130,7 +217,10 @@ class GimbalControl:
         self._last_rpy = self.rpy_cur[:]
         self._last_ts = time.time()
         self._rpy_rate = [0.0, 0.0, 0.0]
-        self._last_sent_snapshot: Optional[Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float]]] = None
+        self._last_sent_snapshot: Optional[
+            Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float]]
+        ] = None
+        self._orientation_pipeline = _SimOrientationPipeline()
 
         if self._zoom_update_cb:
             try:
@@ -237,19 +327,19 @@ class GimbalControl:
                 self.debug_dump_packets = bool(self.s.get("debug_dump_packets", self.debug_dump_packets))
                 self.s["debug_dump_packets"] = self.debug_dump_packets
             if {"sensor_type", "sensor_id"}.intersection(settings.keys()):
-                self._last_sent_snapshot = None
+                self._invalidate_cached_orientation_locked()
             if "mavlink_preset_index" in settings:
                 self.mavlink_preset_index = int(self.s.get("mavlink_preset_index", self.mavlink_preset_index))
                 self.s["mavlink_preset_index"] = self.mavlink_preset_index
             if "mavlink_sensor_type" in settings:
                 self.mavlink_sensor_type = self._sanitize_sensor_code(settings.get("mavlink_sensor_type", self.mavlink_sensor_type))
                 self.s["mavlink_sensor_type"] = self.mavlink_sensor_type
-                self._last_sent_snapshot = None
+                self._invalidate_cached_orientation_locked()
             if "mavlink_sensor_id" in settings:
                 self.mavlink_sensor_id = self._sanitize_sensor_code(settings.get("mavlink_sensor_id", self.mavlink_sensor_id))
                 self.s["mavlink_sensor_id"] = self.mavlink_sensor_id
-                self._last_sent_snapshot = None
-            self._last_sent_snapshot = None
+                self._invalidate_cached_orientation_locked()
+            self._invalidate_cached_orientation_locked()
 
             if requested_serial != self.serial_port:
                 self.serial_port = requested_serial
@@ -339,29 +429,36 @@ class GimbalControl:
         if persist:
             self.s["pos_x"], self.s["pos_y"], self.s["pos_z"] = self.pos
             self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = self.rpy_tgt
-        self._last_sent_snapshot = None
+        self._invalidate_cached_orientation_locked()
 
     def set_target_pose(
         self,
         x: float,
         y: float,
         z: float,
-        roll_deg: float,
-        pitch_deg: float,
-        yaw_deg: float,
+        sim_pitch_deg: float,
+        sim_yaw_deg: float,
+        sim_roll_deg: float,
         *,
         persist: bool = False,
         log: bool = True,
-    ) -> None:
+    ) -> _SimOrientation:
+        orientation = self._orientation_pipeline.build_from_sim(
+            sim_pitch_deg, sim_yaw_deg, sim_roll_deg
+        )
         with self._lock:
             self._apply_pose_locked(
-                (x, y, z), (roll_deg, pitch_deg, yaw_deg), persist=persist
+                (x, y, z), orientation.bridge_rpy, persist=persist
             )
         if log:
+            sim_pitch, sim_yaw, sim_roll = orientation.sim_rpy
+            bridge_roll, bridge_pitch, bridge_yaw = orientation.bridge_rpy
             self.log(
                 f"[GIMBAL] target pose set → xyz=({x:.2f},{y:.2f},{z:.2f}), "
-                f"rpy=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f})"
+                f"sim_rpy(P,Y,R)=({sim_pitch:.1f},{sim_yaw:.1f},{sim_roll:.1f}) "
+                f"bridge_rpy=({bridge_roll:.1f},{bridge_pitch:.1f},{bridge_yaw:.1f})"
             )
+        return orientation
 
     def set_max_rate(self, rate_dps: float) -> None:
         with self._lock:
@@ -411,22 +508,29 @@ class GimbalControl:
         pos_x: float,
         pos_y: float,
         pos_z: float,
-        roll_deg: float,
-        pitch_deg: float,
-        yaw_deg: float,
+        sim_pitch_deg: float,
+        sim_yaw_deg: float,
+        sim_roll_deg: float,
         *,
         ip: Optional[str] = None,
         port: Optional[int] = None,
     ) -> None:
-        """Send a one-shot gimbal control packet for a specific sensor preset."""
+        """Send a one-shot gimbal control packet for a specific sensor preset.
+
+        ``sim_pitch_deg``, ``sim_yaw_deg``, and ``sim_roll_deg`` follow the Unreal
+        ``FRotator`` ordering of (Pitch, Yaw, Roll).
+        """
 
         target_ip = ip or self.s.get("generator_ip", "127.0.0.1")
         target_port = int(port or self.s.get("generator_port", 15020))
+        orientation = self._orientation_pipeline.build_from_sim(
+            sim_pitch_deg, sim_yaw_deg, sim_roll_deg, channel="udp"
+        )
         pkt = self._pack_gimbal_ctrl(
             int(sensor_type),
             int(sensor_id),
             [float(pos_x), float(pos_y), float(pos_z)],
-            [float(roll_deg), float(pitch_deg), float(yaw_deg)],
+            orientation,
         )
         try:
             self.tx_sock.sendto(pkt, (target_ip, target_port))
@@ -452,11 +556,14 @@ class GimbalControl:
         pos_x: float,
         pos_y: float,
         pos_z: float,
-        roll_deg: float,
-        pitch_deg: float,
-        yaw_deg: float,
+        sim_pitch_deg: float,
+        sim_yaw_deg: float,
+        sim_roll_deg: float,
     ) -> None:
-        """Handle an external Set_Gimbal request originating from the image stream module."""
+        """Handle an external Set_Gimbal request originating from the image stream module.
+
+        Incoming angles are expected in the simulator's (Pitch, Yaw, Roll) order.
+        """
 
         sensor_type_i = self._sanitize_sensor_code(sensor_type)
         sensor_id_i = self._sanitize_sensor_code(sensor_id)
@@ -465,22 +572,15 @@ class GimbalControl:
             self.sensor_id = sensor_id_i
             self.s["sensor_type"] = sensor_type_i
             self.s["sensor_id"] = sensor_id_i
-            self._last_sent_snapshot = None
+            self._invalidate_cached_orientation_locked()
 
-        # The TCP Set_Gimbal payload provides roll/pitch/yaw in the same order as the UI.
-        # Treat the values as bridge-native degrees so the downstream quaternion packing
-        # path matches what the operator sees in the control panel.
-        bridge_roll = float(roll_deg)
-        bridge_pitch = float(pitch_deg)
-        bridge_yaw = float(yaw_deg)
-
-        self.set_target_pose(
+        orientation = self.set_target_pose(
             pos_x,
             pos_y,
             pos_z,
-            bridge_roll,
-            bridge_pitch,
-            bridge_yaw,
+            sim_pitch_deg,
+            sim_yaw_deg,
+            sim_roll_deg,
             log=False,
         )
         self.send_udp_preset(
@@ -489,13 +589,26 @@ class GimbalControl:
             pos_x,
             pos_y,
             pos_z,
-            bridge_roll,
-            bridge_pitch,
-            bridge_yaw,
+            sim_pitch_deg,
+            sim_yaw_deg,
+            sim_roll_deg,
         )
         self.log(
-            "[GIMBAL] external pose applied -> sensor=%d/%d xyz=(%.2f,%.2f,%.2f) bridge_rpy=(%.2f,%.2f,%.2f)"
-            % (sensor_type_i, sensor_id_i, pos_x, pos_y, pos_z, bridge_roll, bridge_pitch, bridge_yaw)
+            "[GIMBAL] external pose applied -> sensor=%d/%d xyz=(%.2f,%.2f,%.2f) "
+            "sim_rpy(P,Y,R)=(%.2f,%.2f,%.2f) bridge_rpy=(%.2f,%.2f,%.2f)",
+            (
+                sensor_type_i,
+                sensor_id_i,
+                pos_x,
+                pos_y,
+                pos_z,
+                orientation.sim_pitch,
+                orientation.sim_yaw,
+                orientation.sim_roll,
+                orientation.bridge_roll,
+                orientation.bridge_pitch,
+                orientation.bridge_yaw,
+            ),
         )
 
     def set_mavlink_target(self, preset_index: int, sensor_type: int, sensor_id: int) -> None:
@@ -509,7 +622,7 @@ class GimbalControl:
             self.s["mavlink_preset_index"] = self.mavlink_preset_index
             self.s["mavlink_sensor_type"] = self.mavlink_sensor_type
             self.s["mavlink_sensor_id"] = self.mavlink_sensor_id
-            self._last_sent_snapshot = None
+            self._invalidate_cached_orientation_locked()
         self.log(
             "[GIMBAL] MAVLink preset target -> preset=%d sensor=%d/%d",
             idx + 1,
@@ -711,31 +824,30 @@ class GimbalControl:
                 float(target.position_xyz[1]),
                 float(target.position_xyz[2]),
             )
-            sim_r, sim_p, sim_y = (
+            sim_pitch, sim_yaw, sim_roll = (
                 float(target.sim_rpy[0]),
                 float(target.sim_rpy[1]),
                 float(target.sim_rpy[2]),
             )
-            r, p, y = self._sim_to_bridge_rpy(sim_r, sim_p, sim_y)
             with self._lock:
                 self.sensor_type = sensor_type
                 self.sensor_id = sensor_id
                 self.s["sensor_type"] = self.sensor_type
                 self.s["sensor_id"] = self.sensor_id
-            self.set_target_pose(
+            orientation = self.set_target_pose(
                 px,
                 py,
                 pz,
-                r,
-                p,
-                y,
+                sim_pitch,
+                sim_yaw,
+                sim_roll,
                 persist=True,
                 log=False,
             )
             self.log(
                 f"[GIMBAL] TCP target -> sensor={sensor_type}/{sensor_id} "
-                f"xyz=({px:.2f},{py:.2f},{pz:.2f}) bridge_rpy=({r:.2f},{p:.2f},{y:.2f}) "
-                f"sim_rpy=({sim_r:.2f},{sim_p:.2f},{sim_y:.2f})"
+                f"xyz=({px:.2f},{py:.2f},{pz:.2f}) sim_rpy(P,Y,R)=({sim_pitch:.2f},{sim_yaw:.2f},{sim_roll:.2f}) "
+                f"bridge_rpy=({orientation.bridge_roll:.2f},{orientation.bridge_pitch:.2f},{orientation.bridge_yaw:.2f})"
             )
             self._send_status_message(conn)
         elif command.cmd_id == TCP_CMD_SET_ZOOM:
@@ -760,14 +872,18 @@ class GimbalControl:
             r_tgt, p_tgt, y_tgt = self.rpy_tgt
             zoom = self.zoom_scale
             max_rate = self.max_rate_dps
-        r_cur_sim, p_cur_sim, y_cur_sim = self._bridge_to_sim_rpy(r_cur, p_cur, y_cur)
-        r_tgt_sim, p_tgt_sim, y_tgt_sim = self._bridge_to_sim_rpy(r_tgt, p_tgt, y_tgt)
+        orientation_cur = self._orientation_pipeline.build_from_sim(
+            *self._bridge_to_sim_rpy(r_cur, p_cur, y_cur)
+        )
+        orientation_tgt = self._orientation_pipeline.build_from_sim(
+            *self._bridge_to_sim_rpy(r_tgt, p_tgt, y_tgt)
+        )
         snapshot = StatusSnapshot(
             sensor_type=sensor_type,
             sensor_id=sensor_id,
             position_xyz=(px, py, pz),
-            sim_rpy_current=(r_cur_sim, p_cur_sim, y_cur_sim),
-            sim_rpy_target=(r_tgt_sim, p_tgt_sim, y_tgt_sim),
+            sim_rpy_current=orientation_cur.sim_rpy,
+            sim_rpy_target=orientation_tgt.sim_rpy,
             zoom_scale=zoom,
             max_rate_dps=max_rate,
         )
@@ -826,7 +942,15 @@ class GimbalControl:
                     or self._has_pose_delta(self._last_sent_snapshot, snapshot)
                 )
                 if should_send:
-                    pkt = self._pack_gimbal_ctrl(sensor_type, sensor_id, self.pos, self.rpy_cur)
+                    sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(
+                        float(self.rpy_cur[0]),
+                        float(self.rpy_cur[1]),
+                        float(self.rpy_cur[2]),
+                    )
+                    orientation = self._orientation_pipeline.build_from_sim(
+                        sim_pitch, sim_yaw, sim_roll, channel="udp"
+                    )
+                    pkt = self._pack_gimbal_ctrl(sensor_type, sensor_id, self.pos, orientation)
                     target = (
                         str(self.s.get("generator_ip", "127.0.0.1")),
                         int(self.s.get("generator_port", 15020)),
@@ -865,12 +989,15 @@ class GimbalControl:
                     avx = getattr(m, "angular_velocity_x", float("nan"))
                     # mode b: q 유효 → 목표 각도 설정
                     if not any(math.isnan(v) for v in q):
-                        r_sim, p_sim, y_sim = _quat_to_euler_deg(q[0], q[1], q[2], q[3])
-                        r, p, y = self._sim_to_bridge_rpy(r_sim, p_sim, y_sim)
+                        sim_pitch, sim_yaw, sim_roll = _quat_to_frotator_deg(q[0], q[1], q[2], q[3])
+                        orientation = self._orientation_pipeline.build_from_sim(
+                            sim_pitch, sim_yaw, sim_roll
+                        )
                         with self._lock:
-                            self.rpy_tgt[:] = [r, p, y]
+                            self.rpy_tgt[:] = list(orientation.bridge_rpy)
+                            self._invalidate_cached_orientation_locked()
                         self.log(
-                            f"[GIMBAL] RX target SIM_RPY=({r_sim:.1f},{p_sim:.1f},{y_sim:.1f})"
+                            f"[GIMBAL] RX target SIM_RPY(P,Y,R)=({orientation.sim_pitch:.1f},{orientation.sim_yaw:.1f},{orientation.sim_roll:.1f})"
                         )
                 elif t == "PARAM_REQUEST_LIST":
                     self._send_param_list()
@@ -903,12 +1030,12 @@ class GimbalControl:
                         r, p, y = self.rpy_cur
                         wx_b, wy_b, wz_b = self._rpy_rate
                         gimbal_id = int(self.mavlink_sensor_id) & 0xFF
-                    r_sim, p_sim, y_sim = self._bridge_to_sim_rpy(r, p, y)
-                    r_sim = self._normalize_angle(r_sim)
-                    p_sim = self._normalize_angle(p_sim)
-                    y_sim = self._normalize_angle(y_sim)
-                    qx, qy, qz, qw = euler_to_quat(r_sim, p_sim, y_sim)
-                    wx, wy, wz = self._bridge_to_sim_rpy(wx_b, wy_b, wz_b)
+                    sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(r, p, y)
+                    orientation = self._orientation_pipeline.build_from_sim(
+                        sim_pitch, sim_yaw, sim_roll, channel="mav"
+                    )
+                    qx, qy, qz, qw = orientation.quat_xyzw
+                    sim_pitch_rate, sim_yaw_rate, sim_roll_rate = self._bridge_to_sim_rpy(wx_b, wy_b, wz_b)
                     time_boot_ms = int((now - t0) * 1000.0)
                     mav.mav.gimbal_device_attitude_status_send(
                         self.mav_sys_id,
@@ -916,9 +1043,9 @@ class GimbalControl:
                         time_boot_ms,
                         GIMBAL_STATUS_FLAGS,
                         [qx, qy, qz, qw],
-                        wx,
-                        wy,
-                        wz,
+                        sim_roll_rate,
+                        sim_pitch_rate,
+                        sim_yaw_rate,
                         0,
                         float("nan"),
                         float("nan"),
@@ -974,40 +1101,44 @@ class GimbalControl:
                 return True
         return False
 
-    @staticmethod
-    def _normalize_angle(value: float) -> float:
-        return wrap_angle_deg(value)
+    def _invalidate_cached_orientation_locked(self) -> None:
+        """Reset cached pose/quaternion bookkeeping while ``self._lock`` is held."""
+
+        self._last_sent_snapshot = None
+        self._orientation_pipeline.reset()
 
     @staticmethod
     def _bridge_to_sim_rpy(
         roll_deg: float, pitch_deg: float, yaw_deg: float
     ) -> Tuple[float, float, float]:
-        """Convert bridge roll/pitch/yaw (or axis rates) into the simulator axis order."""
+        """Convert bridge angles into the simulator's ``FRotator`` ordering."""
 
-        # Unreal Engine's FRotator stores angles as (Pitch, Yaw, Roll).  The generator reads
-        # our quaternion using that ordering, so the value we label as "roll" in the bridge
-        # must be written into the simulator's *yaw* slot, pitch into roll, and yaw into
-        # pitch to make the round-trip (bridge → quaternion → Unreal) match the UI labels.
+        # Unreal Engine exposes rotations as ``FRotator(Pitch, Yaw, Roll)``.  The bridge
+        # stores values as (roll, pitch, yaw), so map them into that tuple ordering.
         return float(pitch_deg), float(yaw_deg), float(roll_deg)
 
     @staticmethod
     def _sim_to_bridge_rpy(
-        roll_deg: float, pitch_deg: float, yaw_deg: float
+        sim_pitch_deg: float, sim_yaw_deg: float, sim_roll_deg: float
     ) -> Tuple[float, float, float]:
-        """Convert simulator roll/pitch/yaw (or axis rates) into the bridge storage order."""
+        """Convert simulator ``FRotator`` angles back into bridge (roll, pitch, yaw)."""
 
-        # Inverse of :meth:`_bridge_to_sim_rpy`.  Values coming back from the simulator (or
-        # from MAVLink quaternions expanded with the Unreal convention) arrive as
-        # (Pitch, Yaw, Roll).  Map them back to the bridge's (roll, pitch, yaw).
-        return float(yaw_deg), float(roll_deg), float(pitch_deg)
+        # Inverse of :meth:`_bridge_to_sim_rpy`.
+        return float(sim_roll_deg), float(sim_pitch_deg), float(sim_yaw_deg)
 
-    def _pack_gimbal_ctrl(self, sensor_type: int, sensor_id: int, xyz: List[float], rpy_deg: List[float]) -> bytes:
-        sim_roll, sim_pitch, sim_yaw = self._bridge_to_sim_rpy(float(rpy_deg[0]), float(rpy_deg[1]), float(rpy_deg[2]))
-        sim_roll = self._normalize_angle(sim_roll)
-        sim_pitch = self._normalize_angle(sim_pitch)
-        sim_yaw = self._normalize_angle(sim_yaw)
-        quat = euler_to_quat(sim_roll, sim_pitch, sim_yaw)
-        return build_gimbal_ctrl_packet(sensor_type, sensor_id, (float(xyz[0]), float(xyz[1]), float(xyz[2])), quat)
+    def _pack_gimbal_ctrl(
+        self,
+        sensor_type: int,
+        sensor_id: int,
+        xyz: List[float],
+        orientation: _SimOrientation,
+    ) -> bytes:
+        return build_gimbal_ctrl_packet(
+            sensor_type,
+            sensor_id,
+            (float(xyz[0]), float(xyz[1]), float(xyz[2])),
+            orientation.quat_xyzw,
+        )
 
     def _pack_power_ctrl(self, sensor_type: int, sensor_id: int, power_on: int) -> bytes:
         return build_power_ctrl_packet(sensor_type, sensor_id, power_on)

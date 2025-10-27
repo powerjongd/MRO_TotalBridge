@@ -619,7 +619,10 @@ class ImageStreamBridge:
             self.log("[BRIDGE] Set_Gimbal malformed payload; expected <3d3f> or <6f>")
             return
 
-        x, y, z, roll, pitch, yaw = values
+        x, y, z, roll_legacy, pitch_legacy, yaw_legacy = values
+        sim_pitch = float(pitch_legacy)
+        sim_yaw = float(yaw_legacy)
+        sim_roll = float(roll_legacy)
         sensor_type = self._gimbal_sensor_type
         sensor_id = self._gimbal_sensor_id
 
@@ -637,14 +640,14 @@ class ImageStreamBridge:
                 x,
                 y,
                 z,
-                roll,
-                pitch,
-                yaw,
+                sim_pitch,
+                sim_yaw,
+                sim_roll,
             )
             self.log(
                 "[BRIDGE] Set_Gimbal forwarded to gimbal -> sensor=%d/%d "
-                "xyz=(%.2f,%.2f,%.2f) rpy=(%.2f,%.2f,%.2f)"
-                % (sensor_type, sensor_id, x, y, z, roll, pitch, yaw)
+                "xyz=(%.2f,%.2f,%.2f) sim_rpy(P,Y,R)=(%.2f,%.2f,%.2f)"
+                % (sensor_type, sensor_id, x, y, z, sim_pitch, sim_yaw, sim_roll)
             )
         except Exception as exc:
             self.log(f"[BRIDGE] forwarding Set_Gimbal failed: {exc}")
