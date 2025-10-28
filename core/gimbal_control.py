@@ -57,22 +57,12 @@ class _SimOrientation:
 
 
 class _SimOrientationPipeline:
-    """Normalize simulator angles and emit canonical quaternions."""
-
-    _DEFAULT_CHANNEL = "__default__"
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._last_quat: Dict[str, Tuple[float, float, float, float]] = {}
+    """Atomic simulator → bridge orientation conversion pipeline."""
 
     def reset(self, channel: Optional[str] = None) -> None:
-        """Clear cached quaternions used for shortest-arc enforcement."""
+        """Pipeline no longer buffers state; method kept for compatibility."""
 
-        with self._lock:
-            if channel is None:
-                self._last_quat.clear()
-            else:
-                self._last_quat.pop(channel, None)
+        return None
 
     def build_from_sim(
         self,
@@ -83,6 +73,8 @@ class _SimOrientationPipeline:
         channel: Optional[str] = None,
         reference_quat: Optional[Tuple[float, float, float, float]] = None,
     ) -> _SimOrientation:
+        del channel, reference_quat
+
         pitch = wrap_angle_deg(float(sim_pitch))
         yaw = wrap_angle_deg(float(sim_yaw))
         roll = wrap_angle_deg(float(sim_roll))
@@ -91,70 +83,12 @@ class _SimOrientationPipeline:
         bridge_pitch = pitch
         bridge_yaw = yaw
 
-        quat_raw = tuple(
+        quat = tuple(
             float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
         )
-
-        def _normalize_quat(
-            quat: Tuple[float, float, float, float]
-        ) -> Optional[Tuple[float, float, float, float]]:
-            norm = math.sqrt(sum(a * a for a in quat))
-            if not norm or not math.isfinite(norm):
-                return None
-            return tuple(a / norm for a in quat)
-
-        def _coerce_quat(
-            values: Any,
-        ) -> Optional[Tuple[float, float, float, float]]:
-            if values is None:
-                return None
-            try:
-                candidate = tuple(float(v) for v in values)
-            except (TypeError, ValueError):
-                return None
-            if len(candidate) != 4:
-                return None
-            if any(not math.isfinite(v) for v in candidate):
-                return None
-            return candidate
-
-        reference_tuple: Optional[Tuple[float, float, float, float]] = None
-        if reference_quat is not None:
-            reference_candidate = _coerce_quat(reference_quat)
-            if reference_candidate is not None:
-                reference_tuple = _normalize_quat(reference_candidate)
-
-        channel_key = channel or self._DEFAULT_CHANNEL
-
-        def _dot(
-            a: Tuple[float, float, float, float],
-            b: Tuple[float, float, float, float],
-        ) -> float:
-            return sum(x * y for x, y in zip(a, b))
-
-        with self._lock:
-            quat = _resolve_shortest_arc(quat, reference_tuple)
-            prev = self._last_quat.get(channel_key)
-            dot_prev = _dot(quat_raw, prev) if prev is not None else None
-            dot_ref = (
-                _dot(quat_raw, reference_tuple)
-                if reference_tuple is not None
-                else None
-            )
-
-            sign = 1.0
-            if dot_ref is not None:
-                sign = 1.0 if dot_ref >= 0.0 else -1.0
-                if dot_prev is not None and abs(dot_prev) > abs(dot_ref):
-                    sign = 1.0 if dot_prev >= 0.0 else -1.0
-            elif dot_prev is not None:
-                sign = 1.0 if dot_prev >= 0.0 else -1.0
-            elif quat_raw[3] < 0.0:
-                sign = -1.0
-
-            quat_signed = tuple(sign * a for a in quat_raw)
-            quat = _normalize_quat(quat_signed) or quat_signed
-            self._last_quat[channel_key] = quat
+        quat = self._ensure_consistent_quaternion(
+            bridge_roll, bridge_pitch, bridge_yaw, quat
+        )
 
         return _SimOrientation(
             sim_pitch=pitch,
@@ -165,6 +99,57 @@ class _SimOrientationPipeline:
             bridge_yaw=bridge_yaw,
             quat_xyzw=quat,
         )
+
+    @staticmethod
+    def _ensure_consistent_quaternion(
+        bridge_roll: float,
+        bridge_pitch: float,
+        bridge_yaw: float,
+        quat: Tuple[float, float, float, float],
+        *,
+        atol: float = 1e-3,
+    ) -> Tuple[float, float, float, float]:
+        if _quaternion_matches_angles(bridge_roll, bridge_pitch, bridge_yaw, quat, atol=atol):
+            return quat
+
+        negated = tuple(-v for v in quat)
+        if _quaternion_matches_angles(
+            bridge_roll, bridge_pitch, bridge_yaw, negated, atol=atol
+        ):
+            return negated
+
+        corrected = tuple(
+            float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
+        )
+        if _quaternion_matches_angles(
+            bridge_roll, bridge_pitch, bridge_yaw, corrected, atol=atol
+        ):
+            return corrected
+
+        raise RuntimeError(
+            "Quaternion conversion mismatch for requested roll/pitch/yaw inputs."
+        )
+
+
+def _quaternion_matches_angles(
+    bridge_roll: float,
+    bridge_pitch: float,
+    bridge_yaw: float,
+    quat: Tuple[float, float, float, float],
+    *,
+    atol: float,
+) -> bool:
+    """Check whether ``quat`` reproduces the supplied bridge angles within tolerance."""
+
+    pitch_q, yaw_q, roll_q = _quat_to_frotator_deg(*quat)
+    diff_roll = wrap_angle_deg(roll_q - bridge_roll)
+    diff_pitch = wrap_angle_deg(pitch_q - bridge_pitch)
+    diff_yaw = wrap_angle_deg(yaw_q - bridge_yaw)
+    return (
+        abs(diff_roll) <= atol
+        and abs(diff_pitch) <= atol
+        and abs(diff_yaw) <= atol
+    )
 
 
 def _quat_to_frotator_deg(qx: float, qy: float, qz: float, qw: float) -> Tuple[float, float, float]:
@@ -1058,11 +1043,14 @@ class GimbalControl:
                     self._last_rpy[i] = self.rpy_cur[i]
 
                 sensor_type, sensor_id = self._active_sensor_codes_locked()
+                bridge_roll = float(self.rpy_cur[0])
+                bridge_pitch = float(self.rpy_cur[1])
+                bridge_yaw = float(self.rpy_cur[2])
                 snapshot = (
                     sensor_type,
                     sensor_id,
                     (float(self.pos[0]), float(self.pos[1]), float(self.pos[2])),
-                    (float(self.rpy_cur[0]), float(self.rpy_cur[1]), float(self.rpy_cur[2])),
+                    (bridge_roll, bridge_pitch, bridge_yaw),
                 )
                 should_send = (
                     self._last_sent_snapshot is None
@@ -1070,9 +1058,9 @@ class GimbalControl:
                 )
                 if should_send:
                     sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(
-                        float(self.rpy_cur[0]),
-                        float(self.rpy_cur[1]),
-                        float(self.rpy_cur[2]),
+                        bridge_roll,
+                        bridge_pitch,
+                        bridge_yaw,
                     )
                     orientation = self._orientation_pipeline.build_from_sim(
                         sim_pitch,
@@ -1080,6 +1068,16 @@ class GimbalControl:
                         sim_roll,
                         channel="udp_control",
                     )
+                    if not _quaternion_matches_angles(
+                        orientation.bridge_roll,
+                        orientation.bridge_pitch,
+                        orientation.bridge_yaw,
+                        orientation.quat_xyzw,
+                        atol=1e-3,
+                    ):
+                        raise RuntimeError(
+                            "Quaternion output diverged from target Euler angles."
+                        )
                     pkt = self._pack_gimbal_ctrl(sensor_type, sensor_id, self.pos, orientation)
                     target = (
                         str(self.s.get("generator_ip", "127.0.0.1")),
