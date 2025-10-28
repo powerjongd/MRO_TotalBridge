@@ -620,9 +620,9 @@ class ImageStreamBridge:
             return
 
         x, y, z, roll_legacy, pitch_legacy, yaw_legacy = values
-        sim_pitch, sim_yaw, sim_roll = self._map_rpy_to_sim(
-            roll_legacy, pitch_legacy, yaw_legacy
-        )
+        sim_pitch = float(pitch_legacy)
+        sim_yaw = float(yaw_legacy)
+        sim_roll = float(roll_legacy)
         sensor_type = self._gimbal_sensor_type
         sensor_id = self._gimbal_sensor_id
 
@@ -651,17 +651,6 @@ class ImageStreamBridge:
             )
         except Exception as exc:
             self.log(f"[BRIDGE] forwarding Set_Gimbal failed: {exc}")
-
-    @staticmethod
-    def _map_rpy_to_sim(
-        roll_deg: float, pitch_deg: float, yaw_deg: float
-    ) -> tuple[float, float, float]:
-        """Return simulator-ordered angles from legacy roll/pitch/yaw input."""
-
-        pitch = float(roll_deg)
-        yaw = float(pitch_deg)
-        roll = float(yaw_deg)
-        return pitch, yaw, roll
 
     # --------------- UDP Receiver (New ICD) ---------------
 
@@ -927,13 +916,6 @@ class ImageStreamBridge:
             self._zoom_scale = value
             self._zoom_requires_processing = value > 1.0001
             latest_raw = self._latest_raw_jpeg
-        gimbal = self._gimbal
-        if gimbal is not None:
-            try:
-                if abs(getattr(gimbal, "zoom_scale", 0.0) - self._zoom_scale) > 1e-3:
-                    gimbal.set_zoom_scale(self._zoom_scale)
-            except Exception as exc:  # pragma: no cover - defensive logging
-                self.log(f"[BRIDGE] failed to sync gimbal zoom: {exc}")
         self.log(f"[BRIDGE] zoom scale -> {self._zoom_scale:.2f}x")
         if latest_raw:
             self._publish_zoomed_frame(latest_raw, update_timestamp=False)

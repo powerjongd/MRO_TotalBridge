@@ -256,21 +256,6 @@ def euler_to_quat(
         qx = -qx
         qy = -qy
         qz = -qz
-    elif qw == 0.0:
-        # 180° 회전에서는 w가 0이므로, 벡터부 중 절댓값이 가장 큰 축을 기준으로
-        # 부호를 고정해 표현을 안정화한다. 이렇게 하면 이후 내적 기반의
-        # 최단경로 선택 로직이 일관된 기준을 사용할 수 있다.
-        largest = max(
-            ((abs(qx), 0), (abs(qy), 1), (abs(qz), 2)),
-            key=lambda item: item[0],
-        )
-        if largest[0] > 0.0:
-            if largest[1] == 0 and qx < 0.0:
-                qx, qy, qz = -qx, -qy, -qz
-            elif largest[1] == 1 and qy < 0.0:
-                qx, qy, qz = -qx, -qy, -qz
-            elif largest[1] == 2 and qz < 0.0:
-                qx, qy, qz = -qx, -qy, -qz
 
     def _zero_if_close(value: float) -> float:
         return 0.0 if abs(value) < 1e-12 else value

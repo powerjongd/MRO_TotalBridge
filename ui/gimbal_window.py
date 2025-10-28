@@ -506,33 +506,14 @@ class GimbalControlsDialog(QtWidgets.QDialog):
             if hasattr(self.gimbal, "update_settings"):
                 self.gimbal.update_settings(values)
             if hasattr(self.gimbal, "set_target_pose"):
-                roll = values.get("init_roll_deg", 0.0)
-                pitch = values.get("init_pitch_deg", 0.0)
-                yaw = values.get("init_yaw_deg", 0.0)
-                if hasattr(self.gimbal, "set_target_pose_from_rpy"):
-                    self.gimbal.set_target_pose_from_rpy(
-                        values.get("pos_x", 0.0),
-                        values.get("pos_y", 0.0),
-                        values.get("pos_z", 0.0),
-                        roll,
-                        pitch,
-                        yaw,
-                    )
-                else:
-                    if hasattr(self.gimbal, "_bridge_to_sim_rpy"):
-                        sim_pitch, sim_yaw, sim_roll = self.gimbal._bridge_to_sim_rpy(
-                            roll, pitch, yaw
-                        )
-                    else:
-                        sim_pitch, sim_yaw, sim_roll = float(pitch), float(yaw), float(roll)
-                    self.gimbal.set_target_pose(
-                        values.get("pos_x", 0.0),
-                        values.get("pos_y", 0.0),
-                        values.get("pos_z", 0.0),
-                        sim_pitch,
-                        sim_yaw,
-                        sim_roll,
-                    )
+                self.gimbal.set_target_pose(
+                    values.get("pos_x", 0.0),
+                    values.get("pos_y", 0.0),
+                    values.get("pos_z", 0.0),
+                    values.get("init_pitch_deg", 0.0),
+                    values.get("init_yaw_deg", 0.0),
+                    values.get("init_roll_deg", 0.0),
+                )
             if hasattr(self.gimbal, "set_max_rate"):
                 self.gimbal.set_max_rate(values.get("max_rate_dps", 60.0))
             if hasattr(self.gimbal, "set_power"):
@@ -631,22 +612,14 @@ class GimbalControlsDialog(QtWidgets.QDialog):
 
     def on_apply_power(self) -> None:
         desired = self.power_on.isChecked()
-        sensor_type = int(self.sensor_type.currentIndex())
-        sensor_id = int(self.sensor_id.value())
         packet: Optional[bytes] = None
         try:
             if hasattr(self.gimbal, "send_power"):
-                packet = self.gimbal.send_power(
-                    desired, sensor_type=sensor_type, sensor_id=sensor_id
-                )
+                packet = self.gimbal.send_power(desired)
             elif hasattr(self.gimbal, "build_power_packet"):
-                packet = self.gimbal.build_power_packet(  # type: ignore[attr-defined]
-                    desired, sensor_type=sensor_type, sensor_id=sensor_id
-                )
+                packet = self.gimbal.build_power_packet(desired)  # type: ignore[attr-defined]
             elif hasattr(self.gimbal, "get_power_packet_example"):
-                raw = self.gimbal.get_power_packet_example(  # type: ignore[attr-defined]
-                    desired, sensor_type=sensor_type, sensor_id=sensor_id
-                )
+                raw = self.gimbal.get_power_packet_example(desired)  # type: ignore[attr-defined]
                 packet = bytes(raw)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Error", f"Power command failed:\n{exc}")
