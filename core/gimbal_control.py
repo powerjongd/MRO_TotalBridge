@@ -470,22 +470,58 @@ class GimbalControl:
             self.power_on = bool(on)
         self.log(f"[GIMBAL] power state updated (no send) -> {'ON' if on else 'OFF'}")
 
-    def build_power_packet(self, on: bool) -> bytes:
-        """Return the raw SensorPowerCtrl packet for the current sensor."""
+    def build_power_packet(
+        self,
+        on: bool,
+        *,
+        sensor_type: Optional[int] = None,
+        sensor_id: Optional[int] = None,
+    ) -> bytes:
+        """Return the raw SensorPowerCtrl packet for the requested sensor."""
 
         with self._lock:
-            sensor_type, sensor_id = self._active_sensor_codes_locked()
-        return self._pack_power_ctrl(sensor_type, sensor_id, int(bool(on)))
+            if sensor_type is None or sensor_id is None:
+                sensor_type_i, sensor_id_i = self._active_sensor_codes_locked()
+            else:
+                sensor_type_i = self._sanitize_sensor_code(sensor_type)
+                sensor_id_i = self._sanitize_sensor_code(sensor_id)
+        return self._pack_power_ctrl(sensor_type_i, sensor_id_i, int(bool(on)))
 
-    def get_power_packet_example(self, on: bool) -> bytearray:
+    def get_power_packet_example(
+        self,
+        on: bool,
+        *,
+        sensor_type: Optional[int] = None,
+        sensor_id: Optional[int] = None,
+    ) -> bytearray:
         """Provide a bytearray sample for UI inspection."""
 
-        return bytearray(self.build_power_packet(on))
+        return bytearray(
+            self.build_power_packet(on, sensor_type=sensor_type, sensor_id=sensor_id)
+        )
 
-    def send_power(self, on: bool) -> bytes:
-        packet = self.build_power_packet(on)
+    def send_power(
+        self,
+        on: bool,
+        *,
+        sensor_type: Optional[int] = None,
+        sensor_id: Optional[int] = None,
+    ) -> bytes:
+        sensor_type_override = None if sensor_type is None else self._sanitize_sensor_code(sensor_type)
+        sensor_id_override = None if sensor_id is None else self._sanitize_sensor_code(sensor_id)
+        packet = self.build_power_packet(
+            on,
+            sensor_type=sensor_type_override,
+            sensor_id=sensor_id_override,
+        )
         with self._lock:
             self.power_on = bool(on)
+            if sensor_type_override is not None:
+                self.sensor_type = sensor_type_override
+                self.s["sensor_type"] = self.sensor_type
+            if sensor_id_override is not None:
+                self.sensor_id = sensor_id_override
+                self.s["sensor_id"] = self.sensor_id
             sensor_type, sensor_id = self._active_sensor_codes_locked()
             target_ip = str(self.s.get("generator_ip", "127.0.0.1"))
             target_port = int(self.s.get("generator_port", 15020))
