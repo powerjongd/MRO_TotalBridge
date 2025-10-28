@@ -79,6 +79,7 @@ class _SimOrientationPipeline:
         sim_roll: float,
         *,
         channel: Optional[str] = None,
+        reference_quat: Optional[Tuple[float, float, float, float]] = None,
     ) -> _SimOrientation:
         pitch = wrap_angle_deg(float(sim_pitch))
         yaw = wrap_angle_deg(float(sim_yaw))
@@ -88,18 +89,21 @@ class _SimOrientationPipeline:
         bridge_pitch = pitch
         bridge_yaw = yaw
 
-        quat = euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
+        quat = list(euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw))
 
+        align_ref: Optional[Tuple[float, float, float, float]] = reference_quat
+        if align_ref is None and channel:
+            with self._lock:
+                align_ref = self._last_quat.get(channel)
+        if align_ref is not None:
+            dot = sum(a * b for a, b in zip(quat, align_ref))
+            if dot < 0.0:
+                quat = [-a for a in quat]
+
+        quat_tuple = tuple(float(a) for a in quat)
         if channel:
             with self._lock:
-                prev = self._last_quat.get(channel)
-                if prev is not None:
-                    dot = sum(a * b for a, b in zip(quat, prev))
-                    if dot < 0.0:
-                        quat = tuple(-a for a in quat)
-                self._last_quat[channel] = tuple(quat)
-        else:
-            quat = tuple(quat)
+                self._last_quat[channel] = quat_tuple
 
         return _SimOrientation(
             sim_pitch=pitch,
@@ -108,7 +112,7 @@ class _SimOrientationPipeline:
             bridge_roll=bridge_roll,
             bridge_pitch=bridge_pitch,
             bridge_yaw=bridge_yaw,
-            quat_xyzw=quat,
+            quat_xyzw=quat_tuple,
         )
 
 
@@ -939,7 +943,8 @@ class GimbalControl:
             *self._bridge_to_sim_rpy(r_cur, p_cur, y_cur)
         )
         orientation_tgt = self._orientation_pipeline.build_from_sim(
-            *self._bridge_to_sim_rpy(r_tgt, p_tgt, y_tgt)
+            *self._bridge_to_sim_rpy(r_tgt, p_tgt, y_tgt),
+            reference_quat=orientation_cur.quat_xyzw,
         )
         snapshot = StatusSnapshot(
             sensor_type=sensor_type,
