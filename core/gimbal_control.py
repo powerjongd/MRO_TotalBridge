@@ -73,11 +73,7 @@ class _SimOrientationPipeline:
     def reset(self, channel: Optional[str] = None) -> None:
         """Clear cached quaternions used for continuity enforcement."""
 
-        with self._lock:
-            if channel is None:
-                self._last_quat.clear()
-            else:
-                self._last_quat.pop(channel, None)
+        return None
 
     @staticmethod
     def _coerce_quaternion(
@@ -145,7 +141,7 @@ class _SimOrientationPipeline:
         bridge_pitch = pitch
         bridge_yaw = yaw
 
-        quat_raw = tuple(
+        quat = tuple(
             float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
         )
 
