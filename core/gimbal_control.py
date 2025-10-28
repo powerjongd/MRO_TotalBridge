@@ -96,6 +96,8 @@ class _SimOrientationPipeline:
         channel_key = channel or self._DEFAULT_CHANNEL
         with self._lock:
             prev = self._last_quat.get(channel_key)
+            if prev is None and reference_quat is not None:
+                prev = reference_quat
             if prev is not None:
                 dot = sum(a * b for a, b in zip(quat, prev))
                 if dot < 0.0:
@@ -109,7 +111,7 @@ class _SimOrientationPipeline:
             bridge_roll=bridge_roll,
             bridge_pitch=bridge_pitch,
             bridge_yaw=bridge_yaw,
-            quat_xyzw=quat_tuple,
+            quat_xyzw=quat,
         )
 
 
