@@ -13,6 +13,7 @@ from PySide6 import QtConcurrent, QtCore, QtGui, QtWidgets
 
 from utils.helpers import get_recent_log_lines
 from utils.observers import ObservableFloat
+from utils.zoom import BASE_ZOOM_LENS_MM
 
 
 class _LogEmitter(QtCore.QObject):
@@ -294,6 +295,10 @@ class MainWindow(QtWidgets.QMainWindow):
         label.setMinimumWidth(self._status_label_min_width)
         return label
 
+    def _format_zoom_label(self, zoom_scale: float) -> str:
+        lens_mm = zoom_scale * BASE_ZOOM_LENS_MM
+        return f"Zoom: x{zoom_scale:.2f} (Focal Length {lens_mm:.1f} mm)"
+
     def _build_preview_area(self) -> None:
         group = QtWidgets.QGroupBox("Image Preview")
         vbox = QtWidgets.QVBoxLayout(group)
@@ -307,7 +312,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_preview_info = QtWidgets.QLabel("Last: - | Size: -")
         info_layout.addWidget(self.lbl_preview_info)
 
-        self.lbl_zoom = QtWidgets.QLabel(f"Zoom: {self._current_zoom_value:.2f}x")
+        self.lbl_zoom = QtWidgets.QLabel(self._format_zoom_label(self._current_zoom_value))
         info_layout.addWidget(self.lbl_zoom)
 
         info_layout.addStretch()
@@ -343,7 +348,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(float)
     def _apply_zoom_value(self, value: float) -> None:
         self._current_zoom_value = value
-        self.lbl_zoom.setText(f"Zoom: {value:.2f}x")
+        self.lbl_zoom.setText(self._format_zoom_label(value))
 
     def _sync_zoom_from_status(self, value: float) -> None:
         if abs(value - self._current_zoom_value) < 1e-3:
@@ -542,7 +547,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         zoom = status.get("zoom_scale")
         if isinstance(zoom, (int, float)):
-            details.append(f"Zoom {zoom:.2f}x")
+            lens_mm = status.get("zoom_lens_mm")
+            if not isinstance(lens_mm, (int, float)):
+                lens_mm = zoom * BASE_ZOOM_LENS_MM
+            details.append(f"Zoom x{zoom:.2f} ({lens_mm:.1f}mm)")
 
         if not details:
             return f"{prefix} {state_text}"

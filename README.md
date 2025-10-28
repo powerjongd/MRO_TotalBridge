@@ -6,7 +6,7 @@ Unreal 기반 MORAI Sim Air(MRO)와 외부 소프트웨어 사이에서 이미�
 
 - **Image Stream Module (ImageStreamBridge)**
   - UDP JPEG 수신 → 실시간 프리뷰 및 저장
-  - TCP `MroCameraControl`: `Req_Capture`(최신 프레임을 `SaveFile/000.jpg` 순환 저장), `Set_Count`, `Get_ImgNum`, `Req_SendImg`, `Set_Zoomratio`/`Get_Zoomratio`(응답 `Ack_Zoomratio`) 지원
+  - TCP `MroCameraControl`: `Req_Capture`(최신 프레임을 `SaveFile/000.jpg` 순환 저장), `Set_Count`, `Get_ImgNum`, `Req_SendImg`, `Set_ZoomLensDist`/`Get_ZoomLensDist`(응답 `Ack_ZoomLensDist`) 지원
 
   - `./SaveFile/000.jpg`(실시간 캡처) 또는 `./PreDefinedImageSet/000.jpg`(사전 이미지) 중 UI에서 선택 가능
   - GUI 프리뷰 스냅샷 저장: `./SaveFile/preview_<timestamp>.jpg`
@@ -141,13 +141,13 @@ pyinstaller --noconfirm --clean --name MroUnifiedBridge \
 | `0x03` | Set_Count | `<uint32 count_num>` | 다음 저장될 이미지 번호를 설정(000~999 순환). |
 | `0x04` | Get_ImgNum | `<uint8 get_flag=1>` | 마지막으로 저장된 이미지 번호 질의. `Img_Num_Response`(0x11) 반환. |
 | `0x05` | Req_SendImg | `<uint32 img_num>` | 지정 번호 이미지를 TCP 전송. `File_ImgTransfer`(0x12) 응답. |
-| `0x06` | Set_Zoomratio | `<float zoom_ratio>` | 디지털 줌 배율 설정. 적용된 배율은 `Ack_Zoomratio`(0x13)로 회신. |
-| `0x07` | Get_Zoomratio | `<uint8 get_flag=1>` | 현재 줌 배율 질의. `Ack_Zoomratio` 응답. |
+| `0x06` | Set_ZoomLensDist | `<float zoom_lens_mm>` | Focal Length(mm) 값을 전달(20/24/28/35/50/75). 가장 가까운 유효값으로 반올림하여 적용하며, 결과는 `Ack_ZoomLensDist`(0x13)로 회신. |
+| `0x07` | Get_ZoomLensDist | `<uint8 get_flag=1>` | 현재 적용된 Focal Length(mm) 질의. `Ack_ZoomLensDist` 응답. |
 | `0x11` | Img_Num_Response | `<uint32 ack_uuid><uint32 img_num>` | 마지막 저장 번호 응답(기존 동작 유지). |
 | `0x12` | File_ImgTransfer | `<uint32 ack_uuid><uint32 img_num><uint32 data_size><byte[] data>` | JPEG 바이너리 응답(줌 1.0 초과 시 중앙 크롭 후 리사이즈). |
-| `0x13` | Ack_Zoomratio | `<float zoom_ratio>` | Set/Get 요청에 대한 현재 줌 배율 회신. |
+| `0x13` | Ack_ZoomLensDist | `<float zoom_lens_mm>` | Set/Get 요청에 대한 현재 Focal Length(mm) 회신. |
 
-> `zoom_ratio` 는 디지털 확대 배율(1.0 = 원본)이며, Pillow 가 사용 가능하면 JPEG 중앙부를 crop 후 원 해상도로 리사이즈하여 적용합니다.
+> `zoom_lens_mm` 은 20 mm(배율 x1.0)를 기준으로 75 mm(x3.75)까지 선형 매핑되며, Pillow 가 사용 가능하면 JPEG 중앙부를 crop 후 원 해상도로 리사이즈하여 적용합니다.
 
 ### TCP `GimbalControl` Command Set
 - Framing: `<uint32 payload_len>` prefix + payload (`payload_len` bytes)
