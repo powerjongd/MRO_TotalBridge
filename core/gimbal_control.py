@@ -918,7 +918,8 @@ class GimbalControl:
             *self._bridge_to_sim_rpy(r_cur, p_cur, y_cur)
         )
         orientation_tgt = self._orientation_pipeline.build_from_sim(
-            *self._bridge_to_sim_rpy(r_tgt, p_tgt, y_tgt)
+            *self._bridge_to_sim_rpy(r_tgt, p_tgt, y_tgt),
+            reference_quat=orientation_cur.quat_xyzw,
         )
         snapshot = StatusSnapshot(
             sensor_type=sensor_type,
