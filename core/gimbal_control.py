@@ -249,6 +249,20 @@ class GimbalControl:
         with self._lock:
             return self._active_sensor_codes_locked()
 
+    def _resolve_sensor_codes_locked(
+        self,
+        sensor_type_override: Optional[int],
+        sensor_id_override: Optional[int],
+    ) -> Tuple[int, int]:
+        base_type, base_id = self._active_sensor_codes_locked()
+        resolved_type = self._sanitize_sensor_code(
+            base_type if sensor_type_override is None else sensor_type_override
+        )
+        resolved_id = self._sanitize_sensor_code(
+            base_id if sensor_id_override is None else sensor_id_override
+        )
+        return resolved_type, resolved_id
+
     @staticmethod
     def _normalize_control_method(value: Any) -> str:
         if isinstance(value, str):
@@ -470,30 +484,54 @@ class GimbalControl:
             self.power_on = bool(on)
         self.log(f"[GIMBAL] power state updated (no send) -> {'ON' if on else 'OFF'}")
 
-    def build_power_packet(self, on: bool) -> bytes:
-        """Return the raw SensorPowerCtrl packet for the current sensor."""
+    def build_power_packet(
+        self,
+        on: bool,
+        *,
+        sensor_type: Optional[int] = None,
+        sensor_id: Optional[int] = None,
+    ) -> bytes:
+        """Return the raw SensorPowerCtrl packet for the requested sensor."""
 
         with self._lock:
-            sensor_type, sensor_id = self._active_sensor_codes_locked()
-        return self._pack_power_ctrl(sensor_type, sensor_id, int(bool(on)))
+            sensor_type_i, sensor_id_i = self._resolve_sensor_codes_locked(
+                sensor_type, sensor_id
+            )
+        return self._pack_power_ctrl(sensor_type_i, sensor_id_i, int(bool(on)))
 
-    def get_power_packet_example(self, on: bool) -> bytearray:
+    def get_power_packet_example(
+        self,
+        on: bool,
+        *,
+        sensor_type: Optional[int] = None,
+        sensor_id: Optional[int] = None,
+    ) -> bytearray:
         """Provide a bytearray sample for UI inspection."""
 
-        return bytearray(self.build_power_packet(on))
+        return bytearray(
+            self.build_power_packet(on, sensor_type=sensor_type, sensor_id=sensor_id)
+        )
 
-    def send_power(self, on: bool) -> bytes:
-        packet = self.build_power_packet(on)
+    def send_power(
+        self,
+        on: bool,
+        *,
+        sensor_type: Optional[int] = None,
+        sensor_id: Optional[int] = None,
+    ) -> bytes:
         with self._lock:
+            sensor_type_i, sensor_id_i = self._resolve_sensor_codes_locked(
+                sensor_type, sensor_id
+            )
+            packet = self._pack_power_ctrl(sensor_type_i, sensor_id_i, int(bool(on)))
             self.power_on = bool(on)
-            sensor_type, sensor_id = self._active_sensor_codes_locked()
             target_ip = str(self.s.get("generator_ip", "127.0.0.1"))
             target_port = int(self.s.get("generator_port", 15020))
         try:
             self.tx_sock.sendto(packet, (target_ip, target_port))
             self.log(
                 f"[GIMBAL] POWER {'ON' if on else 'OFF'} sent -> "
-                f"sensor={sensor_type}/{sensor_id} target={target_ip}:{target_port}"
+                f"sensor={sensor_type_i}/{sensor_id_i} target={target_ip}:{target_port}"
             )
             if self.debug_dump_packets:
                 self._dump_packet_bytes("POWER", packet)
@@ -1108,14 +1146,20 @@ class GimbalControl:
         self._orientation_pipeline.reset()
 
     @staticmethod
+    def _legacy_rpy_to_sim(
+        roll_deg: float, pitch_deg: float, yaw_deg: float
+    ) -> Tuple[float, float, float]:
+        """Map legacy roll/pitch/yaw angles into (Pitch, Yaw, Roll) order."""
+
+        return float(pitch_deg), float(yaw_deg), float(roll_deg)
+
+    @staticmethod
     def _bridge_to_sim_rpy(
         roll_deg: float, pitch_deg: float, yaw_deg: float
     ) -> Tuple[float, float, float]:
         """Convert bridge angles into the simulator's ``FRotator`` ordering."""
 
-        # Unreal Engine exposes rotations as ``FRotator(Pitch, Yaw, Roll)``.  The bridge
-        # stores values as (roll, pitch, yaw), so map them into that tuple ordering.
-        return float(pitch_deg), float(yaw_deg), float(roll_deg)
+        return GimbalControl._legacy_rpy_to_sim(roll_deg, pitch_deg, yaw_deg)
 
     @staticmethod
     def _sim_to_bridge_rpy(
