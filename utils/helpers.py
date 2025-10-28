@@ -185,13 +185,12 @@ def remap_input_rpy(
 ) -> Tuple[float, float, float]:
     """Remap UI/TCP/MAV roll/pitch/yaw inputs into simulator order."""
 
-    # 각 채널(UI, TCP/IP, MAVLink)에서 전달되는 오일러각은 레이블과 실제 축이
-    # 순환(rotated) 관계를 가진다. 입력 ``roll`` 값은 시뮬레이터의 Pitch, 입력
-    # ``pitch`` 값은 시뮬레이터의 Yaw, 입력 ``yaw`` 값은 시뮬레이터의 Roll에
-    # 대응하므로 이를 (Pitch, Yaw, Roll) 순서로 재배열한다.
-    sim_pitch = float(roll_deg)
-    sim_yaw = float(pitch_deg)
-    sim_roll = float(yaw_deg)
+    # UI/TCP/MAVLink 스택은 전통적으로 Roll, Pitch, Yaw 순서로 값을 노출하지만
+    # 언리얼 엔진 시뮬레이터는 (Pitch, Yaw, Roll) 순서의 ``FRotator`` 값을
+    # 기대한다. 후속 코드가 축을 혼동하지 않도록 시뮬레이터 순서로 재배열한다.
+    sim_pitch = float(pitch_deg)
+    sim_yaw = float(yaw_deg)
+    sim_roll = float(roll_deg)
     return sim_pitch, sim_yaw, sim_roll
 
 
