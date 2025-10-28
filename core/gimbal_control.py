@@ -103,10 +103,26 @@ class _SimOrientationPipeline:
                 return None
             return tuple(a / norm for a in quat)
 
+        def _coerce_quat(
+            values: Any,
+        ) -> Optional[Tuple[float, float, float, float]]:
+            if values is None:
+                return None
+            try:
+                candidate = tuple(float(v) for v in values)
+            except (TypeError, ValueError):
+                return None
+            if len(candidate) != 4:
+                return None
+            if any(not math.isfinite(v) for v in candidate):
+                return None
+            return candidate
+
         reference_tuple: Optional[Tuple[float, float, float, float]] = None
         if reference_quat is not None:
-            reference_candidate = tuple(float(a) for a in reference_quat)
-            reference_tuple = _normalize_quat(reference_candidate)
+            reference_candidate = _coerce_quat(reference_quat)
+            if reference_candidate is not None:
+                reference_tuple = _normalize_quat(reference_candidate)
 
         channel_key = channel or self._DEFAULT_CHANNEL
 
@@ -136,7 +152,8 @@ class _SimOrientationPipeline:
             elif quat_raw[3] < 0.0:
                 sign = -1.0
 
-            quat = tuple(sign * a for a in quat_raw)
+            quat_signed = tuple(sign * a for a in quat_raw)
+            quat = _normalize_quat(quat_signed) or quat_signed
             self._last_quat[channel_key] = quat
 
         return _SimOrientation(
@@ -1111,12 +1128,16 @@ class GimbalControl:
                         sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(
                             legacy_roll, legacy_pitch, legacy_yaw
                         )
+                        try:
+                            reference_vals = tuple(q)
+                        except TypeError:
+                            reference_vals = None
                         orientation = self._orientation_pipeline.build_from_sim(
                             sim_pitch,
                             sim_yaw,
                             sim_roll,
                             channel="mavlink_target",
-                            reference_quat=tuple(float(v) for v in q),
+                            reference_quat=reference_vals,
                         )
                         with self._lock:
                             self.rpy_tgt[:] = list(orientation.bridge_rpy)
