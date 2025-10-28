@@ -474,6 +474,34 @@ class GimbalControl:
             )
         return orientation
 
+    def set_target_pose_from_rpy(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+        *,
+        persist: bool = False,
+        log: bool = True,
+    ) -> _SimOrientation:
+        """Apply a target pose using legacy roll/pitch/yaw ordering."""
+
+        sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(
+            roll_deg, pitch_deg, yaw_deg
+        )
+        return self.set_target_pose(
+            x,
+            y,
+            z,
+            sim_pitch,
+            sim_yaw,
+            sim_roll,
+            persist=persist,
+            log=log,
+        )
+
     def set_max_rate(self, rate_dps: float) -> None:
         with self._lock:
             self.max_rate_dps = float(rate_dps)
@@ -862,26 +890,23 @@ class GimbalControl:
                 float(target.position_xyz[1]),
                 float(target.position_xyz[2]),
             )
-            sim_pitch, sim_yaw, sim_roll = (
-                float(target.sim_rpy[0]),
-                float(target.sim_rpy[1]),
-                float(target.sim_rpy[2]),
-            )
+            legacy_roll, legacy_pitch, legacy_yaw = target.legacy_rpy
             with self._lock:
                 self.sensor_type = sensor_type
                 self.sensor_id = sensor_id
                 self.s["sensor_type"] = self.sensor_type
                 self.s["sensor_id"] = self.sensor_id
-            orientation = self.set_target_pose(
+            orientation = self.set_target_pose_from_rpy(
                 px,
                 py,
                 pz,
-                sim_pitch,
-                sim_yaw,
-                sim_roll,
+                legacy_roll,
+                legacy_pitch,
+                legacy_yaw,
                 persist=True,
                 log=False,
             )
+            sim_pitch, sim_yaw, sim_roll = orientation.sim_rpy
             self.log(
                 f"[GIMBAL] TCP target -> sensor={sensor_type}/{sensor_id} "
                 f"xyz=({px:.2f},{py:.2f},{pz:.2f}) sim_rpy(P,Y,R)=({sim_pitch:.2f},{sim_yaw:.2f},{sim_roll:.2f}) "
@@ -1027,7 +1052,15 @@ class GimbalControl:
                     avx = getattr(m, "angular_velocity_x", float("nan"))
                     # mode b: q 유효 → 목표 각도 설정
                     if not any(math.isnan(v) for v in q):
-                        sim_pitch, sim_yaw, sim_roll = _quat_to_frotator_deg(q[0], q[1], q[2], q[3])
+                        sim_pitch, sim_yaw, sim_roll = _quat_to_frotator_deg(
+                            q[0], q[1], q[2], q[3]
+                        )
+                        legacy_roll, legacy_pitch, legacy_yaw = self._sim_to_bridge_rpy(
+                            sim_pitch, sim_yaw, sim_roll
+                        )
+                        sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(
+                            legacy_roll, legacy_pitch, legacy_yaw
+                        )
                         orientation = self._orientation_pipeline.build_from_sim(
                             sim_pitch, sim_yaw, sim_roll
                         )
@@ -1149,9 +1182,9 @@ class GimbalControl:
     def _legacy_rpy_to_sim(
         roll_deg: float, pitch_deg: float, yaw_deg: float
     ) -> Tuple[float, float, float]:
-        """Map legacy roll/pitch/yaw angles into (Pitch, Yaw, Roll) order."""
+        """Map legacy roll/pitch/yaw angles so ``Pitch←Roll, Yaw←Pitch, Roll←Yaw``."""
 
-        return float(pitch_deg), float(yaw_deg), float(roll_deg)
+        return float(roll_deg), float(pitch_deg), float(yaw_deg)
 
     @staticmethod
     def _bridge_to_sim_rpy(
@@ -1168,7 +1201,7 @@ class GimbalControl:
         """Convert simulator ``FRotator`` angles back into bridge (roll, pitch, yaw)."""
 
         # Inverse of :meth:`_bridge_to_sim_rpy`.
-        return float(sim_roll_deg), float(sim_pitch_deg), float(sim_yaw_deg)
+        return float(sim_pitch_deg), float(sim_yaw_deg), float(sim_roll_deg)
 
     def _pack_gimbal_ctrl(
         self,
