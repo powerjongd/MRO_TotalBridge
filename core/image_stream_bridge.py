@@ -658,9 +658,9 @@ class ImageStreamBridge:
     ) -> tuple[float, float, float]:
         """Return simulator-ordered angles from legacy roll/pitch/yaw input."""
 
-        pitch = float(pitch_deg)
-        yaw = float(yaw_deg)
-        roll = float(roll_deg)
+        pitch = float(roll_deg)
+        yaw = float(pitch_deg)
+        roll = float(yaw_deg)
         return pitch, yaw, roll
 
     # --------------- UDP Receiver (New ICD) ---------------

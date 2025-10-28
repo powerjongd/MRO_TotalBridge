@@ -81,6 +81,7 @@ class _SimOrientationPipeline:
         sim_roll: float,
         *,
         channel: Optional[str] = None,
+        reference_quat: Optional[Tuple[float, float, float, float]] = None,
     ) -> _SimOrientation:
         pitch = wrap_angle_deg(float(sim_pitch))
         yaw = wrap_angle_deg(float(sim_yaw))
@@ -108,7 +109,7 @@ class _SimOrientationPipeline:
             bridge_roll=bridge_roll,
             bridge_pitch=bridge_pitch,
             bridge_yaw=bridge_yaw,
-            quat_xyzw=quat,
+            quat_xyzw=quat_tuple,
         )
 
 
@@ -1202,7 +1203,7 @@ class GimbalControl:
     ) -> Tuple[float, float, float]:
         """Reorder legacy ``(roll, pitch, yaw)`` input into ``(Pitch, Yaw, Roll)``."""
 
-        return float(pitch_deg), float(yaw_deg), float(roll_deg)
+        return float(roll_deg), float(pitch_deg), float(yaw_deg)
 
     @staticmethod
     def _bridge_to_sim_rpy(
@@ -1219,7 +1220,7 @@ class GimbalControl:
         """Convert simulator ``FRotator`` angles back into bridge (roll, pitch, yaw)."""
 
         # Inverse of :meth:`_bridge_to_sim_rpy`.
-        return float(sim_roll_deg), float(sim_pitch_deg), float(sim_yaw_deg)
+        return float(sim_pitch_deg), float(sim_yaw_deg), float(sim_roll_deg)
 
     def _pack_gimbal_ctrl(
         self,
