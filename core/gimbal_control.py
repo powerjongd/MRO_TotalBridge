@@ -91,7 +91,29 @@ class _SimOrientationPipeline:
         bridge_pitch = pitch
         bridge_yaw = yaw
 
-        quat = tuple(float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw))
+        quat_raw = tuple(
+            float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
+        )
+
+        reference_tuple: Optional[Tuple[float, float, float, float]]
+        if reference_quat is None:
+            reference_tuple = None
+        else:
+            reference_tuple = tuple(float(a) for a in reference_quat)
+
+        def _score_candidate(
+            candidate: Tuple[float, float, float, float],
+            *,
+            previous: Optional[Tuple[float, float, float, float]],
+        ) -> float:
+            score = 0.0
+            if reference_tuple is not None:
+                score += sum(a * b for a, b in zip(candidate, reference_tuple))
+            if previous is not None:
+                score += sum(a * b for a, b in zip(candidate, previous))
+            if candidate[3] >= 0.0:
+                score += 1e-12
+            return score
 
         def _resolve_shortest_arc(
             candidate: Tuple[float, float, float, float],
@@ -114,7 +136,11 @@ class _SimOrientationPipeline:
         with self._lock:
             quat = _resolve_shortest_arc(quat, reference_tuple)
             prev = self._last_quat.get(channel_key)
-            quat = _resolve_shortest_arc(quat, prev)
+            candidates = (quat_raw, tuple(-a for a in quat_raw))
+            quat = max(
+                candidates,
+                key=lambda cand: _score_candidate(cand, previous=prev),
+            )
             self._last_quat[channel_key] = quat
 
         return _SimOrientation(
