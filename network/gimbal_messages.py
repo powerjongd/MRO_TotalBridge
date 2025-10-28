@@ -14,6 +14,7 @@ from .gimbal_icd import (
     TCP_CMD_SET_ZOOM,
     TCP_CMD_STATUS,
 )
+from utils.helpers import remap_input_rpy
 
 _GIMBAL_CTRL_HEADER_FMT = "<BiIB"
 _GIMBAL_CTRL_PAYLOAD_FMT = "<BB3d4f"
@@ -123,9 +124,11 @@ def parse_set_target(command: BridgeTcpCommand) -> Optional[SetTargetPayload]:
         )
     except struct.error:
         return None
-    sim_pitch = float(pitch_sim)
-    sim_yaw = float(yaw_sim)
-    sim_roll = float(roll_sim)
+    sim_pitch, sim_yaw, sim_roll = remap_input_rpy(
+        float(roll_sim),
+        float(pitch_sim),
+        float(yaw_sim),
+    )
     return SetTargetPayload(
         sensor_type=int(sensor_type),
         sensor_id=int(sensor_id),

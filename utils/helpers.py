@@ -180,6 +180,21 @@ def wrap_angle_deg(angle: float) -> float:
     return wrapped
 
 
+def remap_input_rpy(
+    roll_deg: float, pitch_deg: float, yaw_deg: float
+) -> Tuple[float, float, float]:
+    """Remap UI/TCP/MAV roll/pitch/yaw inputs into simulator order."""
+
+    # 각 채널(UI, TCP/IP, MAVLink)에서 전달되는 오일러각은 레이블과 실제 축이
+    # 순환(rotated) 관계를 가진다. 입력 ``roll`` 값은 시뮬레이터의 Pitch, 입력
+    # ``pitch`` 값은 시뮬레이터의 Yaw, 입력 ``yaw`` 값은 시뮬레이터의 Roll에
+    # 대응하므로 이를 (Pitch, Yaw, Roll) 순서로 재배열한다.
+    sim_pitch = float(roll_deg)
+    sim_yaw = float(pitch_deg)
+    sim_roll = float(yaw_deg)
+    return sim_pitch, sim_yaw, sim_roll
+
+
 def euler_to_quat(
     roll_deg: float,
     pitch_deg: float,

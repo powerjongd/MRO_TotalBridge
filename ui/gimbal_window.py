@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PySide6 import QtWidgets
 from serial.tools import list_ports
 
+from utils.helpers import remap_input_rpy
 from utils.settings import AppConfig, ConfigManager
 
 
@@ -507,13 +508,18 @@ class GimbalControlsDialog(QtWidgets.QDialog):
             if hasattr(self.gimbal, "update_settings"):
                 self.gimbal.update_settings(values)
             if hasattr(self.gimbal, "set_target_pose"):
+                sim_pitch, sim_yaw, sim_roll = remap_input_rpy(
+                    values.get("init_roll_deg", 0.0),
+                    values.get("init_pitch_deg", 0.0),
+                    values.get("init_yaw_deg", 0.0),
+                )
                 self.gimbal.set_target_pose(
                     values.get("pos_x", 0.0),
                     values.get("pos_y", 0.0),
                     values.get("pos_z", 0.0),
-                    values.get("init_pitch_deg", 0.0),
-                    values.get("init_yaw_deg", 0.0),
-                    values.get("init_roll_deg", 0.0),
+                    sim_pitch,
+                    sim_yaw,
+                    sim_roll,
                 )
             if hasattr(self.gimbal, "set_max_rate"):
                 self.gimbal.set_max_rate(values.get("max_rate_dps", 60.0))

@@ -33,11 +33,18 @@ try:
         get_logger,
         euler_to_quat,
         wrap_angle_deg,
+        remap_input_rpy,
         clamp,
         rate_limit,
     )
 except Exception:  # pragma: no cover
-    has_display = get_logger = euler_to_quat = wrap_angle_deg = clamp = rate_limit = None  # type: ignore
+    has_display = (
+        get_logger
+    ) = (
+        euler_to_quat
+    ) = (
+        wrap_angle_deg
+    ) = remap_input_rpy = clamp = rate_limit = None  # type: ignore
 
 
 __all__ = [
@@ -53,6 +60,7 @@ __all__ = [
     "get_logger",
     "euler_to_quat",
     "wrap_angle_deg",
+    "remap_input_rpy",
     "clamp",
     "rate_limit",
 ]
