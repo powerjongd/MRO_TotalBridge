@@ -57,28 +57,18 @@ class _SimOrientation:
 
 
 class _SimOrientationPipeline:
-    """Normalize simulator angles and emit consistent quaternions per channel."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._last_quat: Dict[str, Tuple[float, float, float, float]] = {}
+    """Normalize simulator angles and emit canonical quaternions."""
 
     def reset(self, channel: Optional[str] = None) -> None:
-        """Clear cached quaternions used for shortest-arc enforcement."""
+        """Interface kept for compatibility (no cached state is stored)."""
 
-        with self._lock:
-            if channel is None:
-                self._last_quat.clear()
-            else:
-                self._last_quat.pop(channel, None)
+        pass
 
     def build_from_sim(
         self,
         sim_pitch: float,
         sim_yaw: float,
         sim_roll: float,
-        *,
-        channel: Optional[str] = None,
     ) -> _SimOrientation:
         pitch = wrap_angle_deg(float(sim_pitch))
         yaw = wrap_angle_deg(float(sim_yaw))
@@ -88,18 +78,7 @@ class _SimOrientationPipeline:
         bridge_pitch = pitch
         bridge_yaw = yaw
 
-        quat = euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
-
-        if channel:
-            with self._lock:
-                prev = self._last_quat.get(channel)
-                if prev is not None:
-                    dot = sum(a * b for a, b in zip(quat, prev))
-                    if dot < 0.0:
-                        quat = tuple(-a for a in quat)
-                self._last_quat[channel] = tuple(quat)
-        else:
-            quat = tuple(quat)
+        quat_tuple = tuple(float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw))
 
         return _SimOrientation(
             sim_pitch=pitch,
@@ -108,7 +87,7 @@ class _SimOrientationPipeline:
             bridge_roll=bridge_roll,
             bridge_pitch=bridge_pitch,
             bridge_yaw=bridge_yaw,
-            quat_xyzw=quat,
+            quat_xyzw=quat_tuple,
         )
 
 
@@ -474,6 +453,34 @@ class GimbalControl:
             )
         return orientation
 
+    def set_target_pose_from_rpy(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+        *,
+        persist: bool = False,
+        log: bool = True,
+    ) -> _SimOrientation:
+        """Apply a target pose using legacy roll/pitch/yaw ordering."""
+
+        sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(
+            roll_deg, pitch_deg, yaw_deg
+        )
+        return self.set_target_pose(
+            x,
+            y,
+            z,
+            sim_pitch,
+            sim_yaw,
+            sim_roll,
+            persist=persist,
+            log=log,
+        )
+
     def set_max_rate(self, rate_dps: float) -> None:
         with self._lock:
             self.max_rate_dps = float(rate_dps)
@@ -562,7 +569,7 @@ class GimbalControl:
         target_ip = ip or self.s.get("generator_ip", "127.0.0.1")
         target_port = int(port or self.s.get("generator_port", 15020))
         orientation = self._orientation_pipeline.build_from_sim(
-            sim_pitch_deg, sim_yaw_deg, sim_roll_deg, channel="udp"
+            sim_pitch_deg, sim_yaw_deg, sim_roll_deg
         )
         pkt = self._pack_gimbal_ctrl(
             int(sensor_type),
@@ -862,26 +869,23 @@ class GimbalControl:
                 float(target.position_xyz[1]),
                 float(target.position_xyz[2]),
             )
-            sim_pitch, sim_yaw, sim_roll = (
-                float(target.sim_rpy[0]),
-                float(target.sim_rpy[1]),
-                float(target.sim_rpy[2]),
-            )
+            legacy_roll, legacy_pitch, legacy_yaw = target.legacy_rpy
             with self._lock:
                 self.sensor_type = sensor_type
                 self.sensor_id = sensor_id
                 self.s["sensor_type"] = self.sensor_type
                 self.s["sensor_id"] = self.sensor_id
-            orientation = self.set_target_pose(
+            orientation = self.set_target_pose_from_rpy(
                 px,
                 py,
                 pz,
-                sim_pitch,
-                sim_yaw,
-                sim_roll,
+                legacy_roll,
+                legacy_pitch,
+                legacy_yaw,
                 persist=True,
                 log=False,
             )
+            sim_pitch, sim_yaw, sim_roll = orientation.sim_rpy
             self.log(
                 f"[GIMBAL] TCP target -> sensor={sensor_type}/{sensor_id} "
                 f"xyz=({px:.2f},{py:.2f},{pz:.2f}) sim_rpy(P,Y,R)=({sim_pitch:.2f},{sim_yaw:.2f},{sim_roll:.2f}) "
@@ -986,7 +990,7 @@ class GimbalControl:
                         float(self.rpy_cur[2]),
                     )
                     orientation = self._orientation_pipeline.build_from_sim(
-                        sim_pitch, sim_yaw, sim_roll, channel="udp"
+                        sim_pitch, sim_yaw, sim_roll
                     )
                     pkt = self._pack_gimbal_ctrl(sensor_type, sensor_id, self.pos, orientation)
                     target = (
@@ -1027,7 +1031,15 @@ class GimbalControl:
                     avx = getattr(m, "angular_velocity_x", float("nan"))
                     # mode b: q 유효 → 목표 각도 설정
                     if not any(math.isnan(v) for v in q):
-                        sim_pitch, sim_yaw, sim_roll = _quat_to_frotator_deg(q[0], q[1], q[2], q[3])
+                        sim_pitch, sim_yaw, sim_roll = _quat_to_frotator_deg(
+                            q[0], q[1], q[2], q[3]
+                        )
+                        legacy_roll, legacy_pitch, legacy_yaw = self._sim_to_bridge_rpy(
+                            sim_pitch, sim_yaw, sim_roll
+                        )
+                        sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(
+                            legacy_roll, legacy_pitch, legacy_yaw
+                        )
                         orientation = self._orientation_pipeline.build_from_sim(
                             sim_pitch, sim_yaw, sim_roll
                         )
@@ -1070,7 +1082,7 @@ class GimbalControl:
                         gimbal_id = int(self.mavlink_sensor_id) & 0xFF
                     sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(r, p, y)
                     orientation = self._orientation_pipeline.build_from_sim(
-                        sim_pitch, sim_yaw, sim_roll, channel="mav"
+                        sim_pitch, sim_yaw, sim_roll
                     )
                     qx, qy, qz, qw = orientation.quat_xyzw
                     sim_pitch_rate, sim_yaw_rate, sim_roll_rate = self._bridge_to_sim_rpy(wx_b, wy_b, wz_b)
@@ -1149,9 +1161,9 @@ class GimbalControl:
     def _legacy_rpy_to_sim(
         roll_deg: float, pitch_deg: float, yaw_deg: float
     ) -> Tuple[float, float, float]:
-        """Map legacy roll/pitch/yaw angles into (Pitch, Yaw, Roll) order."""
+        """Map legacy roll/pitch/yaw angles so ``Pitch←Roll, Yaw←Pitch, Roll←Yaw``."""
 
-        return float(pitch_deg), float(yaw_deg), float(roll_deg)
+        return float(roll_deg), float(pitch_deg), float(yaw_deg)
 
     @staticmethod
     def _bridge_to_sim_rpy(
@@ -1168,7 +1180,7 @@ class GimbalControl:
         """Convert simulator ``FRotator`` angles back into bridge (roll, pitch, yaw)."""
 
         # Inverse of :meth:`_bridge_to_sim_rpy`.
-        return float(sim_roll_deg), float(sim_pitch_deg), float(sim_yaw_deg)
+        return float(sim_pitch_deg), float(sim_yaw_deg), float(sim_roll_deg)
 
     def _pack_gimbal_ctrl(
         self,
