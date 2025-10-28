@@ -123,6 +123,54 @@ class _SimOrientationPipeline:
         normalized = self._normalize_quaternion(candidate)
         return normalized or candidate
 
+    @staticmethod
+    def _coerce_quaternion(
+        values: Any,
+    ) -> Optional[Tuple[float, float, float, float]]:
+        if values is None:
+            return None
+        try:
+            candidate = tuple(float(v) for v in values)
+        except (TypeError, ValueError):
+            return None
+        if len(candidate) != 4:
+            return None
+        if any(not math.isfinite(v) for v in candidate):
+            return None
+        return candidate
+
+    @staticmethod
+    def _normalize_quaternion(
+        quat: Optional[Tuple[float, float, float, float]]
+    ) -> Optional[Tuple[float, float, float, float]]:
+        if quat is None:
+            return None
+        norm = math.sqrt(sum(a * a for a in quat))
+        if not norm or not math.isfinite(norm):
+            return None
+        return tuple(a / norm for a in quat)
+
+    @staticmethod
+    def _dot(
+        a: Tuple[float, float, float, float],
+        b: Tuple[float, float, float, float],
+    ) -> float:
+        return sum(x * y for x, y in zip(a, b))
+
+    def _align_quaternion(
+        self,
+        quat: Tuple[float, float, float, float],
+        reference: Optional[Tuple[float, float, float, float]],
+        prev: Optional[Tuple[float, float, float, float]],
+    ) -> Tuple[float, float, float, float]:
+        candidate = quat
+        if reference is not None and self._dot(candidate, reference) < 0.0:
+            candidate = tuple(-v for v in candidate)
+        if prev is not None and self._dot(candidate, prev) < 0.0:
+            candidate = tuple(-v for v in candidate)
+        normalized = self._normalize_quaternion(candidate)
+        return normalized or candidate
+
     def build_from_sim(
         self,
         sim_pitch: float,
@@ -1180,8 +1228,12 @@ class GimbalControl:
                         orientation.quat_xyzw,
                         atol=1e-3,
                     ):
-                        raise RuntimeError(
-                            "Quaternion output diverged from target Euler angles."
+                        _log_quaternion_mismatch(
+                            orientation.bridge_roll,
+                            orientation.bridge_pitch,
+                            orientation.bridge_yaw,
+                            orientation.quat_xyzw,
+                            source="control-loop",
                         )
                     pkt = self._pack_gimbal_ctrl(sensor_type, sensor_id, self.pos, orientation)
                     target = (
