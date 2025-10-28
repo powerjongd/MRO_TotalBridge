@@ -273,7 +273,6 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self._power_on_flag = bool(payload.power_on)
         self.btn_power_on = QtWidgets.QPushButton("Power On")
         self.btn_power_off = QtWidgets.QPushButton("Power Off")
-        self.lbl_power_state = QtWidgets.QLabel("현재 전원 상태: ON" if self._power_on_flag else "현재 전원 상태: OFF")
 
         self.serial_port = QtWidgets.QComboBox()
         self._refresh_serial_ports(default=payload.serial_port)
@@ -301,7 +300,6 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self._connect_signals()
         self._refresh_preset_buttons()
         self._update_status()
-        self._update_power_state_label()
 
     # ------------------------------------------------------------------
     def _build_layout(self) -> None:
@@ -367,7 +365,6 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         power_layout = QtWidgets.QHBoxLayout()
         power_layout.addWidget(self.btn_power_on)
         power_layout.addWidget(self.btn_power_off)
-        power_layout.addWidget(self.lbl_power_state)
         power_layout.addStretch()
         layout.addLayout(power_layout)
 
@@ -470,10 +467,6 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         values["generator_ip"] = self.bundle.network.ip
         values["generator_port"] = self.bundle.network.port
         return values
-
-    def _update_power_state_label(self) -> None:
-        state_text = "ON" if self._power_on_flag else "OFF"
-        self.lbl_power_state.setText(f"현재 전원 상태: {state_text}")
 
     def _build_preset_storage(self) -> Dict[str, Any]:
         slots = [preset.to_config() if preset else None for preset in self.bundle.presets]
@@ -650,7 +643,6 @@ class GimbalControlsDialog(QtWidgets.QDialog):
             return
 
         self._power_on_flag = bool(desired)
-        self._update_power_state_label()
         preset = (
             self.bundle.presets[self.bundle.selected_index]
             if 0 <= self.bundle.selected_index < len(self.bundle.presets)
@@ -690,7 +682,6 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self.yaw.setValue(data.init_yaw_deg)
         self.max_rate.setValue(data.max_rate_dps)
         self._power_on_flag = bool(data.power_on)
-        self._update_power_state_label()
         if data.serial_port:
             idx = self.serial_port.findText(data.serial_port)
             if idx >= 0:
