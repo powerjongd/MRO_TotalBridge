@@ -180,6 +180,20 @@ def wrap_angle_deg(angle: float) -> float:
     return wrapped
 
 
+def remap_input_rpy(
+    roll_deg: float, pitch_deg: float, yaw_deg: float
+) -> Tuple[float, float, float]:
+    """Remap UI/TCP/MAV roll/pitch/yaw inputs into simulator order."""
+
+    # UI/TCP/MAVLink 스택은 전통적으로 Roll, Pitch, Yaw 순서로 값을 노출하지만
+    # 언리얼 엔진 시뮬레이터는 (Pitch, Yaw, Roll) 순서의 ``FRotator`` 값을
+    # 기대한다. 후속 코드가 축을 혼동하지 않도록 시뮬레이터 순서로 재배열한다.
+    sim_pitch = float(pitch_deg)
+    sim_yaw = float(yaw_deg)
+    sim_roll = float(roll_deg)
+    return sim_pitch, sim_yaw, sim_roll
+
+
 def euler_to_quat(
     roll_deg: float,
     pitch_deg: float,
