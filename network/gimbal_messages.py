@@ -23,6 +23,12 @@ _STATUS_PAYLOAD_FMT = "<hh3d3f3ff"
 _SET_TARGET_FMT = "<hh3d3f"
 
 
+def _legacy_rpy_to_sim(roll: float, pitch: float, yaw: float) -> Tuple[float, float, float]:
+    """Map legacy roll/pitch/yaw ordering into (Pitch, Yaw, Roll)."""
+
+    return float(pitch), float(yaw), float(roll)
+
+
 @dataclass
 class SetTargetPayload:
     """Decoded payload for :data:`TCP_CMD_SET_TARGET`.
@@ -123,9 +129,7 @@ def parse_set_target(command: BridgeTcpCommand) -> Optional[SetTargetPayload]:
         )
     except struct.error:
         return None
-    sim_pitch = float(pitch_sim)
-    sim_yaw = float(yaw_sim)
-    sim_roll = float(roll_sim)
+    sim_pitch, sim_yaw, sim_roll = _legacy_rpy_to_sim(roll_sim, pitch_sim, yaw_sim)
     return SetTargetPayload(
         sensor_type=int(sensor_type),
         sensor_id=int(sensor_id),
