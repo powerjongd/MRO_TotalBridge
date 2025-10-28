@@ -209,7 +209,33 @@ def _quaternion_matches_angles(
 ) -> bool:
     """Check whether ``quat`` reproduces the supplied bridge angles within tolerance."""
 
-    pitch_q, yaw_q, roll_q = _quat_to_frotator_deg(*quat)
+    # Compare using quaternion distance to avoid gimbal-lock singularities.  The
+    # dot product between unit quaternions equals ``cos(Δθ / 2)`` where ``Δθ`` is
+    # the rotation difference in radians.
+    target_quat = euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
+
+    def _normalize(values: Tuple[float, float, float, float]) -> Optional[Tuple[float, float, float, float]]:
+        norm = math.sqrt(sum(v * v for v in values))
+        if not norm or not math.isfinite(norm):
+            return None
+        return tuple(v / norm for v in values)
+
+    candidate = _normalize(quat)
+    if candidate is None:
+        return False
+
+    reference = _normalize(tuple(float(v) for v in target_quat))
+    if reference is None:
+        return False
+
+    dot = sum(a * b for a, b in zip(candidate, reference))
+    dot = max(-1.0, min(1.0, dot))
+    angle_error_deg = math.degrees(2.0 * math.acos(abs(dot)))
+    if angle_error_deg <= max(atol, 1e-6):
+        return True
+
+    # Fall back to Euler comparisons for detailed mismatch logging.
+    pitch_q, yaw_q, roll_q = _quat_to_frotator_deg(*candidate)
     diff_roll = wrap_angle_deg(roll_q - bridge_roll)
     diff_pitch = wrap_angle_deg(pitch_q - bridge_pitch)
     diff_yaw = wrap_angle_deg(yaw_q - bridge_yaw)
