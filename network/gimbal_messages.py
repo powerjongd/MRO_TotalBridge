@@ -24,7 +24,7 @@ _SET_TARGET_FMT = "<hh3d3f"
 
 
 def _legacy_rpy_to_sim(roll: float, pitch: float, yaw: float) -> Tuple[float, float, float]:
-    """Map legacy roll/pitch/yaw so ``Pitch←Roll, Yaw←Pitch, Roll←Yaw``."""
+    """Return simulator ``(Pitch, Yaw, Roll)`` from legacy ``(roll, pitch, yaw)``."""
 
     return float(roll), float(pitch), float(yaw)
 
