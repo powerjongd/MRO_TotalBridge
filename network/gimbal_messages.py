@@ -34,14 +34,16 @@ class SetTargetPayload:
     """Decoded payload for :data:`TCP_CMD_SET_TARGET`.
 
     The underlying TCP command still transmits angles in the legacy
-    roll-pitch-yaw order for backward compatibility.  The ``sim_rpy`` tuple
-    normalizes those angles into the Unreal ``FRotator`` ordering of
-    (Pitch, Yaw, Roll) so downstream code can reason about the simulator
-    convention without worrying about the on-wire layout.
+    roll-pitch-yaw order for backward compatibility.  The ``legacy_rpy``
+    attribute preserves those raw angles, while ``sim_rpy`` normalizes them
+    into the Unreal ``FRotator`` ordering of (Pitch, Yaw, Roll) so downstream
+    code can reason about the simulator convention without worrying about the
+    on-wire layout.
     """
     sensor_type: int
     sensor_id: int
     position_xyz: Tuple[float, float, float]
+    legacy_rpy: Tuple[float, float, float]
     sim_rpy: Tuple[float, float, float]
 
 
@@ -129,11 +131,13 @@ def parse_set_target(command: BridgeTcpCommand) -> Optional[SetTargetPayload]:
         )
     except struct.error:
         return None
-    sim_pitch, sim_yaw, sim_roll = _legacy_rpy_to_sim(roll_sim, pitch_sim, yaw_sim)
+    legacy_rpy = (float(roll_sim), float(pitch_sim), float(yaw_sim))
+    sim_pitch, sim_yaw, sim_roll = _legacy_rpy_to_sim(*legacy_rpy)
     return SetTargetPayload(
         sensor_type=int(sensor_type),
         sensor_id=int(sensor_id),
         position_xyz=(float(px), float(py), float(pz)),
+        legacy_rpy=legacy_rpy,
         sim_rpy=(sim_pitch, sim_yaw, sim_roll),
     )
 

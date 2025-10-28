@@ -509,20 +509,30 @@ class GimbalControlsDialog(QtWidgets.QDialog):
                 roll = values.get("init_roll_deg", 0.0)
                 pitch = values.get("init_pitch_deg", 0.0)
                 yaw = values.get("init_yaw_deg", 0.0)
-                if hasattr(self.gimbal, "_bridge_to_sim_rpy"):
-                    sim_pitch, sim_yaw, sim_roll = self.gimbal._bridge_to_sim_rpy(
-                        roll, pitch, yaw
+                if hasattr(self.gimbal, "set_target_pose_from_rpy"):
+                    self.gimbal.set_target_pose_from_rpy(
+                        values.get("pos_x", 0.0),
+                        values.get("pos_y", 0.0),
+                        values.get("pos_z", 0.0),
+                        roll,
+                        pitch,
+                        yaw,
                     )
                 else:
-                    sim_pitch, sim_yaw, sim_roll = float(pitch), float(yaw), float(roll)
-                self.gimbal.set_target_pose(
-                    values.get("pos_x", 0.0),
-                    values.get("pos_y", 0.0),
-                    values.get("pos_z", 0.0),
-                    sim_pitch,
-                    sim_yaw,
-                    sim_roll,
-                )
+                    if hasattr(self.gimbal, "_bridge_to_sim_rpy"):
+                        sim_pitch, sim_yaw, sim_roll = self.gimbal._bridge_to_sim_rpy(
+                            roll, pitch, yaw
+                        )
+                    else:
+                        sim_pitch, sim_yaw, sim_roll = float(pitch), float(yaw), float(roll)
+                    self.gimbal.set_target_pose(
+                        values.get("pos_x", 0.0),
+                        values.get("pos_y", 0.0),
+                        values.get("pos_z", 0.0),
+                        sim_pitch,
+                        sim_yaw,
+                        sim_roll,
+                    )
             if hasattr(self.gimbal, "set_max_rate"):
                 self.gimbal.set_max_rate(values.get("max_rate_dps", 60.0))
             if hasattr(self.gimbal, "set_power"):
