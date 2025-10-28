@@ -93,13 +93,28 @@ class _SimOrientationPipeline:
 
         quat = tuple(float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw))
 
+        def _resolve_shortest_arc(
+            candidate: Tuple[float, float, float, float],
+            basis: Optional[Tuple[float, float, float, float]],
+        ) -> Tuple[float, float, float, float]:
+            if basis is None:
+                return candidate
+            dot = sum(a * b for a, b in zip(candidate, basis))
+            if dot < 0.0:
+                return tuple(-a for a in candidate)
+            return candidate
+
+        reference_tuple = (
+            tuple(float(a) for a in reference_quat)
+            if reference_quat is not None
+            else None
+        )
+
         channel_key = channel or self._DEFAULT_CHANNEL
         with self._lock:
+            quat = _resolve_shortest_arc(quat, reference_tuple)
             prev = self._last_quat.get(channel_key)
-            if prev is not None:
-                dot = sum(a * b for a, b in zip(quat, prev))
-                if dot < 0.0:
-                    quat = tuple(-a for a in quat)
+            quat = _resolve_shortest_arc(quat, prev)
             self._last_quat[channel_key] = quat
 
         return _SimOrientation(
@@ -109,7 +124,7 @@ class _SimOrientationPipeline:
             bridge_roll=bridge_roll,
             bridge_pitch=bridge_pitch,
             bridge_yaw=bridge_yaw,
-            quat_xyzw=quat_tuple,
+            quat_xyzw=quat,
         )
 
 
@@ -1079,6 +1094,7 @@ class GimbalControl:
                             sim_yaw,
                             sim_roll,
                             channel="mavlink_target",
+                            reference_quat=tuple(float(v) for v in q),
                         )
                         with self._lock:
                             self.rpy_tgt[:] = list(orientation.bridge_rpy)
