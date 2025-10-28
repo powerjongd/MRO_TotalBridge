@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6 import QtWidgets
 from serial.tools import list_ports
@@ -270,9 +270,10 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self.pitch = _mk_spin(payload.init_pitch_deg, -180.0, 180.0)
         self.yaw = _mk_spin(payload.init_yaw_deg, -180.0, 180.0)
         self.max_rate = _mk_spin(payload.max_rate_dps, 0.0, 720.0, 1.0)
-        self.power_on = QtWidgets.QCheckBox("Power ON")
-        self.power_on.setChecked(payload.power_on)
-        self.btn_apply_power = QtWidgets.QPushButton("Apply Power")
+        self._power_on_flag = bool(payload.power_on)
+        self.btn_power_on = QtWidgets.QPushButton("Power On")
+        self.btn_power_off = QtWidgets.QPushButton("Power Off")
+        self.lbl_power_state = QtWidgets.QLabel("현재 전원 상태: ON" if self._power_on_flag else "현재 전원 상태: OFF")
 
         self.serial_port = QtWidgets.QComboBox()
         self._refresh_serial_ports(default=payload.serial_port)
@@ -300,6 +301,7 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self._connect_signals()
         self._refresh_preset_buttons()
         self._update_status()
+        self._update_power_state_label()
 
     # ------------------------------------------------------------------
     def _build_layout(self) -> None:
@@ -363,8 +365,9 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         layout.addLayout(rate_layout)
 
         power_layout = QtWidgets.QHBoxLayout()
-        power_layout.addWidget(self.power_on)
-        power_layout.addWidget(self.btn_apply_power)
+        power_layout.addWidget(self.btn_power_on)
+        power_layout.addWidget(self.btn_power_off)
+        power_layout.addWidget(self.lbl_power_state)
         power_layout.addStretch()
         layout.addLayout(power_layout)
 
@@ -405,7 +408,8 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self.btn_open_serial.clicked.connect(self.on_connect_serial)
         self.btn_apply_ids.clicked.connect(self.on_apply_ids)
         self.applicable_combo.currentIndexChanged.connect(self.on_applicable_changed)
-        self.btn_apply_power.clicked.connect(self.on_apply_power)
+        self.btn_power_on.clicked.connect(self.on_power_on_clicked)
+        self.btn_power_off.clicked.connect(self.on_power_off_clicked)
 
     # ------------------------------------------------------------------
     def _refresh_serial_ports(self, default: str = "") -> None:
@@ -454,7 +458,7 @@ class GimbalControlsDialog(QtWidgets.QDialog):
             "init_pitch_deg": float(self.pitch.value()),
             "init_yaw_deg": float(self.yaw.value()),
             "max_rate_dps": float(self.max_rate.value()),
-            "power_on": self.power_on.isChecked(),
+            "power_on": self._power_on_flag,
             "serial_port": self.serial_port.currentText().strip(),
             "serial_baud": int(self.serial_baud.value()),
             "mav_sysid": int(self.mav_sysid.value()),
@@ -466,6 +470,10 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         values["generator_ip"] = self.bundle.network.ip
         values["generator_port"] = self.bundle.network.port
         return values
+
+    def _update_power_state_label(self) -> None:
+        state_text = "ON" if self._power_on_flag else "OFF"
+        self.lbl_power_state.setText(f"현재 전원 상태: {state_text}")
 
     def _build_preset_storage(self) -> Dict[str, Any]:
         slots = [preset.to_config() if preset else None for preset in self.bundle.presets]
@@ -547,7 +555,7 @@ class GimbalControlsDialog(QtWidgets.QDialog):
             init_pitch_deg=float(self.pitch.value()),
             init_yaw_deg=float(self.yaw.value()),
             max_rate_dps=float(self.max_rate.value()),
-            power_on=self.power_on.isChecked(),
+            power_on=self._power_on_flag,
             serial_port=self.serial_port.currentText().strip(),
             serial_baud=int(self.serial_baud.value()),
             mav_sysid=int(self.mav_sysid.value()),
@@ -610,26 +618,55 @@ class GimbalControlsDialog(QtWidgets.QDialog):
     def on_applicable_changed(self, index: int) -> None:
         self.bundle.applicable_index = index
 
-    def on_apply_power(self) -> None:
-        desired = self.power_on.isChecked()
+    def on_power_on_clicked(self) -> None:
+        self._apply_power_command(True)
+
+    def on_power_off_clicked(self) -> None:
+        self._apply_power_command(False)
+
+    def _resolve_power_target_codes(self) -> Tuple[int, int]:
+        idx = max(0, min(self.bundle.selected_index, MAX_SENSOR_PRESETS - 1))
+        preset = self.bundle.presets[idx] if idx < len(self.bundle.presets) else None
+        if preset:
+            data = preset.data
+            return int(data.sensor_type), int(data.sensor_id)
+        return int(self.sensor_type.currentIndex()), int(self.sensor_id.value())
+
+    def _apply_power_command(self, desired: bool) -> None:
+        sensor_type, sensor_id = self._resolve_power_target_codes()
         packet: Optional[bytes] = None
         try:
+            if hasattr(self.gimbal, "update_settings"):
+                self.gimbal.update_settings({"sensor_type": sensor_type, "sensor_id": sensor_id})
             if hasattr(self.gimbal, "send_power"):
-                packet = self.gimbal.send_power(desired)
+                packet = self.gimbal.send_power(desired, sensor_type=sensor_type, sensor_id=sensor_id)
             elif hasattr(self.gimbal, "build_power_packet"):
-                packet = self.gimbal.build_power_packet(desired)  # type: ignore[attr-defined]
+                packet = self.gimbal.build_power_packet(desired, sensor_type=sensor_type, sensor_id=sensor_id)  # type: ignore[attr-defined]
             elif hasattr(self.gimbal, "get_power_packet_example"):
-                raw = self.gimbal.get_power_packet_example(desired)  # type: ignore[attr-defined]
+                raw = self.gimbal.get_power_packet_example(desired, sensor_type=sensor_type, sensor_id=sensor_id)  # type: ignore[attr-defined]
                 packet = bytes(raw)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Error", f"Power command failed:\n{exc}")
             return
 
-        message = f"Sensor power {'ON' if desired else 'OFF'} applied."
+        self._power_on_flag = bool(desired)
+        self._update_power_state_label()
+        preset = (
+            self.bundle.presets[self.bundle.selected_index]
+            if 0 <= self.bundle.selected_index < len(self.bundle.presets)
+            else None
+        )
+        if preset:
+            preset.data.power_on = self._power_on_flag
+        self.cfg.setdefault("gimbal", {})["power_on"] = self._power_on_flag
+
+        message = (
+            f"Sensor power {'ON' if desired else 'OFF'} applied to sensor {sensor_type}/{sensor_id}."
+        )
         if packet is not None:
             hex_bytes = " ".join(f"0x{b:02X}" for b in packet)
             message += f"\nPacket bytes: {hex_bytes}"
-        QtWidgets.QMessageBox.information(self, "Apply Power", message)
+        QtWidgets.QMessageBox.information(self, "Power Control", message)
 
     def _on_preset_selected(self, idx: int, checked: bool) -> None:
         if not checked:
@@ -652,7 +689,8 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self.pitch.setValue(data.init_pitch_deg)
         self.yaw.setValue(data.init_yaw_deg)
         self.max_rate.setValue(data.max_rate_dps)
-        self.power_on.setChecked(data.power_on)
+        self._power_on_flag = bool(data.power_on)
+        self._update_power_state_label()
         if data.serial_port:
             idx = self.serial_port.findText(data.serial_port)
             if idx >= 0:

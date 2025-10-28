@@ -114,7 +114,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preview_lock = threading.Lock()
         self._current_zoom_value = float(self.cfg.get("gimbal", {}).get("zoom_scale", 1.0))
         self._preview_target_size = QtCore.QSize(640, 480)
-        self._server_toggle_in_progress = False
+        self._disconnect_in_progress = False
         self._background_watchers: list[QtCore.QFutureWatcher] = []
 
         gimbal_cfg = self.cfg.setdefault("gimbal", {})
@@ -194,8 +194,8 @@ class MainWindow(QtWidgets.QMainWindow):
         bridge_buttons.setContentsMargins(0, 0, 0, 0)
         bridge_buttons.setSpacing(6)
 
-        self.btn_server = QtWidgets.QPushButton("Start Image Stream Module")
-        self.btn_server.clicked.connect(self.on_toggle_server)
+        self.btn_server = QtWidgets.QPushButton("Disconnect Image Stream Module")
+        self.btn_server.clicked.connect(self.on_disconnect_stream)
         bridge_buttons.addWidget(self.btn_server)
 
         self.btn_bridge = QtWidgets.QPushButton("Image Stream Settings")
@@ -345,6 +345,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_zoom_value = value
         self.lbl_zoom.setText(f"Zoom: {value:.2f}x")
 
+    def _sync_zoom_from_status(self, value: float) -> None:
+        if abs(value - self._current_zoom_value) < 1e-3:
+            return
+        if self.zoom_state is not None:
+            self.zoom_state.set(value)
+        else:
+            self._apply_zoom_value(value)
+
     def _install_preview_bridge(self) -> None:
         try:
             self.bridge.preview_cb = self.on_preview
@@ -446,9 +454,6 @@ class MainWindow(QtWidgets.QMainWindow):
             running = bool(getattr(self.bridge, "is_server_running", None) and self.bridge.is_server_running.is_set())
         except Exception:
             running = False
-        btn_text = "Stop Image Stream Module" if running else "Start Image Stream Module"
-        self.btn_server.setText(btn_text)
-
         status = getattr(self.bridge, "get_runtime_status", None)
         if callable(status):
             try:
@@ -457,21 +462,31 @@ class MainWindow(QtWidgets.QMainWindow):
                 st = {}
         else:
             st = {}
+        client_connected = bool(st.get("tcp_client_connected"))
+        if not self._disconnect_in_progress:
+            self.btn_server.setEnabled(client_connected)
+
         mode = st.get("image_source_mode", "Realtime")
         tcp_on = "ON" if st.get("tcp_listening") else "OFF"
         udp_on = "ON" if st.get("udp_listening") else "OFF"
+        client_on = "ON" if client_connected else "OFF"
         mode_label = str(mode)
         stream_state = "Running" if running else "Stopped"
         self.lbl_bridge.setText(f"Image Stream: {stream_state} · {mode_label}")
-        self.lbl_bridge_extra.setText(f"TCP {tcp_on} / UDP {udp_on}")
+        self.lbl_bridge_extra.setText(f"TCP {tcp_on} / UDP {udp_on} / Client {client_on}")
 
         gimbal_state = getattr(self.gimbal, "get_status", None)
+        gimbal_status: Optional[Dict[str, Any]]
         if callable(gimbal_state):
             try:
-                status = gimbal_state()
+                gimbal_status = gimbal_state()
             except Exception:
-                status = None
-            self.lbl_gimbal.setText(self._format_gimbal_status(status))
+                gimbal_status = None
+            self.lbl_gimbal.setText(self._format_gimbal_status(gimbal_status))
+            if isinstance(gimbal_status, dict):
+                zoom_value = gimbal_status.get("zoom_scale")
+                if isinstance(zoom_value, (int, float)):
+                    self._sync_zoom_from_status(float(zoom_value))
         relay_state = getattr(self.relay, "get_status", None)
         if callable(relay_state):
             try:
@@ -629,34 +644,41 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Button handlers
     # ------------------------------------------------------------------
-    def on_toggle_server(self) -> None:
-        if self._server_toggle_in_progress:
+    def on_disconnect_stream(self) -> None:
+        if self._disconnect_in_progress:
             return
-        self._server_toggle_in_progress = True
+        self._disconnect_in_progress = True
         self.btn_server.setEnabled(False)
 
-        def worker() -> Optional[Exception]:
-            error: Optional[Exception] = None
+        def worker() -> tuple[Optional[Exception], bool]:
+            disconnect = getattr(self.bridge, "disconnect_tcp_client", None)
+            if not callable(disconnect):
+                return RuntimeError("disconnect not supported"), False
             try:
-                running = bool(getattr(self.bridge, "is_server_running", None) and self.bridge.is_server_running.is_set())
-                if running:
-                    self.bridge.stop()
-                else:
-                    self.bridge.update_settings(self.cfg.get("bridge", {}))
-                    self.bridge.start()
+                result = bool(disconnect())
             except Exception as exc:  # pragma: no cover - runtime guard
-                error = exc
-            return error
+                return exc, False
+            return None, result
 
-        self._run_background(worker, self._toggle_finalize)
+        self._run_background(worker, self._disconnect_finalize)
 
     @QtCore.Slot(object)
-    def _toggle_finalize(self, error: Optional[Exception]) -> None:
-        self._server_toggle_in_progress = False
-        self.btn_server.setEnabled(True)
+    def _disconnect_finalize(self, payload: object) -> None:
+        self._disconnect_in_progress = False
+        error: Optional[Exception]
+        disconnected = False
+        if isinstance(payload, tuple) and len(payload) == 2:
+            maybe_error, maybe_flag = payload
+            error = maybe_error if isinstance(maybe_error, Exception) else None
+            disconnected = bool(maybe_flag)
+        else:
+            error = payload if isinstance(payload, Exception) else None
         if error is not None:
-            self.log.error("[UI] Toggle server failed: %s", error)
-            QtWidgets.QMessageBox.critical(self, "Error", f"Toggle server failed:\n{error}")
+            self.log.error("[UI] Disconnect image stream failed: %s", error)
+            QtWidgets.QMessageBox.critical(self, "Error", f"Disconnect failed:\n{error}")
+        elif not disconnected:
+            self.log.info("[UI] No TCP client to disconnect.")
+        self.btn_server.setEnabled(True)
         self._refresh_status_labels()
 
     def open_bridge_window(self) -> None:
