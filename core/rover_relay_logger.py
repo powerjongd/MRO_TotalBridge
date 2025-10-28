@@ -199,9 +199,24 @@ class RoverRelayLogger:
             self._feedback_log_queue.put(None)
         except Exception:
             pass
-        thread.wait(1500)
+        if thread.isRunning():
+            if not thread.wait(2000):
+                thread.quit()
+                if not thread.wait(2000):
+                    thread.requestInterruption()
+                    if not thread.wait(1000):
+                        thread.terminate()
+                        thread.wait(1000)
+        else:
+            thread.quit()
         thread.deleteLater()
         self._feedback_thread = None
+        worker = getattr(self, "_feedback_worker", None)
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
         self._feedback_worker = None
 
     def is_logging_active(self) -> bool:
