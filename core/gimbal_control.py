@@ -91,15 +91,51 @@ class _SimOrientationPipeline:
         bridge_pitch = pitch
         bridge_yaw = yaw
 
-        quat = tuple(float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw))
+        quat_raw = tuple(
+            float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
+        )
+
+        def _normalize_quat(
+            quat: Tuple[float, float, float, float]
+        ) -> Optional[Tuple[float, float, float, float]]:
+            norm = math.sqrt(sum(a * a for a in quat))
+            if not norm or not math.isfinite(norm):
+                return None
+            return tuple(a / norm for a in quat)
+
+        reference_tuple: Optional[Tuple[float, float, float, float]] = None
+        if reference_quat is not None:
+            reference_candidate = tuple(float(a) for a in reference_quat)
+            reference_tuple = _normalize_quat(reference_candidate)
 
         channel_key = channel or self._DEFAULT_CHANNEL
+
+        def _dot(
+            a: Tuple[float, float, float, float],
+            b: Tuple[float, float, float, float],
+        ) -> float:
+            return sum(x * y for x, y in zip(a, b))
+
         with self._lock:
             prev = self._last_quat.get(channel_key)
-            if prev is not None:
-                dot = sum(a * b for a, b in zip(quat, prev))
-                if dot < 0.0:
-                    quat = tuple(-a for a in quat)
+            dot_prev = _dot(quat_raw, prev) if prev is not None else None
+            dot_ref = (
+                _dot(quat_raw, reference_tuple)
+                if reference_tuple is not None
+                else None
+            )
+
+            sign = 1.0
+            if dot_ref is not None:
+                sign = 1.0 if dot_ref >= 0.0 else -1.0
+                if dot_prev is not None and abs(dot_prev) > abs(dot_ref):
+                    sign = 1.0 if dot_prev >= 0.0 else -1.0
+            elif dot_prev is not None:
+                sign = 1.0 if dot_prev >= 0.0 else -1.0
+            elif quat_raw[3] < 0.0:
+                sign = -1.0
+
+            quat = tuple(sign * a for a in quat_raw)
             self._last_quat[channel_key] = quat
 
         return _SimOrientation(
@@ -109,7 +145,7 @@ class _SimOrientationPipeline:
             bridge_roll=bridge_roll,
             bridge_pitch=bridge_pitch,
             bridge_yaw=bridge_yaw,
-            quat_xyzw=quat_tuple,
+            quat_xyzw=quat,
         )
 
 
@@ -1079,6 +1115,7 @@ class GimbalControl:
                             sim_yaw,
                             sim_roll,
                             channel="mavlink_target",
+                            reference_quat=tuple(float(v) for v in q),
                         )
                         with self._lock:
                             self.rpy_tgt[:] = list(orientation.bridge_rpy)
