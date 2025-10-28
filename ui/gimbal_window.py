@@ -300,6 +300,7 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self._connect_signals()
         self._refresh_preset_buttons()
         self._update_status()
+        self._update_power_state_label()
 
     # ------------------------------------------------------------------
     def _build_layout(self) -> None:
@@ -467,6 +468,10 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         values["generator_ip"] = self.bundle.network.ip
         values["generator_port"] = self.bundle.network.port
         return values
+
+    def _update_power_state_label(self) -> None:
+        state_text = "ON" if self._power_on_flag else "OFF"
+        self.lbl_power_state.setText(f"현재 전원 상태: {state_text}")
 
     def _build_preset_storage(self) -> Dict[str, Any]:
         slots = [preset.to_config() if preset else None for preset in self.bundle.presets]
