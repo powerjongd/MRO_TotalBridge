@@ -24,9 +24,9 @@ _SET_TARGET_FMT = "<hh3d3f"
 
 
 def _legacy_rpy_to_sim(roll: float, pitch: float, yaw: float) -> Tuple[float, float, float]:
-    """Map legacy roll/pitch/yaw ordering into (Pitch, Yaw, Roll)."""
+    """Map legacy roll/pitch/yaw so ``Pitch←Roll, Yaw←Pitch, Roll←Yaw``."""
 
-    return float(pitch), float(yaw), float(roll)
+    return float(roll), float(pitch), float(yaw)
 
 
 @dataclass

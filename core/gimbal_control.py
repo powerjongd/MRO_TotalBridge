@@ -1182,9 +1182,9 @@ class GimbalControl:
     def _legacy_rpy_to_sim(
         roll_deg: float, pitch_deg: float, yaw_deg: float
     ) -> Tuple[float, float, float]:
-        """Map legacy roll/pitch/yaw angles into (Pitch, Yaw, Roll) order."""
+        """Map legacy roll/pitch/yaw angles so ``Pitch←Roll, Yaw←Pitch, Roll←Yaw``."""
 
-        return float(pitch_deg), float(yaw_deg), float(roll_deg)
+        return float(roll_deg), float(pitch_deg), float(yaw_deg)
 
     @staticmethod
     def _bridge_to_sim_rpy(
@@ -1201,7 +1201,7 @@ class GimbalControl:
         """Convert simulator ``FRotator`` angles back into bridge (roll, pitch, yaw)."""
 
         # Inverse of :meth:`_bridge_to_sim_rpy`.
-        return float(sim_roll_deg), float(sim_pitch_deg), float(sim_yaw_deg)
+        return float(sim_pitch_deg), float(sim_yaw_deg), float(sim_roll_deg)
 
     def _pack_gimbal_ctrl(
         self,
