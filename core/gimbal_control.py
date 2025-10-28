@@ -95,52 +95,48 @@ class _SimOrientationPipeline:
             float(a) for a in euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
         )
 
-        reference_tuple: Optional[Tuple[float, float, float, float]]
-        if reference_quat is None:
-            reference_tuple = None
-        else:
-            reference_tuple = tuple(float(a) for a in reference_quat)
+        def _normalize_quat(
+            quat: Tuple[float, float, float, float]
+        ) -> Optional[Tuple[float, float, float, float]]:
+            norm = math.sqrt(sum(a * a for a in quat))
+            if not norm or not math.isfinite(norm):
+                return None
+            return tuple(a / norm for a in quat)
 
-        def _score_candidate(
-            candidate: Tuple[float, float, float, float],
-            *,
-            previous: Optional[Tuple[float, float, float, float]],
-        ) -> float:
-            score = 0.0
-            if reference_tuple is not None:
-                score += sum(a * b for a, b in zip(candidate, reference_tuple))
-            if previous is not None:
-                score += sum(a * b for a, b in zip(candidate, previous))
-            if candidate[3] >= 0.0:
-                score += 1e-12
-            return score
-
-        def _resolve_shortest_arc(
-            candidate: Tuple[float, float, float, float],
-            basis: Optional[Tuple[float, float, float, float]],
-        ) -> Tuple[float, float, float, float]:
-            if basis is None:
-                return candidate
-            dot = sum(a * b for a, b in zip(candidate, basis))
-            if dot < 0.0:
-                return tuple(-a for a in candidate)
-            return candidate
-
-        reference_tuple = (
-            tuple(float(a) for a in reference_quat)
-            if reference_quat is not None
-            else None
-        )
+        reference_tuple: Optional[Tuple[float, float, float, float]] = None
+        if reference_quat is not None:
+            reference_candidate = tuple(float(a) for a in reference_quat)
+            reference_tuple = _normalize_quat(reference_candidate)
 
         channel_key = channel or self._DEFAULT_CHANNEL
+
+        def _dot(
+            a: Tuple[float, float, float, float],
+            b: Tuple[float, float, float, float],
+        ) -> float:
+            return sum(x * y for x, y in zip(a, b))
+
         with self._lock:
             quat = _resolve_shortest_arc(quat, reference_tuple)
             prev = self._last_quat.get(channel_key)
-            candidates = (quat_raw, tuple(-a for a in quat_raw))
-            quat = max(
-                candidates,
-                key=lambda cand: _score_candidate(cand, previous=prev),
+            dot_prev = _dot(quat_raw, prev) if prev is not None else None
+            dot_ref = (
+                _dot(quat_raw, reference_tuple)
+                if reference_tuple is not None
+                else None
             )
+
+            sign = 1.0
+            if dot_ref is not None:
+                sign = 1.0 if dot_ref >= 0.0 else -1.0
+                if dot_prev is not None and abs(dot_prev) > abs(dot_ref):
+                    sign = 1.0 if dot_prev >= 0.0 else -1.0
+            elif dot_prev is not None:
+                sign = 1.0 if dot_prev >= 0.0 else -1.0
+            elif quat_raw[3] < 0.0:
+                sign = -1.0
+
+            quat = tuple(sign * a for a in quat_raw)
             self._last_quat[channel_key] = quat
 
         return _SimOrientation(
