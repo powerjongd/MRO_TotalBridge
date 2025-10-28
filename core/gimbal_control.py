@@ -117,6 +117,7 @@ class _SimOrientationPipeline:
             return sum(x * y for x, y in zip(a, b))
 
         with self._lock:
+            quat = _resolve_shortest_arc(quat, reference_tuple)
             prev = self._last_quat.get(channel_key)
             dot_prev = _dot(quat_raw, prev) if prev is not None else None
             dot_ref = (
