@@ -115,8 +115,26 @@ class _SimOrientationPipeline:
                 score += 1e-12
             return score
 
+        def _resolve_shortest_arc(
+            candidate: Tuple[float, float, float, float],
+            basis: Optional[Tuple[float, float, float, float]],
+        ) -> Tuple[float, float, float, float]:
+            if basis is None:
+                return candidate
+            dot = sum(a * b for a, b in zip(candidate, basis))
+            if dot < 0.0:
+                return tuple(-a for a in candidate)
+            return candidate
+
+        reference_tuple = (
+            tuple(float(a) for a in reference_quat)
+            if reference_quat is not None
+            else None
+        )
+
         channel_key = channel or self._DEFAULT_CHANNEL
         with self._lock:
+            quat = _resolve_shortest_arc(quat, reference_tuple)
             prev = self._last_quat.get(channel_key)
             candidates = (quat_raw, tuple(-a for a in quat_raw))
             quat = max(
