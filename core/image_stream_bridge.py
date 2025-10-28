@@ -142,6 +142,7 @@ class ImageStreamBridge:
         self.is_server_running = threading.Event()
         self._tcp_sock: Optional[socket.socket] = None
         self._udp_sock: Optional[socket.socket] = None
+        self._client_lock = threading.Lock()
         self._client_conn: Optional[socket.socket] = None
 
         self._tcp_thread: Optional[threading.Thread] = None
@@ -207,16 +208,19 @@ class ImageStreamBridge:
         self.is_server_running.clear()
 
         # close client first
-        if self._client_conn:
-            try:
-                self._client_conn.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            try:
-                self._client_conn.close()
-            except Exception:
-                pass
+        client: Optional[socket.socket]
+        with self._client_lock:
+            client = self._client_conn
             self._client_conn = None
+        if client:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                client.close()
+            except Exception:
+                pass
 
         # wake up accept()
         if self._tcp_sock:
@@ -236,6 +240,25 @@ class ImageStreamBridge:
             thread.join(timeout=1.5)
         self._emit_status("STOPPED")
         self.log("[BRIDGE] stopped")
+
+    def disconnect_tcp_client(self) -> bool:
+        """Force-close the current TCP client connection if present."""
+
+        with self._client_lock:
+            conn = self._client_conn
+            self._client_conn = None
+        if not conn:
+            return False
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        self.log("[BRIDGE] TCP client disconnect requested")
+        return True
 
     def update_settings(self, settings: Dict[str, Any]) -> None:
         self.ip = settings.get("ip", self.ip)
@@ -357,7 +380,8 @@ class ImageStreamBridge:
         while self.is_server_running.is_set():
             try:
                 conn, addr = self._tcp_sock.accept()
-                self._client_conn = conn
+                with self._client_lock:
+                    self._client_conn = conn
                 self.log(f"[BRIDGE] TCP client connected: {addr}")
                 t = threading.Thread(target=self._handle_client_thread, args=(conn,), daemon=True)
                 t.start()
@@ -409,7 +433,9 @@ class ImageStreamBridge:
                 conn.close()
             except Exception:
                 pass
-            self._client_conn = None
+            with self._client_lock:
+                if self._client_conn is conn:
+                    self._client_conn = None
             self.log("[BRIDGE] TCP client disconnected")
             
     def _process_command(self, payload: bytes, conn: socket.socket) -> None:
@@ -891,7 +917,7 @@ class ImageStreamBridge:
     
     def get_runtime_status(self) -> Dict[str, Any]:
         with self._lock:
-            return {
+            status = {
                 "next_image_number": self._next_image_number,
                 "last_image_kb": self._last_image_meta["kb"],
                 "last_image_received_at": (
@@ -907,6 +933,9 @@ class ImageStreamBridge:
                 "active_library_dir": self.realtime_dir if self.image_source_mode == "realtime" else self.predefined_dir,
                 "zoom_scale": self._zoom_scale,
             }
+        with self._client_lock:
+            status["tcp_client_connected"] = self._client_conn is not None
+        return status
 
     def set_zoom_scale(self, zoom: float) -> None:
         value = max(1.0, float(zoom))

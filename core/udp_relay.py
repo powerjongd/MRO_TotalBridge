@@ -1384,7 +1384,6 @@ class UdpRelay:
             )
             return
 
-        tail_payload_offset = payload_len - relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE
         header_consumed = False
         if payload_len >= relay_icd.GAZEBO_STRUCT_SIZE:
             try:
@@ -1435,41 +1434,64 @@ class UdpRelay:
                     )
 
         if not header_consumed:
-            try:
-                (
-                    time_usec,
-                    px,
-                    py,
-                    pz,
-                    qw,
-                    qx,
-                    qy,
-                    qz,
-                    ax,
-                    ay,
-                    az,
-                    wx,
-                    wy,
-                    wz,
-                ) = struct.unpack_from(
-                    relay_icd.GAZEBO_PAYLOAD_NO_HEADER_FMT,
-                    payload_view,
-                    tail_payload_offset,
-                )
-            except struct.error as exc:
+            candidate_offsets = [0]
+            tail_offset = payload_len - relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE
+            if tail_offset > 0:
+                candidate_offsets.append(tail_offset)
+            payload_values: Optional[Tuple[Any, ...]] = None
+            used_offset = 0
+            last_error: Optional[Exception] = None
+            for offset in candidate_offsets:
+                try:
+                    payload_values = struct.unpack_from(
+                        relay_icd.GAZEBO_PAYLOAD_NO_HEADER_FMT,
+                        payload_view,
+                        offset,
+                    )
+                except struct.error as exc:
+                    last_error = exc
+                    continue
+                else:
+                    used_offset = offset
+                    break
+            if payload_values is None:
+                err_text = last_error or "unknown"
                 self._note_gazebo_icd_mismatch(
-                    f"payload unpack error: {exc}",
+                    f"payload unpack error: {err_text}",
                     payload_len,
                     expected=f">={relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE}",
                 )
                 return
 
+            (
+                time_usec,
+                px,
+                py,
+                pz,
+                qw,
+                qx,
+                qy,
+                qz,
+                ax,
+                ay,
+                az,
+                wx,
+                wy,
+                wz,
+            ) = payload_values
+
             if not self._gazebo_payload_fallback_warned:
                 self._gazebo_payload_fallback_warned = True
-                if tail_payload_offset:
+                if used_offset > 0:
                     self.log(
                         f"[RELAY] Gazebo packet length {payload_len} bytes; "
                         "aligning to trailing payload fields."
+                    )
+                elif payload_len > relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE:
+                    trimmed = payload_len - relay_icd.GAZEBO_PAYLOAD_NO_HEADER_SIZE
+                    self.log(
+                        f"[RELAY] Gazebo packet length {payload_len} bytes; "
+                        f"trimming trailing {trimmed} bytes for payload decode."
                     )
                 else:
                     self.log(
