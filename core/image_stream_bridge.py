@@ -29,16 +29,17 @@ from network.image_stream_icd import (
     CMD_SET_COUNT,
     CMD_GET_IMG_NUM,
     CMD_REQ_SEND_IMG,
-    CMD_SET_ZOOM_RATIO,
-    CMD_GET_ZOOM_RATIO,
+    CMD_SET_ZOOM_LENS_DIST,
+    CMD_GET_ZOOM_LENS_DIST,
     CMD_IMG_NUM_RESPONSE,
     CMD_FILE_IMG_TRANSFER,
-    CMD_ACK_ZOOM_RATIO,
+    CMD_ACK_ZOOM_LENS_DIST,
     COMMAND_NAMES,
     UDP_HEADER_SIZE as ICD_UDP_HEADER_SIZE,
     parse_udp_header,
     pack_tcp_response,
 )
+from utils.zoom import normalize_zoom_lens_dist, zoom_scale_to_lens_mm
 
 
 __all__ = ["ImageStreamBridge", "ImageBridgeCore"]
@@ -102,6 +103,7 @@ class ImageStreamBridge:
         self._predefined_numbers: list[int] = []
 
         self._zoom_scale = max(1.0, float(settings.get("zoom_scale", 1.0)))
+        self._zoom_lens_mm = zoom_scale_to_lens_mm(self._zoom_scale, clamp=False)
         self._zoom_requires_processing = self._zoom_scale > 1.0001
         self._logged_zoom_warn = False
 
@@ -485,23 +487,22 @@ class ImageStreamBridge:
         elif cmd_id == CMD_SET_GIMBAL:
             self._handle_set_gimbal(cmd_payload)
 
-        elif cmd_id == CMD_SET_ZOOM_RATIO:
+        elif cmd_id == CMD_SET_ZOOM_LENS_DIST:
             if len(cmd_payload) < 4:
-                self.log(f"[BRIDGE] {cmd_name}: missing float zoom_ratio")
+                self.log(f"[BRIDGE] {cmd_name}: missing float zoom_lens_dist")
                 return
-            (zoom_ratio,) = struct.unpack("<f", cmd_payload[:4])
-            self.set_zoom_scale(zoom_ratio)
-            with self._lock:
-                applied = self._zoom_scale
-            self.log(f"[BRIDGE] {cmd_name} -> request={zoom_ratio:.3f}, applied={applied:.3f}")
-            self._send_zoom_ratio_ack(conn, applied)
+            (requested_mm,) = struct.unpack("<f", cmd_payload[:4])
+            applied_mm, applied_scale = self.set_zoom_lens_distance(requested_mm)
+            self.log(
+                f"[BRIDGE] {cmd_name} -> request={requested_mm:.1f}mm, applied={applied_mm:.1f}mm ({applied_scale:.2f}x)"
+            )
+            self._send_zoom_lens_ack(conn, applied_mm)
 
-        elif cmd_id == CMD_GET_ZOOM_RATIO:
+        elif cmd_id == CMD_GET_ZOOM_LENS_DIST:
             _expect_uint8_one(cmd_payload, cmd_name)
-            with self._lock:
-                applied = self._zoom_scale
-            self.log(f"[BRIDGE] {cmd_name} -> {applied:.3f}")
-            self._send_zoom_ratio_ack(conn, applied)
+            response_mm = self._get_tcp_zoom_lens_mm()
+            self.log(f"[BRIDGE] {cmd_name} -> {response_mm:.1f}mm")
+            self._send_zoom_lens_ack(conn, response_mm)
 
         else:
             self.log(f"[BRIDGE] unknown cmd_id: {cmd_name}")
@@ -932,6 +933,7 @@ class ImageStreamBridge:
                 "predefined_dir": self.predefined_dir,
                 "active_library_dir": self.realtime_dir if self.image_source_mode == "realtime" else self.predefined_dir,
                 "zoom_scale": self._zoom_scale,
+                "zoom_lens_mm": self._zoom_lens_mm,
             }
         with self._client_lock:
             status["tcp_client_connected"] = self._client_conn is not None
@@ -941,11 +943,15 @@ class ImageStreamBridge:
         value = max(1.0, float(zoom))
         with self._lock:
             if abs(value - self._zoom_scale) < 1e-3:
+                self._zoom_lens_mm = zoom_scale_to_lens_mm(self._zoom_scale, clamp=False)
                 return
             self._zoom_scale = value
+            self._zoom_lens_mm = zoom_scale_to_lens_mm(value, clamp=False)
             self._zoom_requires_processing = value > 1.0001
             latest_raw = self._latest_raw_jpeg
-        self.log(f"[BRIDGE] zoom scale -> {self._zoom_scale:.2f}x")
+            lens_mm = self._zoom_lens_mm
+            scale = self._zoom_scale
+        self.log(f"[BRIDGE] zoom scale -> x{scale:.2f} ({lens_mm:.1f}mm)")
         if latest_raw:
             self._publish_zoomed_frame(latest_raw, update_timestamp=False)
         with self._zoom_cb_lock:
@@ -956,15 +962,29 @@ class ImageStreamBridge:
             except Exception:
                 pass
 
-    def _send_zoom_ratio_ack(self, conn: socket.socket, zoom_ratio: float) -> None:
+    def set_zoom_lens_distance(self, lens_mm: float) -> tuple[float, float]:
+        applied_mm, scale = normalize_zoom_lens_dist(lens_mm)
+        self.set_zoom_scale(scale)
+        with self._lock:
+            applied_scale = self._zoom_scale
+        return applied_mm, applied_scale
+
+    def _get_tcp_zoom_lens_mm(self) -> float:
+        with self._lock:
+            scale = self._zoom_scale
+        clamped_mm = zoom_scale_to_lens_mm(scale, clamp=True)
+        normalized_mm, _ = normalize_zoom_lens_dist(clamped_mm)
+        return normalized_mm
+
+    def _send_zoom_lens_ack(self, conn: socket.socket, zoom_lens_mm: float) -> None:
         ts_sec, ts_nsec = int(time.time()), time.time_ns() % 1_000_000_000
-        data = struct.pack("<f", float(zoom_ratio))
-        frame = pack_tcp_response(CMD_ACK_ZOOM_RATIO, data, ts_sec=ts_sec, ts_nsec=ts_nsec)
+        data = struct.pack("<f", float(zoom_lens_mm))
+        frame = pack_tcp_response(CMD_ACK_ZOOM_LENS_DIST, data, ts_sec=ts_sec, ts_nsec=ts_nsec)
         try:
             conn.sendall(frame)
-            self.log(f"[BRIDGE] Ack_Zoomratio sent: {zoom_ratio:.3f}")
+            self.log(f"[BRIDGE] Ack_ZoomLensDist sent: {zoom_lens_mm:.1f}mm")
         except Exception as e:
-            self.log(f"[BRIDGE] send Ack_Zoomratio failed: {e}")
+            self.log(f"[BRIDGE] send Ack_ZoomLensDist failed: {e}")
 
     def _get_zoom_state(self) -> tuple[float, bool]:
         with self._lock:

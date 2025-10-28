@@ -17,6 +17,7 @@ except ImportError:
     from serial.serialutil import SerialException
 
 from utils.helpers import euler_to_quat, wrap_angle_deg
+from utils.zoom import zoom_scale_to_lens_mm
 from network.bridge_tcp import parse_bridge_tcp_command
 from network.gimbal_icd import (
     MC_HB_TYPE,
@@ -738,6 +739,7 @@ class GimbalControl:
                 "mav_sysid": self.mav_sys_id,
                 "mav_compid": self.mav_comp_id,
                 "zoom_scale": self.zoom_scale,
+                "zoom_lens_mm": zoom_scale_to_lens_mm(self.zoom_scale, clamp=False),
                 "tcp_bind": f"{self.rx_ip}:{self.rx_port}",
             }
 
@@ -892,7 +894,8 @@ class GimbalControl:
                 self.log("[GIMBAL] TCP SET_ZOOM invalid payload")
                 return
             self._set_zoom_scale(zoom.zoom_scale)
-            self.log(f"[GIMBAL] TCP zoom scale -> {self.zoom_scale:.2f}")
+            lens_mm = zoom_scale_to_lens_mm(self.zoom_scale, clamp=False)
+            self.log(f"[GIMBAL] TCP zoom -> x{self.zoom_scale:.2f} ({lens_mm:.1f}mm)")
             self._send_status_message(conn)
         elif command.cmd_id == TCP_CMD_GET_STATUS:
             self._send_status_message(conn)
