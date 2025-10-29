@@ -530,6 +530,41 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
+    def _send_preset_pose_udp(
+        self, preset: SensorPresetData, target_ip: str, target_port: int
+    ) -> bool:
+        if not hasattr(self.gimbal, "send_udp_preset"):
+            return False
+        try:
+            sim_pitch, sim_yaw, sim_roll = remap_input_rpy(
+                preset.init_roll_deg, preset.init_pitch_deg, preset.init_yaw_deg
+            )
+            self.gimbal.send_udp_preset(
+                preset.sensor_type,
+                preset.sensor_id,
+                preset.pos_x,
+                preset.pos_y,
+                preset.pos_z,
+                sim_pitch,
+                sim_yaw,
+                sim_roll,
+                ip=target_ip,
+                port=int(target_port),
+            )
+            return True
+        except Exception as exc:
+            try:
+                if hasattr(self.log, "warning"):
+                    self.log.warning(
+                        "Failed to send preset %d/%d over UDP: %s",
+                        preset.sensor_type,
+                        preset.sensor_id,
+                        exc,
+                    )
+            except Exception:
+                pass
+            return False
+
     def _update_status(self) -> None:
         try:
             status = self.gimbal.get_status() if hasattr(self.gimbal, "get_status") else {}
@@ -587,11 +622,32 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         self._apply_to_runtime(values)
 
     def on_apply_all_presets(self) -> None:
+        try:
+            values = self._collect_current_values()
+        except Exception:
+            values = {}
+        network = values.get("network") if isinstance(values.get("network"), dict) else None
+        target_ip = network.get("ip") if network else self.bundle.network.ip
+        target_port = network.get("port") if network else self.bundle.network.port
+        if not target_ip:
+            target_ip = self.bundle.network.ip
+        try:
+            target_port = int(target_port)
+        except Exception:
+            target_port = self.bundle.network.port
+        try:
+            if hasattr(self.gimbal, "update_settings"):
+                self.gimbal.update_settings(
+                    {"generator_ip": target_ip, "generator_port": target_port}
+                )
+        except Exception:
+            pass
         for preset in self.bundle.presets:
             if not preset:
                 continue
-            values = preset.data.to_dict()
-            self._apply_to_runtime(values)
+            if not self._send_preset_pose_udp(preset.data, target_ip, target_port):
+                values = preset.data.to_dict()
+                self._apply_to_runtime(values)
 
     def on_refresh_ports(self) -> None:
         self._refresh_serial_ports(default=self.serial_port.currentText())
