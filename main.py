@@ -84,6 +84,7 @@ class ServiceController(QtCore.QObject):
         )
 
         self.zoom_state.subscribe(self.bridge.set_zoom_scale)
+        self.zoom_state.subscribe(self.gimbal.set_zoom_scale)
         self.bridge.attach_gimbal_controller(self.gimbal)
 
         try:
