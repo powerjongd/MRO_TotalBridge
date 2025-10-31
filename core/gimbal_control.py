@@ -141,11 +141,16 @@ class _SimOrientationPipeline:
         )
 
 
-def _quat_to_frotator_deg(qx: float, qy: float, qz: float, qw: float) -> Tuple[float, float, float]:
-    """Return Unreal-style ``(Pitch, Yaw, Roll)`` angles derived from ``(x, y, z, w)``."""
+def _quat_to_frotator_deg(qw: float, qx: float, qy: float, qz: float) -> Tuple[float, float, float]:
+    """Return Unreal-style ``(Pitch, Yaw, Roll)`` angles derived from ``(w, x, y, z)``."""
 
-    n = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw) or 1.0
-    x, y, z, w = qx / n, qy / n, qz / n, qw / n
+    # MAVLink ``GIMBAL_MANAGER_SET_ATTITUDE`` (and related commands) publish the
+    # quaternion as ``q[0] = w`` followed by the vector part.  The simulator
+    # pipeline expects an Unreal ``FRotator`` so convert while preserving that
+    # ordering here instead of forcing every caller to reshuffle the tuple.
+
+    n = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) or 1.0
+    w, x, y, z = qw / n, qx / n, qy / n, qz / n
 
     # Standard roll (X), pitch (Y), yaw (Z) extraction.
     sinr_cosp = 2.0 * (w * x + y * z)
