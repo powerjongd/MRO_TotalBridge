@@ -721,11 +721,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_gimbal_method_changed(self) -> None:
         method = "tcp" if self.rb_tcp.isChecked() else "mavlink"
-        self.cfg.setdefault("gimbal", {})["control_method"] = method
         try:
             self.gimbal.update_control_method(method)
-        except Exception:
-            pass
+        except Exception as exc:
+            actual = getattr(self.gimbal, "control_method", "tcp")
+            self.log.error("[UI] Gimbal control switch failed: %s", exc)
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Gimbal",
+                f"제어 모드 전환에 실패했습니다.\n{exc}",
+            )
+            with QtCore.QSignalBlocker(self.rb_tcp), QtCore.QSignalBlocker(self.rb_mav):
+                if actual == "mavlink":
+                    self.rb_mav.setChecked(True)
+                else:
+                    self.rb_tcp.setChecked(True)
+            self.cfg.setdefault("gimbal", {})["control_method"] = actual
+            return
+        self.cfg.setdefault("gimbal", {})["control_method"] = method
+        self._refresh_status_labels()
 
     # ------------------------------------------------------------------
     # Qt overrides

@@ -371,6 +371,14 @@ class GimbalControl:
 
     # -------- public controls --------
 
+    def update_control_method(self, method: str) -> None:
+        """Switch between TCP and MAVLink control modes at runtime."""
+
+        requested = self._normalize_control_method(method)
+        if requested == self.control_method:
+            return
+        self.update_settings({"control_method": requested})
+
     def _apply_control_method_runtime(self, restart: bool = False) -> None:
         if self.control_method == "mavlink":
             if restart:
