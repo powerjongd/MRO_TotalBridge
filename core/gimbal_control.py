@@ -8,7 +8,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional, Dict, Any, List, Set, Tuple
+from typing import Callable, Optional, Dict, Any, Iterable, List, Set, Tuple
 
 from pymavlink import mavutil
 try:
@@ -55,6 +55,34 @@ class _SimOrientation:
     @property
     def bridge_rpy(self) -> Tuple[float, float, float]:
         return (self.bridge_roll, self.bridge_pitch, self.bridge_yaw)
+
+
+def _format_value(
+    value: Any,
+    *,
+    to_degrees: bool = False,
+    precision: int = 1,
+    suffix: str = "",
+) -> str:
+    if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return "--"
+    numeric = float(value)
+    if to_degrees:
+        numeric = math.degrees(numeric)
+    return f"{numeric:.{precision}f}{suffix}"
+
+
+def _format_sequence(
+    values: Iterable[Any],
+    *,
+    to_degrees: bool = False,
+    precision: int = 1,
+    suffix: str = "",
+) -> str:
+    return ", ".join(
+        _format_value(v, to_degrees=to_degrees, precision=precision, suffix=suffix)
+        for v in values
+    )
 
 
 class _SimOrientationPipeline:
@@ -1032,11 +1060,46 @@ class GimbalControl:
                         self.hb_rx_ok = True
                         self.last_hb_rx = time.time()
                 elif t == "GIMBAL_DEVICE_SET_ATTITUDE":
-                    q = getattr(m, "q", [float("nan")]*4)
-                    avx = getattr(m, "angular_velocity_x", float("nan"))
+                    raw_q = getattr(m, "q", [float("nan")] * 4)
+                    if not isinstance(raw_q, (list, tuple)):
+                        raw_q = [float("nan")] * 4
+                    q_list = list(raw_q)[:4]
+                    while len(q_list) < 4:
+                        q_list.append(float("nan"))
+                    ang_vel = (
+                        float(getattr(m, "angular_velocity_x", float("nan"))),
+                        float(getattr(m, "angular_velocity_y", float("nan"))),
+                        float(getattr(m, "angular_velocity_z", float("nan"))),
+                    )
+                    ang_acc = (
+                        float(getattr(m, "angular_acceleration_x", float("nan"))),
+                        float(getattr(m, "angular_acceleration_y", float("nan"))),
+                        float(getattr(m, "angular_acceleration_z", float("nan"))),
+                    )
+                    target_sys = int(getattr(m, "target_system", -1))
+                    target_comp = int(getattr(m, "target_component", -1))
+                    flags = int(getattr(m, "flags", 0))
+                    time_boot_us = getattr(m, "time_boot_us", None)
+                    if (
+                        isinstance(time_boot_us, (int, float))
+                        and math.isfinite(float(time_boot_us))
+                        and float(time_boot_us) >= 0.0
+                    ):
+                        time_boot_desc = f"{float(time_boot_us) / 1_000_000.0:.3f}s"
+                    else:
+                        time_boot_desc = "--"
+                    vel_str = _format_sequence(ang_vel, to_degrees=True, suffix="°/s")
+                    acc_str = _format_sequence(ang_acc, to_degrees=True, suffix="°/s²")
+                    quat_str = _format_sequence(q_list, precision=3)
+                    self.log(
+                        f"[GIMBAL] RX CMD target={target_sys}/{target_comp} flags=0x{flags:04X} "
+                        f"time_boot={time_boot_desc} | ang_vel={vel_str} | ang_acc={acc_str} | quat={quat_str}"
+                    )
                     # mode b: q 유효 → 목표 각도 설정
-                    if not any(math.isnan(v) for v in q):
-                        sim_pitch, sim_yaw, sim_roll = _quat_to_frotator_deg(q[0], q[1], q[2], q[3])
+                    if not any(math.isnan(v) for v in q_list):
+                        sim_pitch, sim_yaw, sim_roll = _quat_to_frotator_deg(
+                            q_list[0], q_list[1], q_list[2], q_list[3]
+                        )
                         orientation = self._orientation_pipeline.build_from_sim(
                             sim_pitch, sim_yaw, sim_roll
                         )
