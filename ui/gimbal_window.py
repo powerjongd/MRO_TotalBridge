@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from PySide6 import QtWidgets
 from serial.tools import list_ports
 
-from utils.helpers import remap_input_rpy
+# ❌ RPY 리맵핑 함수 임포트 제거
+# from utils.helpers import remap_input_rpy
 from utils.settings import AppConfig, ConfigManager
 
 
@@ -508,18 +509,26 @@ class GimbalControlsDialog(QtWidgets.QDialog):
             if hasattr(self.gimbal, "update_settings"):
                 self.gimbal.update_settings(values)
             if hasattr(self.gimbal, "set_target_pose"):
-                sim_pitch, sim_yaw, sim_roll = remap_input_rpy(
-                    values.get("init_roll_deg", 0.0),
-                    values.get("init_pitch_deg", 0.0),
-                    values.get("init_yaw_deg", 0.0),
-                )
+                
+                # ❌ remap_input_rpy 호출 제거
+                # sim_pitch, sim_yaw, sim_roll = remap_input_rpy(
+                #     values.get("init_roll_deg", 0.0),
+                #     values.get("init_pitch_deg", 0.0),
+                #     values.get("init_yaw_deg", 0.0),
+                # )
+                
+                # ✅ (R, P, Y) 값을 가져와서 (P, Y, R) 순서로 직접 전달
+                roll_val = values.get("init_roll_deg", 0.0)
+                pitch_val = values.get("init_pitch_deg", 0.0)
+                yaw_val = values.get("init_yaw_deg", 0.0)
+                
                 self.gimbal.set_target_pose(
                     values.get("pos_x", 0.0),
                     values.get("pos_y", 0.0),
                     values.get("pos_z", 0.0),
-                    sim_pitch,
-                    sim_yaw,
-                    sim_roll,
+                    pitch_val,  # sim_pitch_deg
+                    yaw_val,    # sim_yaw_deg
+                    roll_val,   # sim_roll_deg
                 )
             if hasattr(self.gimbal, "set_max_rate"):
                 self.gimbal.set_max_rate(values.get("max_rate_dps", 60.0))
@@ -536,18 +545,21 @@ class GimbalControlsDialog(QtWidgets.QDialog):
         if not hasattr(self.gimbal, "send_udp_preset"):
             return False
         try:
-            sim_pitch, sim_yaw, sim_roll = remap_input_rpy(
-                preset.init_roll_deg, preset.init_pitch_deg, preset.init_yaw_deg
-            )
+            # ❌ remap_input_rpy 호출 제거
+            # sim_pitch, sim_yaw, sim_roll = remap_input_rpy(
+            #     preset.init_roll_deg, preset.init_pitch_deg, preset.init_yaw_deg
+            # )
+            
+            # ✅ (R, P, Y) 값을 (P, Y, R) 순서로 직접 전달
             self.gimbal.send_udp_preset(
                 preset.sensor_type,
                 preset.sensor_id,
                 preset.pos_x,
                 preset.pos_y,
                 preset.pos_z,
-                sim_pitch,
-                sim_yaw,
-                sim_roll,
+                preset.init_pitch_deg,  # sim_pitch_deg
+                preset.init_yaw_deg,    # sim_yaw_deg
+                preset.init_roll_deg,   # sim_roll_deg
                 ip=target_ip,
                 port=int(target_port),
             )
