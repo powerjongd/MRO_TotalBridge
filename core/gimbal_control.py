@@ -66,7 +66,7 @@ def _format_sequence(
 
 def _quat_to_frotator_deg(qw: float, qx: float, qy: float, qz: float) -> Tuple[float, float, float]:
     """(w, x, y, z) 쿼터니언을 Unreal/Sim (Pitch, Yaw, Roll) 각도로 변환합니다.
-    (이 함수는 MAVLink 수신부에서 RPY 리맵핑 요구사항을 구현하기 위해 유지됩니다.)
+    (MAVLink 수신부에서 RPY를 복원하기 위해 유지됩니다.)
     """
     n = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) or 1.0
     w, x, y, z = qw / n, qx / n, qy / n, qz / n
@@ -113,9 +113,7 @@ class GimbalControl:
                     float(self.s.get("pos_y", 0.0)),
                     float(self.s.get("pos_z", 0.0))]
         
-        # RPY (섀도우 상태 - 입력 목표 저장용)
-        # ❌ RPY 리맵핑이 제거되었으므로 'Internal RPY'와 'Sim RPY'는 동일합니다.
-        #    (R, P, Y) 순서로 저장합니다.
+        # RPY (섀도우 상태 - '리맵핑된' 목표 RPY 저장용)
         self.rpy_tgt = [float(self.s.get("init_roll_deg", 0.0)),
                         float(self.s.get("init_pitch_deg", 0.0)),
                         float(self.s.get("init_yaw_deg", 0.0))]
@@ -123,16 +121,22 @@ class GimbalControl:
 
         # 쿼터니언 제어기 상태 변수 (x,y,z,w)
         try:
-            self.q_tgt = self._rpy_to_quat(self.rpy_tgt[0], self.rpy_tgt[1], self.rpy_tgt[2])
+            # ✅ 참고: init 값은 리맵핑되지 않은 (R,P,Y) 값일 수 있음.
+            #    하지만 set_target_pose 호출 시 리맵핑된 값으로 덮어써짐.
+            (r_mapped, p_mapped, y_mapped) = self._remap_rpy_for_control(
+                self.rpy_tgt[0], self.rpy_tgt[1], self.rpy_tgt[2]
+            )
+            self.rpy_tgt = [r_mapped, p_mapped, y_mapped]
+            self.q_tgt = self._rpy_to_quat(r_mapped, p_mapped, y_mapped)
             self.q_cur = self.q_tgt[:]
         except Exception as e:
             self.log(f"[GIMBAL] euler_to_quat_init failed: {e}. Defaulting.")
             self.q_tgt = [0.0, 0.0, 0.0, 1.0]
             self.q_cur = [0.0, 0.0, 0.0, 1.0]
+            self.rpy_tgt = [0.0, 0.0, 0.0]
         
-        # 쿼터니언 기반 각속도 계산용 변수
-        self.q_prev = self.q_cur[:] # 이전 쿼터니언 상태
-        self.w_cur = [0.0, 0.0, 0.0]  # 현재 몸체 각속도 (wx, wy, wz)
+        self.q_prev = self.q_cur[:] 
+        self.w_cur = [0.0, 0.0, 0.0] 
         
         self.power_on = bool(self.s.get("power_on", True))
         self.zoom_scale = max(1.0, float(self.s.get("zoom_scale", 1.0)))
@@ -242,6 +246,7 @@ class GimbalControl:
         self.log("[GIMBAL] stopped")
 
     def update_settings(self, settings: Dict[str, Any]) -> None:
+        
         restart_tcp = False
         method_changed = False
         serial_changed = False
@@ -335,13 +340,14 @@ class GimbalControl:
     # -------- public controls --------
 
     def update_control_method(self, method: str) -> None:
-        """Switch between TCP and MAVLink control modes at runtime."""
+        
         requested = self._normalize_control_method(method)
         if requested == self.control_method:
             return
         self.update_settings({"control_method": requested})
 
     def _apply_control_method_runtime(self, restart: bool = False) -> None:
+        
         if self.control_method == "mavlink":
             if restart:
                 self._stop_mavlink_threads()
@@ -354,6 +360,7 @@ class GimbalControl:
             self._stop_mavlink_threads()
 
     def _ensure_mavlink_running(self, force_restart: bool = False) -> None:
+        
         if self.control_method != "mavlink":
             return
         if not self.serial_port:
@@ -367,6 +374,7 @@ class GimbalControl:
         self._open_serial()
 
     def _stop_mavlink_threads(self) -> None:
+        
         self._mav_stop.set()
         with self._mav_lock:
             mav = self.mav
@@ -388,7 +396,7 @@ class GimbalControl:
         x: float,
         y: float,
         z: float,
-        sim_pitch_deg: float, # ✅ 이 함수는 (P, Y, R) 입력을 받는 것을 유지
+        sim_pitch_deg: float, # (P, Y, R) 순서로 입력을 받음
         sim_yaw_deg: float,
         sim_roll_deg: float,
         *,
@@ -398,54 +406,60 @@ class GimbalControl:
         """
         (TCP/UI용) Sim RPY (P,Y,R) 입력을 받아 내부 목표 쿼터니언을 설정합니다.
         """
-        # ❌ 1. RPY 리맵핑 제거
-        # internal_roll, internal_pitch, internal_yaw = self._sim_to_internal_rpy(
-        #     sim_pitch_deg, sim_yaw_deg, sim_roll_deg
-        # )
         
-        # ✅ 1. 입력받은 (R, P, Y)를 직접 사용
+        # ✅ 1. (P, Y, R) 입력을 (R, P, Y)로 변환
         roll_deg = sim_roll_deg
         pitch_deg = sim_pitch_deg
         yaw_deg = sim_yaw_deg
         
-        # 2. (R,P,Y) -> 새로운 쿼터니언 목표
+        # ✅ 2. RPY 리맵핑 (R,P,Y) -> (P,Y,R)
+        (r_mapped, p_mapped, y_mapped) = self._remap_rpy_for_control(
+            roll_deg, pitch_deg, yaw_deg
+        )
+        
+        # 3. 리맵핑된 RPY -> 새로운 쿼터니언 목표
         try:
-            q_new_target = self._rpy_to_quat(roll_deg, pitch_deg, yaw_deg)
+            q_new_target = self._rpy_to_quat(r_mapped, p_mapped, y_mapped)
         except Exception as e:
             self.log(f"[Gimbal] euler_to_quat_apply failed: {e}")
             q_new_target = self.q_tgt[:] # 실패 시 이전 목표 유지
 
         with self._lock:
-            # ✅ 3. Anti-Flip: 현재 쿼터니언(q_cur)과 비교해 최단 경로 쿼터니언을 q_tgt로 설정
+            # 4. Anti-Flip
             dot = self._q_dot(q_new_target, self.q_cur)
-            
             if dot < 1e-9: 
                 self.q_tgt = [-val for val in q_new_target]
             else:
                 self.q_tgt = q_new_target[:]
             
-            # 4. 위치 및 섀도우 RPY 목표 설정 (R, P, Y 순서로 저장)
+            # 5. 위치 및 '리맵핑된' 섀도우 RPY 목표 설정
             self.pos[:] = [float(x), float(y), float(z)]
-            self.rpy_tgt[:] = [roll_deg, pitch_deg, yaw_deg]
+            self.rpy_tgt[:] = [r_mapped, p_mapped, y_mapped]
             
             if persist:
+                # persist는 원본 (R,P,Y) 값을 저장
                 self.s["pos_x"], self.s["pos_y"], self.s["pos_z"] = self.pos
-                self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = self.rpy_tgt
+                self.s["init_roll_deg"] = roll_deg
+                self.s["init_pitch_deg"] = pitch_deg
+                self.s["init_yaw_deg"] = yaw_deg
             
             self._invalidate_cached_orientation_locked()
 
         if log:
             self.log(
                 f"[GIMBAL] target pose set → xyz=({x:.2f},{y:.2f},{z:.2f}), "
-                f"rpy(R,P,Y)=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f})"
+                f"rpy_in(R,P,Y)=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f}) "
+                f"rpy_mapped(R,P,Y)=({r_mapped:.1f},{p_mapped:.1f},{y_mapped:.1f})"
             )
 
     def set_max_rate(self, rate_dps: float) -> None:
+        
         with self._lock:
             self.max_rate_dps = float(rate_dps)
         self.log(f"[GIMBAL] max rate = {rate_dps:.1f} dps")
 
     def set_power(self, on: bool) -> None:
+        
         with self._lock:
             self.power_on = bool(on)
         self.log(f"[GIMBAL] power state updated (no send) -> {'ON' if on else 'OFF'}")
@@ -457,7 +471,7 @@ class GimbalControl:
         sensor_type: Optional[int] = None,
         sensor_id: Optional[int] = None,
     ) -> bytes:
-        """Return the raw SensorPowerCtrl packet for the requested sensor."""
+        
         with self._lock:
             if sensor_type is None or sensor_id is None:
                 sensor_type_i, sensor_id_i = self._active_sensor_codes_locked()
@@ -473,7 +487,7 @@ class GimbalControl:
         sensor_type: Optional[int] = None,
         sensor_id: Optional[int] = None,
     ) -> bytearray:
-        """Provide a bytearray sample for UI inspection."""
+        
         return bytearray(
             self.build_power_packet(on, sensor_type=sensor_type, sensor_id=sensor_id)
         )
@@ -485,6 +499,7 @@ class GimbalControl:
         sensor_type: Optional[int] = None,
         sensor_id: Optional[int] = None,
     ) -> bytes:
+        
         sensor_type_override = None if sensor_type is None else self._sanitize_sensor_code(sensor_type)
         sensor_id_override = None if sensor_id is None else self._sanitize_sensor_code(sensor_id)
         packet = self.build_power_packet(
@@ -522,7 +537,7 @@ class GimbalControl:
         pos_x: float,
         pos_y: float,
         pos_z: float,
-        sim_pitch_deg: float, # ✅ 이 함수는 (P, Y, R) 입력을 받는 것을 유지
+        sim_pitch_deg: float, # (P, Y, R) 순서로 입력을 받음
         sim_yaw_deg: float,
         sim_roll_deg: float,
         *,
@@ -534,35 +549,33 @@ class GimbalControl:
         target_ip = ip or self.s.get("generator_ip", "127.0.0.1")
         target_port = int(port or self.s.get("generator_port", 15020))
 
-        # ❌ 1. RPY 리맵핑 제거
-        # internal_roll, internal_pitch, internal_yaw = self._sim_to_internal_rpy(
-        #     sim_pitch_deg, sim_yaw_deg, sim_roll_deg
-        # )
-        
-        # ✅ 1. (R, P, Y)로 변환
+        # ✅ 1. (P, Y, R) 입력을 (R, P, Y)로 변환
         roll_deg = sim_roll_deg
         pitch_deg = sim_pitch_deg
         yaw_deg = sim_yaw_deg
         
-        # 2. 내부 (R,P,Y) -> 내부 (x,y,z,w) 쿼터니언
-        base_quat = self._rpy_to_quat(roll_deg, pitch_deg, yaw_deg)
+        # ✅ 2. RPY 리맵핑 (R,P,Y) -> (P,Y,R)
+        (r_mapped, p_mapped, y_mapped) = self._remap_rpy_for_control(
+            roll_deg, pitch_deg, yaw_deg
+        )
         
-        # ✅ 3. 현재 쿼터니언(q_cur)과 비교하여 최단 경로 선택
+        # 3. 리맵핑된 RPY -> (x,y,z,w) 쿼터니언
+        base_quat = self._rpy_to_quat(r_mapped, p_mapped, y_mapped)
+        
+        # 4. Anti-Flip (q_cur 기준)
         with self._lock:
             dot = self._q_dot(base_quat, self.q_cur)
-        
         if dot < 1e-9:
             base_quat = [-x for x in base_quat]
             
-        # 4. 시뮬레이터용 쿼터니언 리맵핑 적용 (요구사항)
-        #remapped_udp_quat = self._remap_quat_for_simulator(base_quat)
-        remapped_udp_quat = base_quat
+        # ❌ 5. 쿼터니언 리맵핑 제거
+        # remapped_udp_quat = self._remap_quat_for_simulator(base_quat)
         
         pkt = self._pack_gimbal_ctrl(
             int(sensor_type),
             int(sensor_id),
             [float(pos_x), float(pos_y), float(pos_z)],
-            remapped_udp_quat, # 리맵핑된 쿼터니언 전달
+            base_quat, # ✅ 리맵핑되지 않은 쿼터니언 전달
         )
         try:
             self.tx_sock.sendto(pkt, (target_ip, target_port))
@@ -576,6 +589,7 @@ class GimbalControl:
             self.log(f"[GIMBAL] preset UDP send error: {exc}")
 
     def get_generator_endpoint(self) -> Tuple[str, int]:
+        
         with self._lock:
             ip = str(self.s.get("generator_ip", "127.0.0.1"))
             port = int(self.s.get("generator_port", 15020))
@@ -588,7 +602,7 @@ class GimbalControl:
         pos_x: float,
         pos_y: float,
         pos_z: float,
-        sim_pitch_deg: float, # ✅ 이 함수는 (P, Y, R) 입력을 받는 것을 유지
+        sim_pitch_deg: float,
         sim_yaw_deg: float,
         sim_roll_deg: float,
     ) -> None:
@@ -603,6 +617,7 @@ class GimbalControl:
             self.s["sensor_id"] = sensor_id_i
             self._invalidate_cached_orientation_locked()
 
+        # set_target_pose가 리맵핑 처리
         self.set_target_pose(
             pos_x,
             pos_y,
@@ -612,6 +627,7 @@ class GimbalControl:
             sim_roll_deg,
             log=False,
         )
+        # send_udp_preset이 리맵핑 처리
         self.send_udp_preset(
             sensor_type_i,
             sensor_id_i,
@@ -638,6 +654,7 @@ class GimbalControl:
         )
 
     def set_mavlink_target(self, preset_index: int, sensor_type: int, sensor_id: int) -> None:
+        
         idx = max(0, int(preset_index))
         sensor_type_i = self._sanitize_sensor_code(sensor_type)
         sensor_id_i = self._sanitize_sensor_code(sensor_id)
@@ -657,6 +674,7 @@ class GimbalControl:
         )
 
     def set_mav_ids(self, sys_id: int, comp_id: int) -> None:
+        
         with self._lock:
             self.mav_sys_id  = int(sys_id)
             self.mav_comp_id = int(comp_id)
@@ -666,6 +684,7 @@ class GimbalControl:
 
     # -------- serial / MAVLink --------
     def open_serial(self, port: str, baud: int) -> None:
+        
         cleaned_port = str(port or "").strip()
         self.serial_port = cleaned_port
         self.s["serial_port"] = self.serial_port
@@ -678,6 +697,7 @@ class GimbalControl:
             self.log("[GIMBAL] Serial configured but control method is TCP; switch to MAVLink to activate")
 
     def _open_serial(self) -> None:
+        
         self._stop_mavlink_threads()
         if not self.serial_port:
             return
@@ -710,20 +730,25 @@ class GimbalControl:
         with self._lock:
             method_display = self.control_method.upper() if self.control_method else "CTRL"
             
-            # ✅ RPY 상태를 q_cur에서 즉시 계산 (R, P, Y)
-            r_cur, p_cur, y_cur = self._q_to_rpy(self.q_cur)
+            # ✅ q_cur (리맵핑된 쿼터니언) -> RPY (리맵핑된 RPY)
+            r_cur_mapped, p_cur_mapped, y_cur_mapped = self._q_to_rpy(self.q_cur)
+            
+            # ✅ 리맵핑된 RPY -> 원본 RPY로 역변환 (R,P,Y)
+            (r_orig, p_orig, y_orig) = self._inverse_remap_rpy_for_status(
+                r_cur_mapped, p_cur_mapped, y_cur_mapped
+            )
             
             return {
                 "activated": True,
                 "control_mode": method_display,
                 "control_method": self.control_method,
-                "current_roll_deg": r_cur,   # R
-                "current_pitch_deg": p_cur,  # P
-                "current_yaw_deg": y_cur,    # Y
+                "current_roll_deg": r_orig,   # 원본 R
+                "current_pitch_deg": p_orig,  # 원본 P
+                "current_yaw_deg": y_orig,    # 원본 Y
                 "current_x": self.pos[0],
                 "current_y": self.pos[1],
                 "current_z": self.pos[2],
-                "wx": self.w_cur[0], # 몸체 각속도
+                "wx": self.w_cur[0],
                 "wy": self.w_cur[1], 
                 "wz": self.w_cur[2], 
                 "max_rate_dps": self.max_rate_dps,
@@ -738,6 +763,7 @@ class GimbalControl:
 
     # -------- TCP control server --------
     def _start_tcp(self) -> None:
+        
         if self.control_method != "tcp":
             return
         if self._tcp_thread and self._tcp_thread.is_alive() and self._tcp_sock:
@@ -752,6 +778,7 @@ class GimbalControl:
         self._tcp_thread.start()
 
     def _stop_tcp(self) -> None:
+        
         self._tcp_stop.set()
         try:
             if self._tcp_sock:
@@ -777,6 +804,7 @@ class GimbalControl:
         self._tcp_thread = None
 
     def _open_tcp(self) -> None:
+        
         self._tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSE_ADDR, 1)
         self._tcp_sock.bind((self.rx_ip, self.rx_port))
@@ -784,6 +812,7 @@ class GimbalControl:
         self.log(f"[GIMBAL] TCP listening: {self.rx_ip}:{self.rx_port}")
 
     def _tcp_accept_loop(self) -> None:
+        
         while not self._tcp_stop.is_set():
             try:
                 conn, addr = self._tcp_sock.accept()
@@ -806,6 +835,7 @@ class GimbalControl:
             t.start()
 
     def _handle_tcp_client(self, conn: socket.socket, addr) -> None:
+        
         try:
             while not self._tcp_stop.is_set():
                 header = self._recv_all(conn, 4)
@@ -829,6 +859,7 @@ class GimbalControl:
 
     @staticmethod
     def _recv_all(conn: socket.socket, n: int) -> Optional[bytes]:
+        
         buf = bytearray()
         while len(buf) < n:
             chunk = conn.recv(n - len(buf))
@@ -844,7 +875,7 @@ class GimbalControl:
             return
 
         if command.cmd_id == TCP_CMD_SET_TARGET:
-            target = parse_set_target(command)
+            target = parse_set_target(command) # (P, Y, R) 값을 반환 (gimbal_messages.py 수정됨)
             if target is None:
                 self.log("[GIMBAL] TCP SET_TARGET invalid payload")
                 return
@@ -855,7 +886,6 @@ class GimbalControl:
                 float(target.position_xyz[1]),
                 float(target.position_xyz[2]),
             )
-            # ✅ TCP 패킷은 (P, Y, R) 순서로 값을 제공
             sim_pitch, sim_yaw, sim_roll = (
                 float(target.sim_rpy[0]),
                 float(target.sim_rpy[1]),
@@ -881,6 +911,7 @@ class GimbalControl:
             self._send_status_message(conn)
             
         elif command.cmd_id == TCP_CMD_SET_ZOOM:
+            # ... (이 로직은 변경 없음, 그대로 유지) ...
             zoom = parse_set_zoom(command)
             if zoom is None:
                 self.log("[GIMBAL] TCP SET_ZOOM invalid payload")
@@ -900,18 +931,25 @@ class GimbalControl:
             sensor_id = self.sensor_id
             px, py, pz = self.pos
             
-            # ✅ 현재 RPY는 q_cur에서 즉시 계산 (R, P, Y)
-            r_cur, p_cur, y_cur = self._q_to_rpy(self.q_cur)
+            # ✅ q_cur (리맵핑된 쿼터니언) -> RPY (리맵핑된 RPY)
+            r_cur_mapped, p_cur_mapped, y_cur_mapped = self._q_to_rpy(self.q_cur)
             
-            # ✅ 목표 RPY는 저장된 rpy_tgt 사용 (R, P, Y)
-            r_tgt, p_tgt, y_tgt = self.rpy_tgt 
+            # ✅ 리맵핑된 RPY -> 원본 RPY로 역변환 (R,P,Y)
+            (r_orig, p_orig, y_orig) = self._inverse_remap_rpy_for_status(
+                r_cur_mapped, p_cur_mapped, y_cur_mapped
+            )
             
+            # ✅ rpy_tgt (리맵핑된 목표 RPY) -> 원본 RPY로 역변환
+            (r_tgt_orig, p_tgt_orig, y_tgt_orig) = self._inverse_remap_rpy_for_status(
+                self.rpy_tgt[0], self.rpy_tgt[1], self.rpy_tgt[2]
+            )
+
             zoom = self.zoom_scale
             max_rate = self.max_rate_dps
         
-        # ✅ TCP 상태 메시지는 (P, Y, R) 순서를 기대함
-        sim_rpy_cur = (p_cur, y_cur, r_cur)
-        sim_rpy_tgt = (p_tgt, y_tgt, r_tgt)
+        # ✅ TCP 상태 메시지는 (P, Y, R) 순서를 기대함 (원본 RPY 기준)
+        sim_rpy_cur = (p_orig, y_orig, r_orig)
+        sim_rpy_tgt = (p_tgt_orig, y_tgt_orig, r_tgt_orig)
         
         snapshot = StatusSnapshot(
             sensor_type=sensor_type,
@@ -931,6 +969,7 @@ class GimbalControl:
             self.log(f"[GIMBAL] TCP send status failed: {exc}")
 
     def _set_zoom_scale(self, value: float) -> None:
+        
         zoom = max(1.0, float(value))
         with self._lock:
             if abs(zoom - self.zoom_scale) < 1e-3:
@@ -946,7 +985,7 @@ class GimbalControl:
     def set_zoom_scale(self, value: float) -> None:
         self._set_zoom_scale(value)
 
-    # -------- 쿼터니언 제어 헬퍼 시작 --------
+    # -------- 쿼터니언/리맵핑 헬퍼 --------
     
     @staticmethod
     def _rpy_to_quat(roll_deg: float, pitch_deg: float, yaw_deg: float) -> List[float]:
@@ -979,12 +1018,10 @@ class GimbalControl:
 
     @staticmethod
     def _q_dot(q1: List[float], q2: List[float]) -> float:
-        """두 쿼터니언의 내적 (dot product)"""
         return q1[0] * q2[0] + q1[1] * q2[1] + q1[2] * q2[2] + q1[3] * q2[3]
 
     @staticmethod
     def _q_normalize(q: List[float]) -> List[float]:
-        """쿼터니언 정규화"""
         norm = math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
         if norm < 1e-9:
             return [0.0, 0.0, 0.0, 1.0]
@@ -992,12 +1029,10 @@ class GimbalControl:
 
     @staticmethod
     def _q_conjugate(q: List[float]) -> List[float]:
-        """쿼터니언의 켤레(conjugate)"""
         return [-q[0], -q[1], -q[2], q[3]]
 
     @staticmethod
     def _q_multiply(q1: List[float], q2: List[float]) -> List[float]:
-        """쿼터니언 곱셈 (q1 * q2)"""
         x1, y1, z1, w1 = q1
         x2, y2, z2, w2 = q2
         w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
@@ -1006,32 +1041,44 @@ class GimbalControl:
         z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
         return [x, y, z, w]
     
+    # ❌ 쿼터니언 리맵핑 함수 제거
+    # @staticmethod
+    # def _remap_quat_for_simulator(...)
 
-
+    # ✅ RPY 입력 리맵핑 함수 (신규)
     @staticmethod
-    def _remap_quat_for_simulator(
-        quat_xyzw: List[float] | Tuple[float, float, float, float]
-    ) -> Tuple[float, float, float, float]:
+    def _remap_rpy_for_control(
+        r_in: float, p_in: float, y_in: float
+    ) -> Tuple[float, float, float]:
         """
-        [2안] (X,Y,Z) -> (Y,Z,X) 매핑 (Intrinsic)
-        (R,P,Y) -> (Y,R,P) 변환
+        입력 (R,P,Y)를 제어 루프가 사용할 (R',P',Y')로 리맵핑합니다.
+        (1,2,3) -> (3,1,2) [Sim] 이므로
+        (1,2,3) -> (2,3,1) [Mapped] 로 변환합니다.
+        R_mapped = P_in
+        P_mapped = Y_in
+        Y_mapped = R_in
         """
-        
-        # ✅ (X,Y,Z)->(Y,Z,X) 변환 쿼터니언 (q_transform)
-        q_transform = [0.5, 0.5, 0.5, 0.5]
-        
-        q_bridge = quat_xyzw
-        
-        # ✅ q_sim = q_bridge * q_transform (Intrinsic)
-        x1, y1, z1, w1 = q_bridge
-        x2, y2, z2, w2 = q_transform
-        
-        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-        
-        return (x, y, z, w)
+        r_mapped = p_in
+        p_mapped = y_in
+        y_mapped = r_in
+        return r_mapped, p_mapped, y_mapped
+    
+    # ✅ RPY 상태 역변환 함수 (신규)
+    @staticmethod
+    def _inverse_remap_rpy_for_status(
+        r_mapped: float, p_mapped: float, y_mapped: float
+    ) -> Tuple[float, float, float]:
+        """
+        상태 보고용: 리맵핑된 (R',P',Y')를 원본 (R,P,Y)로 역변환합니다.
+        R_orig = Y_mapped
+        P_orig = R_mapped
+        Y_orig = P_mapped
+        """
+        r_orig = y_mapped
+        p_orig = r_mapped
+        y_orig = p_mapped
+        return r_orig, p_orig, y_orig
+
 
     def _q_slerp_step(
         self,
@@ -1040,7 +1087,6 @@ class GimbalControl:
         max_rate_dps: float,
         dt: float,
     ) -> List[float]:
-        """쿼터니언 SLERP(구면 선형 보간)을 사용하여 현재 상태를 목표로 이동"""
         
         q_start_norm = self._q_normalize(q_start)
         q_end_norm = self._q_normalize(q_end)
@@ -1076,36 +1122,21 @@ class GimbalControl:
         ]
         return self._q_normalize(q_res)
 
-    # ✅ _q_to_internal_rpy -> _q_to_rpy로 변경
     def _q_to_rpy(self, q: List[float]) -> List[float]:
         """
         내부 쿼터니언(x,y,z,w)을 RPY(r,p,y)로 변환 (상태 보고용)
         (ZYX 오일러 각 기준)
         """
+        
         qx, qy, qz, qw = q
-        
-        # 1. (x,y,z,w) -> MAVLink (w,x,y,z)
         w, x, y, z = self._remap_quat_for_mavlink(q)
-        
-        # 2. MAVLink (w,x,y,z) -> (P,Y,R)
-        #    (_quat_to_frotator_deg는 ZYX 오일러 각을 P,Y,R 순서로 반환합니다)
         pitch, yaw, roll = _quat_to_frotator_deg(w, x, y, z)
-        
-        # ❌ 3. RPY 리맵핑 제거
-        # internal_roll, internal_pitch, internal_yaw = self._sim_to_internal_rpy(
-        #     sim_pitch, sim_yaw, sim_roll
-        # )
-        
-        # ✅ 3. (R, P, Y) 순서로 반환
         return [roll, pitch, yaw]
     
     def _calculate_angular_velocity(
         self, q_start: List[float], q_end: List[float], dt: float
     ) -> List[float]:
-        """
-        두 쿼터니언 사이의 변화(q_delta)를 기반으로
-        몸체 기준 각속도(wx, wy, wz)를 라디안/초 단위로 계산합니다.
-        """
+        
         if dt < 1e-6:
             return self.w_cur 
         
@@ -1134,19 +1165,9 @@ class GimbalControl:
     def _remap_quat_for_mavlink(
         quat_xyzw: List[float] | Tuple[float, float, float, float]
     ) -> List[float]:
-        """
-        내부 (x, y, z, w) 쿼터니언을 MAVLink (w, x, y, z) 포맷으로 변환합니다.
-        """
+        
         x, y, z, w = quat_xyzw
         return [w, x, y, z]
-
-    # -------- 쿼터니언 제어 헬퍼 끝 --------
-    
-    # ❌❌❌ RPY 리맵핑 함수 제거 ❌❌❌
-    # @staticmethod
-    # def _internal_to_sim_rpy(...)
-    # @staticmethod
-    # def _sim_to_internal_rpy(...)
 
     # -------- control loop & ICD send --------
     def _control_loop(self) -> None:
@@ -1162,6 +1183,7 @@ class GimbalControl:
                 
                 q_old = self.q_cur[:]
 
+                # q_cur는 리맵핑된 q_tgt를 따라감
                 self.q_cur = self._q_slerp_step(
                     self.q_cur, self.q_tgt, self.max_rate_dps, dt
                 )
@@ -1183,18 +1205,18 @@ class GimbalControl:
                 )
                 
                 if should_send:
+                    # ✅ q_cur (리맵핑된 쿼터니언)을 q_to_send로 설정
                     q_to_send = self.q_cur
                     
-                    #remapped_udp_quat = self._remap_quat_for_simulator(q_to_send)
-                    remapped_udp_quat = q_to_send 
+                    # ❌ 쿼터니언 리맵핑 제거
+                    # remapped_udp_quat = self._remap_quat_for_simulator(q_to_send)
 
                     pkt = self._pack_gimbal_ctrl(
                         sensor_type, 
                         sensor_id, 
                         self.pos, 
-                        remapped_udp_quat
+                        q_to_send # ✅ 리맵핑되지 않은 쿼터니언 전달
                     )
-
                     target = (
                         str(self.s.get("generator_ip", "127.0.0.1")),
                         int(self.s.get("generator_port", 15020)),
@@ -1243,38 +1265,37 @@ class GimbalControl:
                             q_list[0], q_list[1], q_list[2], q_list[3]
                         )
                         
-                        # ❌ 2. RPY 리맵핑 제거
-                        # internal_roll, internal_pitch, internal_yaw = self._sim_to_internal_rpy(
-                        #     sim_pitch, sim_yaw, sim_roll
-                        # )
-                        
-                        # ✅ 2. (R, P, Y) 값을 직접 사용
+                        # 2. (P, Y, R) 입력을 (R, P, Y)로 변환
                         roll_deg = sim_roll
                         pitch_deg = sim_pitch
                         yaw_deg = sim_yaw
                         
-                        # 3. 내부 (R,P,Y) -> 새로운 쿼터니언 목표
+                        # ✅ 3. RPY 리맵핑 (R,P,Y) -> (P,Y,R)
+                        (r_mapped, p_mapped, y_mapped) = self._remap_rpy_for_control(
+                            roll_deg, pitch_deg, yaw_deg
+                        )
+                        
+                        # 4. 리맵핑된 RPY -> 새로운 쿼터니언 목표
                         try:
-                            q_new_target = self._rpy_to_quat(roll_deg, pitch_deg, yaw_deg)
+                            q_new_target = self._rpy_to_quat(r_mapped, p_mapped, y_mapped)
                         except Exception as e:
                             self.log(f"[Gimbal] euler_to_quat_apply (mav) failed: {e}")
                             q_new_target = self.q_tgt[:] 
 
                         with self._lock:
-                            # ✅ 4. Anti-Flip
+                            # 5. Anti-Flip
                             dot = self._q_dot(q_new_target, self.q_cur)
-                            
                             if dot < 1e-9:
                                 self.q_tgt = [-val for val in q_new_target]
                             else:
                                 self.q_tgt = q_new_target[:]
                             
-                            # 5. 섀도우 RPY 목표 설정 (R, P, Y)
-                            self.rpy_tgt[:] = [roll_deg, pitch_deg, yaw_deg]
+                            # 6. '리맵핑된' 섀도우 RPY 목표 설정
+                            self.rpy_tgt[:] = [r_mapped, p_mapped, y_mapped]
                             
                             self._invalidate_cached_orientation_locked()
                         self.log(
-                            f"[GIMBAL] RX target RPY(R,P,Y)=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f})"
+                            f"[GIMBAL] RX MAV target RPY(R,P,Y)=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f}) -> Mapped({r_mapped:.1f},{p_mapped:.1f},{y_mapped:.1f})"
                         )
                 elif t == "PARAM_REQUEST_LIST":
                     self._send_param_list()
@@ -1303,14 +1324,16 @@ class GimbalControl:
 
                 if now - last_status >= period_status:
                     with self._lock:
+                        # ✅ q_cur (리맵핑된 쿼터니언)
                         q_current_internal = list(self.q_cur)
-                        wx, wy, wz = self.w_cur # (몸체 각속도 rad/s)
+                        wx, wy, wz = self.w_cur 
                         gimbal_id = int(self.mavlink_sensor_id) & 0xFF
                     
+                    # ✅ q_cur -> MAVLink (w,x,y,z) 변환
                     q_mavlink = self._remap_quat_for_mavlink(q_current_internal)
                     
                     time_boot_ms = int((now - t0) * 1000.0)
-                    # ✅ MAVLink는 (w,x,y,z) 쿼터니언과 (wx, wy, wz) 몸체 각속도를 전송
+                    # ✅ 리맵핑된 쿼터니언과 각속도 전송 (사용자 요청)
                     mav.mav.gimbal_device_attitude_status_send(
                         self.mav_sys_id,
                         self.mav_comp_id,
@@ -1332,6 +1355,7 @@ class GimbalControl:
 
     # -------- PARAM helpers --------
     def _send_param_list(self) -> None:
+        
         mav = self._get_mavlink()
         if not mav:
             return
@@ -1343,6 +1367,7 @@ class GimbalControl:
             time.sleep(0.02)
 
     def _send_param_read(self, pid: str, pidx: int) -> None:
+        
         mav = self._get_mavlink()
         if not mav:
             return
@@ -1363,6 +1388,7 @@ class GimbalControl:
         prev: Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float, float]],
         curr: Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float, float]],
     ) -> bool:
+        # ... (이 함수는 로직 변경 없음, 쿼터니언 비교 유지) ...
         if prev[0] != curr[0] or prev[1] != curr[1]:
             return True
         pos_prev, pos_curr = prev[2], curr[2]
@@ -1380,7 +1406,6 @@ class GimbalControl:
         return True
 
     def _invalidate_cached_orientation_locked(self) -> None:
-        """Reset cached pose/quaternion bookkeeping while ``self._lock`` is held."""
         self._last_sent_snapshot = None
 
     def _pack_gimbal_ctrl(
@@ -1388,19 +1413,21 @@ class GimbalControl:
         sensor_type: int,
         sensor_id: int,
         xyz: List[float],
-        remapped_quat: Tuple[float, float, float, float], # ✅ 리맵핑된 쿼터니언
+        quat_xyzw: Tuple[float, float, float, float], # ✅ 리맵핑되지 않은 쿼터니언
     ) -> bytes:
         return build_gimbal_ctrl_packet(
             sensor_type,
             sensor_id,
             (float(xyz[0]), float(xyz[1]), float(xyz[2])),
-            remapped_quat, # ✅ 리맵핑된 쿼터니언을 그대로 전달
+            quat_xyzw, # ✅ 쿼터니언을 그대로 전달
         )
 
     def _pack_power_ctrl(self, sensor_type: int, sensor_id: int, power_on: int) -> bytes:
+        
         return build_power_ctrl_packet(sensor_type, sensor_id, power_on)
 
     def _dump_packet_bytes(self, label: str, pkt: bytes) -> None:
+        
         hex_str = " ".join(f"{b:02X}" for b in pkt)
         self.log(f"[GIMBAL] {label} packet ({len(pkt)} bytes): {hex_str}")
 
