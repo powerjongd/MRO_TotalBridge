@@ -555,7 +555,8 @@ class GimbalControl:
             base_quat = [-x for x in base_quat]
             
         # 4. 시뮬레이터용 쿼터니언 리맵핑 적용 (요구사항)
-        remapped_udp_quat = self._remap_quat_for_simulator(base_quat)
+        #remapped_udp_quat = self._remap_quat_for_simulator(base_quat)
+        remapped_udp_quat = base_quat
         
         pkt = self._pack_gimbal_ctrl(
             int(sensor_type),
@@ -1005,16 +1006,32 @@ class GimbalControl:
         z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
         return [x, y, z, w]
     
+
+
     @staticmethod
     def _remap_quat_for_simulator(
         quat_xyzw: List[float] | Tuple[float, float, float, float]
     ) -> Tuple[float, float, float, float]:
         """
-        내부 (x, y, z, w) 쿼터니언을 시뮬레이터 (y, z, x, w) 포맷으로 변환합니다.
-        (사용자 요구사항)
+        [2안] (X,Y,Z) -> (Y,Z,X) 매핑 (Intrinsic)
+        (R,P,Y) -> (Y,R,P) 변환
         """
-        x, y, z, w = quat_xyzw
-        return (y, z, x, w)
+        
+        # ✅ (X,Y,Z)->(Y,Z,X) 변환 쿼터니언 (q_transform)
+        q_transform = [0.5, 0.5, 0.5, 0.5]
+        
+        q_bridge = quat_xyzw
+        
+        # ✅ q_sim = q_bridge * q_transform (Intrinsic)
+        x1, y1, z1, w1 = q_bridge
+        x2, y2, z2, w2 = q_transform
+        
+        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+        
+        return (x, y, z, w)
 
     def _q_slerp_step(
         self,
@@ -1168,15 +1185,16 @@ class GimbalControl:
                 if should_send:
                     q_to_send = self.q_cur
                     
-                    # ✅ 요구사항인 쿼터니언 리맵핑만 적용
-                    remapped_udp_quat = self._remap_quat_for_simulator(q_to_send)
+                    #remapped_udp_quat = self._remap_quat_for_simulator(q_to_send)
+                    remapped_udp_quat = q_to_send 
 
                     pkt = self._pack_gimbal_ctrl(
                         sensor_type, 
                         sensor_id, 
                         self.pos, 
-                        remapped_udp_quat # 리맵핑된 쿼터니언 전달
+                        remapped_udp_quat
                     )
+
                     target = (
                         str(self.s.get("generator_ip", "127.0.0.1")),
                         int(self.s.get("generator_port", 15020)),

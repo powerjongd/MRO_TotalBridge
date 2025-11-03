@@ -14,7 +14,8 @@ from .gimbal_icd import (
     TCP_CMD_SET_ZOOM,
     TCP_CMD_STATUS,
 )
-from utils.helpers import remap_input_rpy
+# ❌ RPY 리맵핑 함수 임포트 제거
+# from utils.helpers import remap_input_rpy
 
 _GIMBAL_CTRL_HEADER_FMT = "<BiIB"
 _GIMBAL_CTRL_PAYLOAD_FMT = "<BB3d4f"
@@ -122,21 +123,30 @@ def parse_set_target(command: BridgeTcpCommand) -> Optional[SetTargetPayload]:
     if command.cmd_id != TCP_CMD_SET_TARGET or len(command.body) < struct.calcsize(_SET_TARGET_FMT):
         return None
     try:
+        # ✅ TCP 패킷은 (R, P, Y) 순서로 값을 전송 (roll_sim, pitch_sim, yaw_sim)
         sensor_type, sensor_id, px, py, pz, roll_sim, pitch_sim, yaw_sim = struct.unpack(
             _SET_TARGET_FMT, command.body[: struct.calcsize(_SET_TARGET_FMT)]
         )
     except struct.error:
         return None
-    sim_pitch, sim_yaw, sim_roll = remap_input_rpy(
-        float(roll_sim),
-        float(pitch_sim),
-        float(yaw_sim),
-    )
+    
+    # ❌ remap_input_rpy 호출 제거
+    # sim_pitch, sim_yaw, sim_roll = remap_input_rpy(
+    #     float(roll_sim),
+    #     float(pitch_sim),
+    #     float(yaw_sim),
+    # )
+    
+    # ✅ (R, P, Y) 값을 (P, Y, R) 순서로 struct에 맞게 단순 할당
+    sim_pitch = float(pitch_sim)
+    sim_yaw = float(yaw_sim)
+    sim_roll = float(roll_sim)
+    
     return SetTargetPayload(
         sensor_type=int(sensor_type),
         sensor_id=int(sensor_id),
         position_xyz=(float(px), float(py), float(pz)),
-        sim_rpy=(sim_pitch, sim_yaw, sim_roll),
+        sim_rpy=(sim_pitch, sim_yaw, sim_roll), # (P, Y, R) 튜플
     )
 
 
