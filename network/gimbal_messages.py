@@ -14,7 +14,7 @@ from .gimbal_icd import (
     TCP_CMD_SET_ZOOM,
     TCP_CMD_STATUS,
 )
-from utils.helpers import remap_input_rpy, remap_quat_output
+from utils.helpers import remap_input_rpy
 
 _GIMBAL_CTRL_HEADER_FMT = "<BiIB"
 _GIMBAL_CTRL_PAYLOAD_FMT = "<BB3d4f"
@@ -65,12 +65,18 @@ def build_gimbal_ctrl_packet(
     """Pack the UDP control packet consumed by the ImageGenerator.
 
     The quaternion should be supplied in canonical ``(x, y, z, w)`` order as
-    produced by :func:`utils.helpers.euler_to_quat`.  The vector part is then
-    remapped so that the output tuple exposes (Roll→Pitch, Pitch→Yaw, Yaw→Roll)
-    to satisfy the simulator expectation without disturbing upstream pipelines.
+    produced by :func:`utils.helpers.euler_to_quat`.  The values are packed in
+    the simulator's expected ``(w, x, y, z)`` order so Unreal's
+    :class:`FRotator` conversion sees the same roll/pitch/yaw angles the bridge
+    uses internally without axis remapping.
     """
 
-    qx, qy, qz, qw = remap_quat_output(quat_xyzw)
+    qx, qy, qz, qw = (
+        float(quat_xyzw[0]),
+        float(quat_xyzw[1]),
+        float(quat_xyzw[2]),
+        float(quat_xyzw[3]),
+    )
     payload = struct.pack(
         _GIMBAL_CTRL_PAYLOAD_FMT,
         sensor_type & 0xFF,
@@ -78,10 +84,10 @@ def build_gimbal_ctrl_packet(
         float(position_xyz[0]),
         float(position_xyz[1]),
         float(position_xyz[2]),
+        float(qw),
         float(qx),
         float(qy),
         float(qz),
-        float(qw),
     )
     header = struct.pack(_GIMBAL_CTRL_HEADER_FMT, 1, TYPE_GIMBAL_CTRL, len(payload), 0)
     return header + payload
