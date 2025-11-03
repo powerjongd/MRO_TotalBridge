@@ -16,7 +16,17 @@ try:
 except ImportError:
     from serial.serialutil import SerialException
 
-from utils.helpers import euler_to_quat, wrap_angle_deg
+from utils.helpers import (
+    euler_to_quat,
+    quat_conjugate_xyzw,
+    quat_from_axis_angle,
+    quat_from_wxyz,
+    quat_multiply_xyzw,
+    quat_normalize_xyzw,
+    quat_to_axis_angle,
+    quat_to_euler,
+    wrap_angle_deg,
+)
 from utils.zoom import zoom_scale_to_lens_mm
 from network.bridge_tcp import parse_bridge_tcp_command
 from network.gimbal_icd import (
@@ -36,27 +46,6 @@ from network.gimbal_messages import (
     parse_set_target,
     parse_set_zoom,
 )
-@dataclass(frozen=True)
-class _SimOrientation:
-    """Container describing a simulator pose and its quaternion."""
-
-    sim_pitch: float
-    sim_yaw: float
-    sim_roll: float
-    bridge_roll: float
-    bridge_pitch: float
-    bridge_yaw: float
-    quat_xyzw: Tuple[float, float, float, float]
-
-    @property
-    def sim_rpy(self) -> Tuple[float, float, float]:
-        return (self.sim_pitch, self.sim_yaw, self.sim_roll)
-
-    @property
-    def bridge_rpy(self) -> Tuple[float, float, float]:
-        return (self.bridge_roll, self.bridge_pitch, self.bridge_yaw)
-
-
 def _format_value(
     value: Any,
     *,
@@ -85,100 +74,93 @@ def _format_sequence(
     )
 
 
-class _SimOrientationPipeline:
-    """Normalize simulator angles and emit consistent quaternions per channel."""
+def _bridge_to_sim_rpy(
+    roll_deg: float, pitch_deg: float, yaw_deg: float
+) -> Tuple[float, float, float]:
+    """Convert bridge (roll, pitch, yaw) into simulator ``FRotator`` order."""
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._last_quat: Dict[str, Tuple[float, float, float, float]] = {}
+    return float(pitch_deg), float(yaw_deg), float(roll_deg)
 
-    def reset(self, channel: Optional[str] = None) -> None:
-        """Clear cached quaternions used for shortest-arc enforcement."""
 
-        with self._lock:
-            if channel is None:
-                self._last_quat.clear()
-            else:
-                self._last_quat.pop(channel, None)
+def _sim_to_bridge_rpy(
+    sim_pitch_deg: float, sim_yaw_deg: float, sim_roll_deg: float
+) -> Tuple[float, float, float]:
+    """Convert simulator ``FRotator`` angles back into bridge order."""
 
-    def build_from_sim(
-        self,
-        sim_pitch: float,
-        sim_yaw: float,
-        sim_roll: float,
-        *,
-        channel: Optional[str] = None,
-    ) -> _SimOrientation:
-        pitch = wrap_angle_deg(float(sim_pitch))
-        yaw = wrap_angle_deg(float(sim_yaw))
-        roll = wrap_angle_deg(float(sim_roll))
+    return float(sim_roll_deg), float(sim_pitch_deg), float(sim_yaw_deg)
 
-        bridge_roll = roll
-        bridge_pitch = pitch
-        bridge_yaw = yaw
 
-        quat = euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
+@dataclass(frozen=True)
+class _OrientationSnapshot:
+    """Container describing a pose using canonical quaternion and Euler views."""
 
-        if channel:
-            with self._lock:
-                prev_quat = self._last_quat.get(channel)
-                if prev_quat is not None:
-                    dot = sum(a * b for a, b in zip(quat, prev_quat))
-                    if dot < 0.0:
-                        quat = tuple(-a for a in quat)
-                else:
-                    if quat[3] < 0.0:
-                        quat = tuple(-a for a in quat)
-                    else:
-                        quat = tuple(quat)
-                self._last_quat[channel] = tuple(quat)
-        else:
-            if quat[3] < 0.0:
-                quat = tuple(-a for a in quat)
-            else:
-                quat = tuple(quat)
+    quat_xyzw: Tuple[float, float, float, float]
+    bridge_rpy: Tuple[float, float, float]
+    sim_rpy: Tuple[float, float, float]
 
-        quat = tuple(quat)
+    @property
+    def sim_pitch(self) -> float:
+        return self.sim_rpy[0]
 
-        return _SimOrientation(
-            sim_pitch=pitch,
-            sim_yaw=yaw,
-            sim_roll=roll,
-            bridge_roll=bridge_roll,
-            bridge_pitch=bridge_pitch,
-            bridge_yaw=bridge_yaw,
+    @property
+    def sim_yaw(self) -> float:
+        return self.sim_rpy[1]
+
+    @property
+    def sim_roll(self) -> float:
+        return self.sim_rpy[2]
+
+    @property
+    def bridge_roll(self) -> float:
+        return self.bridge_rpy[0]
+
+    @property
+    def bridge_pitch(self) -> float:
+        return self.bridge_rpy[1]
+
+    @property
+    def bridge_yaw(self) -> float:
+        return self.bridge_rpy[2]
+
+    @classmethod
+    def from_bridge_rpy(
+        cls, roll_deg: float, pitch_deg: float, yaw_deg: float
+    ) -> "_OrientationSnapshot":
+        roll = wrap_angle_deg(float(roll_deg))
+        pitch = wrap_angle_deg(float(pitch_deg))
+        yaw = wrap_angle_deg(float(yaw_deg))
+        quat = quat_normalize_xyzw(euler_to_quat(roll, pitch, yaw))
+        return cls(
             quat_xyzw=quat,
+            bridge_rpy=(roll, pitch, yaw),
+            sim_rpy=_bridge_to_sim_rpy(roll, pitch, yaw),
         )
 
+    @classmethod
+    def from_sim_rpy(
+        cls, sim_pitch: float, sim_yaw: float, sim_roll: float
+    ) -> "_OrientationSnapshot":
+        roll, pitch, yaw = _sim_to_bridge_rpy(sim_pitch, sim_yaw, sim_roll)
+        return cls.from_bridge_rpy(roll, pitch, yaw)
 
-def _quat_to_frotator_deg(qw: float, qx: float, qy: float, qz: float) -> Tuple[float, float, float]:
-    """Return Unreal-style ``(Pitch, Yaw, Roll)`` angles derived from ``(w, x, y, z)``."""
+    @classmethod
+    def from_quat(
+        cls, quat_xyzw: Tuple[float, float, float, float]
+    ) -> "_OrientationSnapshot":
+        quat = quat_normalize_xyzw(quat_xyzw)
+        roll, pitch, yaw = quat_to_euler(*quat)
+        return cls(
+            quat_xyzw=quat,
+            bridge_rpy=(roll, pitch, yaw),
+            sim_rpy=_bridge_to_sim_rpy(roll, pitch, yaw),
+        )
 
-    # MAVLink ``GIMBAL_MANAGER_SET_ATTITUDE`` (and related commands) publish the
-    # quaternion as ``q[0] = w`` followed by the vector part.  The simulator
-    # pipeline expects an Unreal ``FRotator`` so convert while preserving that
-    # ordering here instead of forcing every caller to reshuffle the tuple.
-
-    n = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) or 1.0
-    w, x, y, z = qw / n, qx / n, qy / n, qz / n
-
-    # Standard roll (X), pitch (Y), yaw (Z) extraction.
-    sinr_cosp = 2.0 * (w * x + y * z)
-    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-    roll = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
-
-    sinp = 2.0 * (w * y - z * x)
-    if abs(sinp) >= 1:
-        pitch = math.degrees(math.copysign(math.pi / 2, sinp))
-    else:
-        pitch = math.degrees(math.asin(sinp))
-
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
-
-    # Unreal's ``FRotator`` stores angles as (Pitch, Yaw, Roll).
-    return pitch, yaw, roll
+    @classmethod
+    def from_wxyz(
+        cls, w: float, x: float, y: float, z: float
+    ) -> "_OrientationSnapshot":
+        quat = quat_from_wxyz(w, x, y, z)
+        return cls.from_quat(quat)
 class GimbalControl:
     def __init__(
         self,
@@ -201,13 +183,19 @@ class GimbalControl:
         self.tx_sock.settimeout(0.2)
 
         self._lock = threading.Lock()
-        self.pos = [float(self.s.get("pos_x", 0.0)),
-                    float(self.s.get("pos_y", 0.0)),
-                    float(self.s.get("pos_z", 0.0))]
-        self.rpy_cur = [float(self.s.get("init_roll_deg", 0.0)),
-                        float(self.s.get("init_pitch_deg", 0.0)),
-                        float(self.s.get("init_yaw_deg", 0.0))]
-        self.rpy_tgt = self.rpy_cur[:]
+        self.pos = [
+            float(self.s.get("pos_x", 0.0)),
+            float(self.s.get("pos_y", 0.0)),
+            float(self.s.get("pos_z", 0.0)),
+        ]
+        initial_roll = float(self.s.get("init_roll_deg", 0.0))
+        initial_pitch = float(self.s.get("init_pitch_deg", 0.0))
+        initial_yaw = float(self.s.get("init_yaw_deg", 0.0))
+        initial_orientation = _OrientationSnapshot.from_bridge_rpy(
+            initial_roll, initial_pitch, initial_yaw
+        )
+        self._quat_cur = initial_orientation.quat_xyzw
+        self._quat_tgt = self._quat_cur
         self.max_rate_dps = float(self.s.get("max_rate_dps", 60.0))
         self.power_on = bool(self.s.get("power_on", True))
         self.zoom_scale = max(1.0, float(self.s.get("zoom_scale", 1.0)))
@@ -258,13 +246,12 @@ class GimbalControl:
         self.hb_rx_ok = False
         self.last_hb_rx = 0.0
 
-        self._last_rpy = self.rpy_cur[:]
         self._last_ts = time.time()
-        self._rpy_rate = [0.0, 0.0, 0.0]
+        self._ang_vel_dps = [0.0, 0.0, 0.0]
+        self._last_quat_for_rate = self._quat_cur
         self._last_sent_snapshot: Optional[
-            Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float]]
+            Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float, float]]
         ] = None
-        self._orientation_pipeline = _SimOrientationPipeline()
 
         if self._zoom_update_cb:
             try:
@@ -472,15 +459,24 @@ class GimbalControl:
     def _apply_pose_locked(
         self,
         position_xyz: Tuple[float, float, float],
-        bridge_rpy: Tuple[float, float, float],
+        orientation: _OrientationSnapshot,
         *,
         persist: bool = False,
     ) -> None:
-        self.pos[:] = [float(position_xyz[0]), float(position_xyz[1]), float(position_xyz[2])]
-        self.rpy_tgt[:] = [float(bridge_rpy[0]), float(bridge_rpy[1]), float(bridge_rpy[2])]
+        self.pos[:] = [
+            float(position_xyz[0]),
+            float(position_xyz[1]),
+            float(position_xyz[2]),
+        ]
+        self._quat_tgt = orientation.quat_xyzw
         if persist:
             self.s["pos_x"], self.s["pos_y"], self.s["pos_z"] = self.pos
-            self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = self.rpy_tgt
+            roll, pitch, yaw = orientation.bridge_rpy
+            self.s["init_roll_deg"], self.s["init_pitch_deg"], self.s["init_yaw_deg"] = (
+                roll,
+                pitch,
+                yaw,
+            )
         self._invalidate_cached_orientation_locked()
 
     def set_target_pose(
@@ -494,14 +490,12 @@ class GimbalControl:
         *,
         persist: bool = False,
         log: bool = True,
-    ) -> _SimOrientation:
-        orientation = self._orientation_pipeline.build_from_sim(
+    ) -> _OrientationSnapshot:
+        orientation = _OrientationSnapshot.from_sim_rpy(
             sim_pitch_deg, sim_yaw_deg, sim_roll_deg
         )
         with self._lock:
-            self._apply_pose_locked(
-                (x, y, z), orientation.bridge_rpy, persist=persist
-            )
+            self._apply_pose_locked((x, y, z), orientation, persist=persist)
         if log:
             sim_pitch, sim_yaw, sim_roll = orientation.sim_rpy
             bridge_roll, bridge_pitch, bridge_yaw = orientation.bridge_rpy
@@ -611,14 +605,14 @@ class GimbalControl:
 
         target_ip = ip or self.s.get("generator_ip", "127.0.0.1")
         target_port = int(port or self.s.get("generator_port", 15020))
-        orientation = self._orientation_pipeline.build_from_sim(
-            sim_pitch_deg, sim_yaw_deg, sim_roll_deg, channel="udp"
+        orientation = _OrientationSnapshot.from_sim_rpy(
+            sim_pitch_deg, sim_yaw_deg, sim_roll_deg
         )
         pkt = self._pack_gimbal_ctrl(
             int(sensor_type),
             int(sensor_id),
             [float(pos_x), float(pos_y), float(pos_z)],
-            orientation,
+            orientation.quat_xyzw,
         )
         try:
             self.tx_sock.sendto(pkt, (target_ip, target_port))
@@ -771,19 +765,22 @@ class GimbalControl:
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
             method_display = self.control_method.upper() if self.control_method else "CTRL"
+            orientation = _OrientationSnapshot.from_quat(self._quat_cur)
+            roll, pitch, yaw = orientation.bridge_rpy
+            wx, wy, wz = self._ang_vel_dps
             return {
                 "activated": True,
                 "control_mode": method_display,
                 "control_method": self.control_method,
-                "current_roll_deg": self.rpy_cur[0],
-                "current_pitch_deg": self.rpy_cur[1],
-                "current_yaw_deg": self.rpy_cur[2],
+                "current_roll_deg": roll,
+                "current_pitch_deg": pitch,
+                "current_yaw_deg": yaw,
                 "current_x": self.pos[0],
                 "current_y": self.pos[1],
                 "current_z": self.pos[2],
-                "wx": self._rpy_rate[0],
-                "wy": self._rpy_rate[1],
-                "wz": self._rpy_rate[2],
+                "wx": wx,
+                "wy": wy,
+                "wz": wz,
                 "max_rate_dps": self.max_rate_dps,
                 "serial_state": (self.serial_port or "-"),
                 "hb_rx_ok": self.hb_rx_ok,
@@ -958,16 +955,12 @@ class GimbalControl:
             sensor_type = self.sensor_type
             sensor_id = self.sensor_id
             px, py, pz = self.pos
-            r_cur, p_cur, y_cur = self.rpy_cur
-            r_tgt, p_tgt, y_tgt = self.rpy_tgt
+            quat_cur = self._quat_cur
+            quat_tgt = self._quat_tgt
             zoom = self.zoom_scale
             max_rate = self.max_rate_dps
-        orientation_cur = self._orientation_pipeline.build_from_sim(
-            *self._bridge_to_sim_rpy(r_cur, p_cur, y_cur)
-        )
-        orientation_tgt = self._orientation_pipeline.build_from_sim(
-            *self._bridge_to_sim_rpy(r_tgt, p_tgt, y_tgt)
-        )
+        orientation_cur = _OrientationSnapshot.from_quat(quat_cur)
+        orientation_tgt = _OrientationSnapshot.from_quat(quat_tgt)
         snapshot = StatusSnapshot(
             sensor_type=sensor_type,
             sensor_id=sensor_id,
@@ -1012,35 +1005,38 @@ class GimbalControl:
             with self._lock:
                 dt = max(1e-3, t0 - self._last_ts)
                 self._last_ts = t0
-
-                for i in range(3):
-                    err = self.rpy_tgt[i] - self.rpy_cur[i]
-                    step = math.copysign(min(abs(err), self.max_rate_dps * dt), err)
-                    self.rpy_cur[i] += step
-                    self._rpy_rate[i] = (self.rpy_cur[i] - self._last_rpy[i]) / dt
-                    self._last_rpy[i] = self.rpy_cur[i]
-
+                q_cur = self._quat_cur
+                q_tgt = self._quat_tgt
+                q_err = quat_multiply_xyzw(q_tgt, quat_conjugate_xyzw(q_cur))
+                axis, angle_rad = quat_to_axis_angle(q_err)
+                angle_deg = math.degrees(angle_rad)
+                max_step_deg = self.max_rate_dps * dt
+                if angle_deg > 1e-6:
+                    step_deg = min(angle_deg, max_step_deg)
+                    if step_deg > 1e-6:
+                        delta_quat = quat_from_axis_angle(axis, math.radians(step_deg))
+                        q_cur = quat_multiply_xyzw(delta_quat, q_cur)
+                self._quat_cur = quat_normalize_xyzw(q_cur)
+                self._update_angular_velocity_locked(dt)
                 sensor_type, sensor_id = self._active_sensor_codes_locked()
                 snapshot = (
                     sensor_type,
                     sensor_id,
                     (float(self.pos[0]), float(self.pos[1]), float(self.pos[2])),
-                    (float(self.rpy_cur[0]), float(self.rpy_cur[1]), float(self.rpy_cur[2])),
+                    self._quat_cur,
                 )
                 should_send = (
                     self._last_sent_snapshot is None
                     or self._has_pose_delta(self._last_sent_snapshot, snapshot)
                 )
                 if should_send:
-                    sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(
-                        float(self.rpy_cur[0]),
-                        float(self.rpy_cur[1]),
-                        float(self.rpy_cur[2]),
+                    orientation = _OrientationSnapshot.from_quat(self._quat_cur)
+                    pkt = self._pack_gimbal_ctrl(
+                        sensor_type,
+                        sensor_id,
+                        self.pos,
+                        orientation.quat_xyzw,
                     )
-                    orientation = self._orientation_pipeline.build_from_sim(
-                        sim_pitch, sim_yaw, sim_roll, channel="udp"
-                    )
-                    pkt = self._pack_gimbal_ctrl(sensor_type, sensor_id, self.pos, orientation)
                     target = (
                         str(self.s.get("generator_ip", "127.0.0.1")),
                         int(self.s.get("generator_port", 15020)),
@@ -1057,6 +1053,22 @@ class GimbalControl:
                     self.log(f"[GIMBAL] send 10706 error: {e}")
 
             time.sleep(max(0.0, period - (time.time() - t0)))
+
+    def _update_angular_velocity_locked(self, dt: float) -> None:
+        if dt <= 0.0:
+            self._ang_vel_dps = [0.0, 0.0, 0.0]
+            self._last_quat_for_rate = self._quat_cur
+            return
+        prev = self._last_quat_for_rate
+        curr = self._quat_cur
+        dq = quat_multiply_xyzw(curr, quat_conjugate_xyzw(prev))
+        axis, angle_rad = quat_to_axis_angle(dq)
+        if angle_rad < 1e-6:
+            self._ang_vel_dps = [0.0, 0.0, 0.0]
+        else:
+            rate = math.degrees(angle_rad) / dt
+            self._ang_vel_dps = [axis[0] * rate, axis[1] * rate, axis[2] * rate]
+        self._last_quat_for_rate = curr
 
     # -------- MAVLink RX/TX --------
     def _mav_rx_loop(self) -> None:
@@ -1112,14 +1124,11 @@ class GimbalControl:
                     )
                     # mode b: q 유효 → 목표 각도 설정
                     if not any(math.isnan(v) for v in q_list):
-                        sim_pitch, sim_yaw, sim_roll = _quat_to_frotator_deg(
+                        orientation = _OrientationSnapshot.from_wxyz(
                             q_list[0], q_list[1], q_list[2], q_list[3]
                         )
-                        orientation = self._orientation_pipeline.build_from_sim(
-                            sim_pitch, sim_yaw, sim_roll
-                        )
                         with self._lock:
-                            self.rpy_tgt[:] = list(orientation.bridge_rpy)
+                            self._quat_tgt = orientation.quat_xyzw
                             self._invalidate_cached_orientation_locked()
                         self.log(
                             f"[GIMBAL] RX target SIM_RPY(P,Y,R)=({orientation.sim_pitch:.1f},{orientation.sim_yaw:.1f},{orientation.sim_roll:.1f})"
@@ -1152,15 +1161,14 @@ class GimbalControl:
 
                 if now - last_status >= period_status:
                     with self._lock:
-                        r, p, y = self.rpy_cur
-                        wx_b, wy_b, wz_b = self._rpy_rate
+                        quat_cur = self._quat_cur
+                        wx_b, wy_b, wz_b = self._ang_vel_dps
                         gimbal_id = int(self.mavlink_sensor_id) & 0xFF
-                    sim_pitch, sim_yaw, sim_roll = self._bridge_to_sim_rpy(r, p, y)
-                    orientation = self._orientation_pipeline.build_from_sim(
-                        sim_pitch, sim_yaw, sim_roll, channel="mav"
-                    )
+                    orientation = _OrientationSnapshot.from_quat(quat_cur)
                     qx, qy, qz, qw = orientation.quat_xyzw
-                    sim_pitch_rate, sim_yaw_rate, sim_roll_rate = self._bridge_to_sim_rpy(wx_b, wy_b, wz_b)
+                    sim_pitch_rate, sim_yaw_rate, sim_roll_rate = _bridge_to_sim_rpy(
+                        wx_b, wy_b, wz_b
+                    )
                     time_boot_ms = int((now - t0) * 1000.0)
                     mav.mav.gimbal_device_attitude_status_send(
                         self.mav_sys_id,
@@ -1211,58 +1219,39 @@ class GimbalControl:
     # -------- packers (ICD) --------
     def _has_pose_delta(
         self,
-        prev: Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float]],
-        curr: Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float]],
+        prev: Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float, float]],
+        curr: Tuple[int, int, Tuple[float, float, float], Tuple[float, float, float, float]],
     ) -> bool:
         if prev[0] != curr[0] or prev[1] != curr[1]:
             return True
         pos_prev, pos_curr = prev[2], curr[2]
-        rpy_prev, rpy_curr = prev[3], curr[3]
+        quat_prev, quat_curr = prev[3], curr[3]
         for a, b in zip(pos_prev, pos_curr):
             if abs(a - b) > 1e-6:
                 return True
-        for a, b in zip(rpy_prev, rpy_curr):
-            if abs(a - b) > 1e-3:
-                return True
+        dq = quat_multiply_xyzw(quat_curr, quat_conjugate_xyzw(quat_prev))
+        _, angle_rad = quat_to_axis_angle(dq)
+        if math.degrees(angle_rad) > 1e-3:
+            return True
         return False
 
     def _invalidate_cached_orientation_locked(self) -> None:
         """Reset cached pose/quaternion bookkeeping while ``self._lock`` is held."""
 
         self._last_sent_snapshot = None
-        self._orientation_pipeline.reset()
-
-    @staticmethod
-    def _bridge_to_sim_rpy(
-        roll_deg: float, pitch_deg: float, yaw_deg: float
-    ) -> Tuple[float, float, float]:
-        """Convert bridge angles into the simulator's ``FRotator`` ordering."""
-
-        # Unreal Engine exposes rotations as ``FRotator(Pitch, Yaw, Roll)``.  The bridge
-        # stores values as (roll, pitch, yaw), so map them into that tuple ordering.
-        return float(pitch_deg), float(yaw_deg), float(roll_deg)
-
-    @staticmethod
-    def _sim_to_bridge_rpy(
-        sim_pitch_deg: float, sim_yaw_deg: float, sim_roll_deg: float
-    ) -> Tuple[float, float, float]:
-        """Convert simulator ``FRotator`` angles back into bridge (roll, pitch, yaw)."""
-
-        # Inverse of :meth:`_bridge_to_sim_rpy`.
-        return float(sim_roll_deg), float(sim_pitch_deg), float(sim_yaw_deg)
 
     def _pack_gimbal_ctrl(
         self,
         sensor_type: int,
         sensor_id: int,
         xyz: List[float],
-        orientation: _SimOrientation,
+        quat_xyzw: Tuple[float, float, float, float],
     ) -> bytes:
         return build_gimbal_ctrl_packet(
             sensor_type,
             sensor_id,
             (float(xyz[0]), float(xyz[1]), float(xyz[2])),
-            orientation.quat_xyzw,
+            quat_xyzw,
         )
 
     def _pack_power_ctrl(self, sensor_type: int, sensor_id: int, power_on: int) -> bytes:

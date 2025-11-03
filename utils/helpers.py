@@ -243,43 +243,131 @@ def euler_to_quat(
     q_pitch = (0.0, sp, 0.0, cp)
     q_yaw = (0.0, 0.0, sy, cy)
 
-    def _quat_mul(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
-        ax, ay, az, aw = a
-        bx, by, bz, bw = b
-        return (
-            aw * bx + ax * bw + ay * bz - az * by,
-            aw * by - ax * bz + ay * bw + az * bx,
-            aw * bz + ax * by - ay * bx + az * bw,
-            aw * bw - ax * bx - ay * by - az * bz,
-        )
-
     # Intrinsic rotations multiply in reverse axis order (Z → Y → X).
-    qx, qy, qz, qw = _quat_mul(_quat_mul(q_yaw, q_pitch), q_roll)
+    qx, qy, qz, qw = quat_multiply_xyzw(quat_multiply_xyzw(q_yaw, q_pitch), q_roll)
 
-    norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) or 1.0
-    qw /= norm
-    qx /= norm
-    qy /= norm
-    qz /= norm
+    return quat_normalize_xyzw((qx, qy, qz, qw))
 
-    # ``q``와 ``-q``는 동일한 회전을 나타내므로, 스칼라부(w)를 양수로 맞춰
-    # 표현을 고정해 둔다. 이후 보간 시 음수 스칼라로 인해 긴 경로를 선택하는
-    # 일을 피할 수 있다.
-    if qw < 0.0:
-        qw = -qw
-        qx = -qx
-        qy = -qy
-        qz = -qz
 
-    def _zero_if_close(value: float) -> float:
-        return 0.0 if abs(value) < 1e-12 else value
+def quat_multiply_xyzw(
+    a: Tuple[float, float, float, float],
+    b: Tuple[float, float, float, float],
+) -> Tuple[float, float, float, float]:
+    """Multiply two quaternions expressed in ``(x, y, z, w)`` order."""
+
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
+
+
+def quat_conjugate_xyzw(q: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    """Return the quaternion conjugate while preserving ``(x, y, z, w)`` ordering."""
+
+    x, y, z, w = q
+    return (-x, -y, -z, w)
+
+
+def _zero_small_components(values: Tuple[float, ...], *, threshold: float = 1e-12) -> Tuple[float, ...]:
+    return tuple(0.0 if abs(v) < threshold else v for v in values)
+
+
+def quat_normalize_xyzw(q: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    """Normalize and canonicalize a quaternion in ``(x, y, z, w)`` form."""
+
+    x, y, z, w = q
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm < 1e-15:
+        return (0.0, 0.0, 0.0, 1.0)
+    inv = 1.0 / norm
+    x *= inv
+    y *= inv
+    z *= inv
+    w *= inv
+    if w < 0.0:
+        x, y, z, w = -x, -y, -z, -w
+    return _zero_small_components((x, y, z, w))
+
+
+def quat_to_euler(
+    qx: float,
+    qy: float,
+    qz: float,
+    qw: float,
+) -> Tuple[float, float, float]:
+    """Convert a quaternion into roll, pitch, yaw angles (degrees)."""
+
+    w = float(qw)
+    x = float(qx)
+    y = float(qy)
+    z = float(qz)
+
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
+
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1.0:
+        pitch = math.degrees(math.copysign(math.pi / 2.0, sinp))
+    else:
+        pitch = math.degrees(math.asin(sinp))
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
 
     return (
-        _zero_if_close(qx),
-        _zero_if_close(qy),
-        _zero_if_close(qz),
-        _zero_if_close(qw),
+        wrap_angle_deg(roll),
+        wrap_angle_deg(pitch),
+        wrap_angle_deg(yaw),
     )
+
+
+def quat_to_axis_angle(
+    q: Tuple[float, float, float, float]
+) -> Tuple[Tuple[float, float, float], float]:
+    """Return the unit rotation axis and rotation angle (radians)."""
+
+    qx, qy, qz, qw = quat_normalize_xyzw(q)
+    qw = max(-1.0, min(1.0, qw))
+    angle = 2.0 * math.acos(qw)
+    sin_half = math.sqrt(max(0.0, 1.0 - qw * qw))
+    if sin_half < 1e-8:
+        return (0.0, 0.0, 0.0), 0.0
+    inv = 1.0 / sin_half
+    axis = (qx * inv, qy * inv, qz * inv)
+    return (_zero_small_components(axis, threshold=1e-9), angle)
+
+
+def quat_from_axis_angle(
+    axis: Tuple[float, float, float], angle_rad: float
+) -> Tuple[float, float, float, float]:
+    """Construct a quaternion from an axis-angle rotation."""
+
+    ax, ay, az = axis
+    norm = math.sqrt(ax * ax + ay * ay + az * az)
+    if norm < 1e-12 or abs(angle_rad) < 1e-12:
+        return (0.0, 0.0, 0.0, 1.0)
+    inv = 1.0 / norm
+    ax *= inv
+    ay *= inv
+    az *= inv
+    half = angle_rad * 0.5
+    s = math.sin(half)
+    c = math.cos(half)
+    return quat_normalize_xyzw((ax * s, ay * s, az * s, c))
+
+
+def quat_from_wxyz(
+    w: float, x: float, y: float, z: float
+) -> Tuple[float, float, float, float]:
+    """Convert a ``(w, x, y, z)`` quaternion into canonical ``(x, y, z, w)`` form."""
+
+    return quat_normalize_xyzw((float(x), float(y), float(z), float(w)))
 
 
 def clamp(v: float, vmin: Optional[float], vmax: Optional[float]) -> float:
