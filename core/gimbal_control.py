@@ -25,6 +25,7 @@ from utils.helpers import (
     quat_normalize_xyzw,
     quat_to_axis_angle,
     quat_to_euler,
+    remap_input_rpy,
     wrap_angle_deg,
 )
 from utils.zoom import zoom_scale_to_lens_mm
@@ -79,7 +80,7 @@ def _bridge_to_sim_rpy(
 ) -> Tuple[float, float, float]:
     """Convert bridge (roll, pitch, yaw) into simulator ``FRotator`` order."""
 
-    return float(pitch_deg), float(yaw_deg), float(roll_deg)
+    return remap_input_rpy(float(roll_deg), float(pitch_deg), float(yaw_deg))
 
 
 def _sim_to_bridge_rpy(
@@ -87,7 +88,11 @@ def _sim_to_bridge_rpy(
 ) -> Tuple[float, float, float]:
     """Convert simulator ``FRotator`` angles back into bridge order."""
 
-    return float(sim_roll_deg), float(sim_pitch_deg), float(sim_yaw_deg)
+    return (
+        wrap_angle_deg(float(sim_roll_deg)),
+        wrap_angle_deg(float(sim_pitch_deg)),
+        wrap_angle_deg(float(sim_yaw_deg)),
+    )
 
 
 @dataclass(frozen=True)
@@ -129,11 +134,13 @@ class _OrientationSnapshot:
         roll = wrap_angle_deg(float(roll_deg))
         pitch = wrap_angle_deg(float(pitch_deg))
         yaw = wrap_angle_deg(float(yaw_deg))
-        quat = quat_normalize_xyzw(euler_to_quat(roll, pitch, yaw))
+        sim_pitch, sim_yaw, sim_roll = _bridge_to_sim_rpy(roll, pitch, yaw)
+        quat = quat_normalize_xyzw(euler_to_quat(sim_roll, sim_pitch, sim_yaw))
+        bridge_rpy = _sim_to_bridge_rpy(sim_pitch, sim_yaw, sim_roll)
         return cls(
             quat_xyzw=quat,
-            bridge_rpy=(roll, pitch, yaw),
-            sim_rpy=_bridge_to_sim_rpy(roll, pitch, yaw),
+            bridge_rpy=bridge_rpy,
+            sim_rpy=(sim_pitch, sim_yaw, sim_roll),
         )
 
     @classmethod
@@ -148,11 +155,19 @@ class _OrientationSnapshot:
         cls, quat_xyzw: Tuple[float, float, float, float]
     ) -> "_OrientationSnapshot":
         quat = quat_normalize_xyzw(quat_xyzw)
-        roll, pitch, yaw = quat_to_euler(*quat)
+        sim_roll, sim_pitch, sim_yaw = quat_to_euler(*quat)
+        sim_pitch, sim_yaw, sim_roll = (
+            wrap_angle_deg(sim_pitch),
+            wrap_angle_deg(sim_yaw),
+            wrap_angle_deg(sim_roll),
+        )
+        bridge_roll, bridge_pitch, bridge_yaw = _sim_to_bridge_rpy(
+            sim_pitch, sim_yaw, sim_roll
+        )
         return cls(
             quat_xyzw=quat,
-            bridge_rpy=(roll, pitch, yaw),
-            sim_rpy=_bridge_to_sim_rpy(roll, pitch, yaw),
+            bridge_rpy=(bridge_roll, bridge_pitch, bridge_yaw),
+            sim_rpy=(sim_pitch, sim_yaw, sim_roll),
         )
 
     @classmethod
