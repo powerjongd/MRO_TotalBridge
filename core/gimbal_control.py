@@ -16,7 +16,7 @@ try:
 except ImportError:
     from serial.serialutil import SerialException
 
-from utils.helpers import euler_to_quat, wrap_angle_deg
+from utils.helpers import euler_to_quat, remap_quat_output, wrap_angle_deg
 from utils.zoom import zoom_scale_to_lens_mm
 from network.bridge_tcp import parse_bridge_tcp_command
 from network.gimbal_icd import (
@@ -1149,7 +1149,7 @@ class GimbalControl:
                     orientation = self._orientation_pipeline.build_from_sim(
                         sim_pitch, sim_yaw, sim_roll, channel="mav"
                     )
-                    qx, qy, qz, qw = orientation.quat_xyzw
+                    qx, qy, qz, qw = remap_quat_output(orientation.quat_xyzw)
                     sim_pitch_rate, sim_yaw_rate, sim_roll_rate = self._bridge_to_sim_rpy(wx_b, wy_b, wz_b)
                     time_boot_ms = int((now - t0) * 1000.0)
                     mav.mav.gimbal_device_attitude_status_send(

@@ -282,6 +282,26 @@ def euler_to_quat(
     )
 
 
+def remap_quat_output(
+    quat_xyzw: Tuple[float, float, float, float]
+) -> Tuple[float, float, float, float]:
+    """Reorder the quaternion vector part for final bridge outputs.
+
+    최종 출력 경로(UDP, TCP, MAVLink)에서는 현재 쿼터니언의 Roll(X) 값이
+    Pitch(Y) 위치로, Pitch(Y) 값이 Yaw(Z) 위치로, Yaw(Z) 값이 Roll(X) 위치로
+    이동하도록 재배열한다.  스칼라부 ``w`` 는 그대로 유지하여 짐벌락 방지용
+    최단호 선택 로직에 영향을 주지 않는다.
+    """
+
+    x, y, z, w = (
+        float(quat_xyzw[0]),
+        float(quat_xyzw[1]),
+        float(quat_xyzw[2]),
+        float(quat_xyzw[3]),
+    )
+    return (z, x, y, w)
+
+
 def clamp(v: float, vmin: Optional[float], vmax: Optional[float]) -> float:
     """
     v를 [vmin, vmax] 영역으로 클램프.
