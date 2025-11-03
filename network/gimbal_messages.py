@@ -66,7 +66,7 @@ def build_gimbal_ctrl_packet(
 
     The quaternion should be supplied in canonical ``(x, y, z, w)`` order as
     produced by :func:`utils.helpers.euler_to_quat`.  The vector part is then
-    remapped so that the output tuple exposes (Yaw→Roll, Roll→Pitch, Pitch→Yaw)
+    remapped so that the output tuple exposes (Roll→Pitch, Pitch→Yaw, Yaw→Roll)
     to satisfy the simulator expectation without disturbing upstream pipelines.
     """
 

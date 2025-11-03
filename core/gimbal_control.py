@@ -91,6 +91,7 @@ class _SimOrientationPipeline:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._last_quat: Dict[str, Tuple[float, float, float, float]] = {}
+        self._last_output_quat: Dict[str, Tuple[float, float, float, float]] = {}
 
     def reset(self, channel: Optional[str] = None) -> None:
         """Clear cached quaternions used for shortest-arc enforcement."""
@@ -98,8 +99,10 @@ class _SimOrientationPipeline:
         with self._lock:
             if channel is None:
                 self._last_quat.clear()
+                self._last_output_quat.clear()
             else:
                 self._last_quat.pop(channel, None)
+                self._last_output_quat.pop(channel, None)
 
     def build_from_sim(
         self,
@@ -120,15 +123,30 @@ class _SimOrientationPipeline:
         quat = euler_to_quat(bridge_roll, bridge_pitch, bridge_yaw)
 
         if channel:
+            output_quat = remap_quat_output(quat)
             with self._lock:
-                prev = self._last_quat.get(channel)
-                if prev is not None:
-                    dot = sum(a * b for a, b in zip(quat, prev))
+                prev_output = self._last_output_quat.get(channel)
+                if prev_output is not None:
+                    dot = sum(a * b for a, b in zip(output_quat, prev_output))
                     if dot < 0.0:
                         quat = tuple(-a for a in quat)
+                        output_quat = tuple(-a for a in output_quat)
+                else:
+                    if quat[3] < 0.0:
+                        quat = tuple(-a for a in quat)
+                        output_quat = tuple(-a for a in output_quat)
+                    else:
+                        quat = tuple(quat)
+                        output_quat = tuple(output_quat)
                 self._last_quat[channel] = tuple(quat)
+                self._last_output_quat[channel] = tuple(output_quat)
         else:
-            quat = tuple(quat)
+            if quat[3] < 0.0:
+                quat = tuple(-a for a in quat)
+            else:
+                quat = tuple(quat)
+
+        quat = tuple(quat)
 
         return _SimOrientation(
             sim_pitch=pitch,
