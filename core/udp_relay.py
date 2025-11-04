@@ -48,6 +48,11 @@ class UdpRelay:
     SERIAL_RETRY_INTERVAL = 5.0
     SERIAL_RETRY_SUCCESS_HOLD = 1.0
 
+    # 고객사 요청 고정값 (DISTANCE_SENSOR)
+    DIST_MIN_CM = 19
+    DIST_MAX_CM = 3500
+    DIST_ORIENTATION = 25
+
     def __init__(
         self,
         log_cb: Callable[[str], None],
@@ -1262,12 +1267,12 @@ class UdpRelay:
             try:
                 self.mav_ser.mav.distance_sensor_send(
                     int(time_boot_ms),
-                    int(min_cm),
-                    int(max_cm),
+                    self.DIST_MIN_CM,
+                    self.DIST_MAX_CM,
                     int(cur_cm),
                     int(type_),
                     int(sid),
-                    int(orientation),
+                    self.DIST_ORIENTATION,
                     int(covariance),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1335,8 +1340,8 @@ class UdpRelay:
         self._dist_mav_last_rx_ts = now
         # min_cm = int(getattr(msg, "min_distance", 19))
         # max_cm = int(getattr(msg, "max_distance", 3500))
-        min_cm = 19 # 파블로항공 요청사항 (min_distance/max_distance/orientation 특정값으로 넣어달라)
-        max_cm = 3500 # 파블로항공 요청사항 
+        min_cm = self.DIST_MIN_CM  # 파블로항공 요청사항 (min_distance/max_distance/orientation 특정값으로 넣어달라)
+        max_cm = self.DIST_MAX_CM  # 파블로항공 요청사항
         cur = getattr(msg, "current_distance", 0)
         if isinstance(cur, float):
             cur_cm = int(cur * 100.0)
@@ -1354,7 +1359,7 @@ class UdpRelay:
                     int(getattr(msg, "type", 0)),
                     int(getattr(msg, "id", 0)),
                     #int(getattr(msg, "orientation", 25)),
-                    25,
+                    self.DIST_ORIENTATION,
                     int(getattr(msg, "covariance", 0)),
                 )
             except Exception as exc:  # noqa: BLE001
