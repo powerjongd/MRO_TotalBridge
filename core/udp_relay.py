@@ -1333,8 +1333,10 @@ class UdpRelay:
         self._dist_mav_rx_cnt += 1
         now = time.time()
         self._dist_mav_last_rx_ts = now
-        min_cm = int(getattr(msg, "min_distance", 0))
-        max_cm = int(getattr(msg, "max_distance", 0))
+        # min_cm = int(getattr(msg, "min_distance", 19))
+        # max_cm = int(getattr(msg, "max_distance", 3500))
+        min_cm = 19 # 파블로항공 요청사항 (min_distance/max_distance/orientation 특정값으로 넣어달라)
+        max_cm = 3500 # 파블로항공 요청사항 
         cur = getattr(msg, "current_distance", 0)
         if isinstance(cur, float):
             cur_cm = int(cur * 100.0)
@@ -1351,7 +1353,8 @@ class UdpRelay:
                     cur_cm,
                     int(getattr(msg, "type", 0)),
                     int(getattr(msg, "id", 0)),
-                    int(getattr(msg, "orientation", 0)),
+                    #int(getattr(msg, "orientation", 25)),
+                    25,
                     int(getattr(msg, "covariance", 0)),
                 )
             except Exception as exc:  # noqa: BLE001
