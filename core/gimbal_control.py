@@ -1051,16 +1051,12 @@ class GimbalControl:
         r_in: float, p_in: float, y_in: float
     ) -> Tuple[float, float, float]:
         """
-        입력 (R,P,Y)를 제어 루프가 사용할 (R',P',Y')로 리맵핑합니다.
-        (1,2,3) -> (3,1,2) [Sim] 이므로
-        (1,2,3) -> (2,3,1) [Mapped] 로 변환합니다.
-        R_mapped = P_in
-        P_mapped = Y_in
-        Y_mapped = R_in
+        Morai Sim v1p0p5 까지는 입력 (R,P,Y)를 제어 루프가 사용할 (R',P',Y')로 리맵핑해야 하였음.
+        p6 부터는 정상적인 sim 내 q to rpy 변환이 되기때문에 왼손/오른손 좌표계 차이만 반영하면 됨.
         """
-        r_mapped = p_in
-        p_mapped = y_in
-        y_mapped = r_in
+        r_mapped = -r_in
+        p_mapped = -p_in
+        y_mapped = y_in
         return r_mapped, p_mapped, y_mapped
     
     # ✅ RPY 상태 역변환 함수 (신규)
@@ -1069,14 +1065,12 @@ class GimbalControl:
         r_mapped: float, p_mapped: float, y_mapped: float
     ) -> Tuple[float, float, float]:
         """
-        상태 보고용: 리맵핑된 (R',P',Y')를 원본 (R,P,Y)로 역변환합니다.
-        R_orig = Y_mapped
-        P_orig = R_mapped
-        Y_orig = P_mapped
+        Morai Sim v1p0p5 까지는 입력 (R,P,Y)를 제어 루프가 사용할 (R',P',Y')로 리맵핑해야 하였음.
+        p6 부터는 정상적인 sim 내 q to rpy 변환이 되기때문에 왼손/오른손 좌표계 차이만 반영하면 됨.
         """
-        r_orig = y_mapped
-        p_orig = r_mapped
-        y_orig = p_mapped
+        r_orig = -r_mapped
+        p_orig = -p_mapped
+        y_orig = y_mapped
         return r_orig, p_orig, y_orig
 
 
