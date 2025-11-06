@@ -143,6 +143,7 @@ class ImageStreamBridge:
         # runtime
         self.is_server_running = threading.Event()
         self._tcp_sock: Optional[socket.socket] = None
+        self._tcp_lock = threading.Lock()
         self._udp_sock: Optional[socket.socket] = None
         self._client_lock = threading.Lock()
         self._client_conn: Optional[socket.socket] = None
@@ -243,13 +244,20 @@ class ImageStreamBridge:
         self._emit_status("STOPPED")
         self.log("[BRIDGE] stopped")
 
-    def disconnect_tcp_client(self) -> bool:
-        """Force-close the current TCP client connection if present."""
+    def disconnect_tcp_client(self, *, restart_listener: bool = False) -> bool:
+        """Force-close the current TCP client connection if present.
+
+        When ``restart_listener`` is ``True`` the TCP listening socket will be
+        recycled as well so that any lingering client is fully detached and must
+        reconnect explicitly.
+        """
 
         with self._client_lock:
             conn = self._client_conn
             self._client_conn = None
         if not conn:
+            if restart_listener:
+                self._restart_tcp_listener()
             return False
         try:
             conn.shutdown(socket.SHUT_RDWR)
@@ -260,6 +268,8 @@ class ImageStreamBridge:
         except Exception:
             pass
         self.log("[BRIDGE] TCP client disconnect requested")
+        if restart_listener:
+            self._restart_tcp_listener()
         return True
 
     def update_settings(self, settings: Dict[str, Any]) -> None:
@@ -372,23 +382,34 @@ class ImageStreamBridge:
     # --------------- TCP Server ---------------
 
     def _open_tcp(self) -> None:
-        self._tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._tcp_sock.bind((self.ip, self.tcp_port))
-        self._tcp_sock.listen(1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.ip, self.tcp_port))
+        sock.listen(1)
+        with self._tcp_lock:
+            self._tcp_sock = sock
         self.log(f"[BRIDGE] TCP listening: {self.ip}:{self.tcp_port}")
 
     def _tcp_server_thread(self) -> None:
         while self.is_server_running.is_set():
+            with self._tcp_lock:
+                sock = self._tcp_sock
+            if sock is None:
+                time.sleep(0.05)
+                continue
             try:
-                conn, addr = self._tcp_sock.accept()
+                conn, addr = sock.accept()
                 with self._client_lock:
                     self._client_conn = conn
                 self.log(f"[BRIDGE] TCP client connected: {addr}")
                 t = threading.Thread(target=self._handle_client_thread, args=(conn,), daemon=True)
                 t.start()
             except OSError:
-                break
+                if not self.is_server_running.is_set():
+                    break
+                # Listener was likely recycled; retry with the latest socket.
+                time.sleep(0.05)
+                continue
             except Exception as e:
                 self.log(f"[BRIDGE] TCP accept error: {e}")
                 time.sleep(0.1)
@@ -1108,14 +1129,27 @@ class ImageStreamBridge:
         self._close_udp_socket()
 
     def _close_tcp_socket(self) -> None:
-        sock = self._tcp_sock
+        with self._tcp_lock:
+            sock = self._tcp_sock
+            self._tcp_sock = None
         if not sock:
             return
-        self._tcp_sock = None
         try:
             sock.close()
         except Exception:
             pass
+
+    def _restart_tcp_listener(self) -> None:
+        """Recycle the TCP listening socket without stopping the service."""
+
+        if not self.is_server_running.is_set():
+            return
+        self._close_tcp_socket()
+        try:
+            self._open_tcp()
+        except Exception as exc:
+            self.log(f"[BRIDGE] TCP listener restart failed: {exc}")
+            raise
 
     def _close_udp_socket(self) -> None:
         sock = self._udp_sock

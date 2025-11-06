@@ -663,7 +663,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not callable(disconnect):
                 return RuntimeError("disconnect not supported"), False
             try:
-                result = bool(disconnect())
+                result = bool(disconnect(restart_listener=True))
             except Exception as exc:  # pragma: no cover - runtime guard
                 return exc, False
             return None, result
