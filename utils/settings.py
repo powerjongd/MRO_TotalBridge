@@ -191,6 +191,15 @@ class AppConfig:
         ensure_dir(b["realtime_dir"])
         ensure_dir(b["predefined_dir"])
 
+        enable_tcp = b.get("enable_tcp")
+        if isinstance(enable_tcp, str):
+            enable_tcp = enable_tcp.strip().lower() not in {"false", "0", "no", "off"}
+        elif enable_tcp is None:
+            enable_tcp = True
+        else:
+            enable_tcp = bool(enable_tcp)
+        b["enable_tcp"] = enable_tcp
+
         b.setdefault("image_source_mode", "realtime")
         b["images"] = b["realtime_dir"]
         # GUI 미리보기 등

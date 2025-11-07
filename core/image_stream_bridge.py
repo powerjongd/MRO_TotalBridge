@@ -143,9 +143,11 @@ class ImageStreamBridge:
         # runtime
         self.is_server_running = threading.Event()
         self._tcp_sock: Optional[socket.socket] = None
+        self._tcp_lock = threading.Lock()
         self._udp_sock: Optional[socket.socket] = None
         self._client_lock = threading.Lock()
         self._client_conn: Optional[socket.socket] = None
+        self._tcp_enabled = self._normalize_bool_flag(settings.get("enable_tcp"), default=True)
 
         self._tcp_thread: Optional[threading.Thread] = None
         self._udp_registered = False
@@ -175,11 +177,25 @@ class ImageStreamBridge:
 
     # --------------- lifecycle ---------------
 
+    @staticmethod
+    def _normalize_bool_flag(value: Any, *, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().lower() not in {"false", "0", "no", "off"}
+        return bool(value)
+
+
     def start(self) -> None:
         if self.is_server_running.is_set():
             return
         self.is_server_running.set()
-        self._open_tcp()
+        if self._tcp_enabled:
+            self._open_tcp()
+        else:
+            self.log(
+                f"[BRIDGE] TCP listener disabled; not binding {self.ip}:{self.tcp_port}"
+            )
         self._open_udp()
         self._tcp_thread = threading.Thread(target=self._tcp_server_thread, daemon=True)
         self._tcp_thread.start()
@@ -243,13 +259,20 @@ class ImageStreamBridge:
         self._emit_status("STOPPED")
         self.log("[BRIDGE] stopped")
 
-    def disconnect_tcp_client(self) -> bool:
-        """Force-close the current TCP client connection if present."""
+    def disconnect_tcp_client(self, *, restart_listener: bool = False) -> bool:
+        """Force-close the current TCP client connection if present.
+
+        When ``restart_listener`` is ``True`` the TCP listening socket will be
+        recycled as well so that any lingering client is fully detached and must
+        reconnect explicitly.
+        """
 
         with self._client_lock:
             conn = self._client_conn
             self._client_conn = None
         if not conn:
+            if restart_listener:
+                self._restart_tcp_listener()
             return False
         try:
             conn.shutdown(socket.SHUT_RDWR)
@@ -260,12 +283,22 @@ class ImageStreamBridge:
         except Exception:
             pass
         self.log("[BRIDGE] TCP client disconnect requested")
+        if restart_listener and self._tcp_enabled:
+            self._restart_tcp_listener()
         return True
 
     def update_settings(self, settings: Dict[str, Any]) -> None:
         self.ip = settings.get("ip", self.ip)
         self.tcp_port = int(settings.get("tcp_port", self.tcp_port))
         self.udp_port = int(settings.get("udp_port", self.udp_port))
+        if "enable_tcp" in settings:
+            try:
+                enabled_flag = self._normalize_bool_flag(
+                    settings.get("enable_tcp"), default=self._tcp_enabled
+                )
+                self.set_tcp_enabled(enabled_flag)
+            except Exception:
+                pass
 
         if "gimbal_sensor_type" in settings:
             try:
@@ -308,6 +341,31 @@ class ImageStreamBridge:
         self._prepare_dirs()
         self._sync_next_number()
         self.log("[BRIDGE] settings updated")
+
+    def set_tcp_enabled(self, enabled: bool) -> bool:
+        """Enable or disable the TCP listener dynamically."""
+
+        flag = self._normalize_bool_flag(enabled, default=self._tcp_enabled)
+        with self._tcp_lock:
+            if flag == self._tcp_enabled:
+                return self._tcp_enabled
+            self._tcp_enabled = flag
+
+        if not flag:
+            self.disconnect_tcp_client(restart_listener=False)
+            self._close_tcp_socket()
+            self.log("[BRIDGE] TCP listener disabled")
+            return False
+
+        if self.is_server_running.is_set():
+            try:
+                self._restart_tcp_listener()
+            except Exception:
+                with self._tcp_lock:
+                    self._tcp_enabled = False
+                raise
+        self.log("[BRIDGE] TCP listener enabled")
+        return True
 
     def attach_gimbal_controller(self, gimbal: Optional["GimbalControl"]) -> None:
         self._gimbal = gimbal
@@ -372,23 +430,36 @@ class ImageStreamBridge:
     # --------------- TCP Server ---------------
 
     def _open_tcp(self) -> None:
-        self._tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._tcp_sock.bind((self.ip, self.tcp_port))
-        self._tcp_sock.listen(1)
+        if not self._tcp_enabled:
+            return
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.ip, self.tcp_port))
+        sock.listen(1)
+        with self._tcp_lock:
+            self._tcp_sock = sock
         self.log(f"[BRIDGE] TCP listening: {self.ip}:{self.tcp_port}")
 
     def _tcp_server_thread(self) -> None:
         while self.is_server_running.is_set():
+            with self._tcp_lock:
+                sock = self._tcp_sock
+            if sock is None:
+                time.sleep(0.05)
+                continue
             try:
-                conn, addr = self._tcp_sock.accept()
+                conn, addr = sock.accept()
                 with self._client_lock:
                     self._client_conn = conn
                 self.log(f"[BRIDGE] TCP client connected: {addr}")
                 t = threading.Thread(target=self._handle_client_thread, args=(conn,), daemon=True)
                 t.start()
             except OSError:
-                break
+                if not self.is_server_running.is_set():
+                    break
+                # Listener was likely recycled; retry with the latest socket.
+                time.sleep(0.05)
+                continue
             except Exception as e:
                 self.log(f"[BRIDGE] TCP accept error: {e}")
                 time.sleep(0.1)
@@ -928,6 +999,7 @@ class ImageStreamBridge:
                 "last_saved_path": self._last_image_meta["saved_path"],
                 "udp_listening": bool(self._udp_sock),
                 "tcp_listening": bool(self._tcp_sock),
+                "tcp_enabled": self._tcp_enabled,
                 "image_source_mode": self.image_source_mode,
                 "realtime_dir": self.realtime_dir,
                 "predefined_dir": self.predefined_dir,
@@ -1108,14 +1180,27 @@ class ImageStreamBridge:
         self._close_udp_socket()
 
     def _close_tcp_socket(self) -> None:
-        sock = self._tcp_sock
+        with self._tcp_lock:
+            sock = self._tcp_sock
+            self._tcp_sock = None
         if not sock:
             return
-        self._tcp_sock = None
         try:
             sock.close()
         except Exception:
             pass
+
+    def _restart_tcp_listener(self) -> None:
+        """Recycle the TCP listening socket without stopping the service."""
+
+        if not self.is_server_running.is_set() or not self._tcp_enabled:
+            return
+        self._close_tcp_socket()
+        try:
+            self._open_tcp()
+        except Exception as exc:
+            self.log(f"[BRIDGE] TCP listener restart failed: {exc}")
+            raise
 
     def _close_udp_socket(self) -> None:
         sock = self._udp_sock
