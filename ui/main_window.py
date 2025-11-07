@@ -117,6 +117,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preview_target_size = QtCore.QSize(640, 480)
         self._disconnect_in_progress = False
         self._background_watchers: list[QtCore.QFutureWatcher] = []
+        self._bridge_cfg = self.cfg.setdefault("bridge", {})
+        self._initial_tcp_enabled = bool(self._bridge_cfg.get("enable_tcp", True))
+        self.chk_tcp_enabled: Optional[QtWidgets.QCheckBox] = None
 
         gimbal_cfg = self.cfg.setdefault("gimbal", {})
         initial_method = str(gimbal_cfg.get("control_method", "tcp")).lower()
@@ -202,6 +205,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_bridge = QtWidgets.QPushButton("Image Stream Settings")
         self.btn_bridge.clicked.connect(self.open_bridge_window)
         bridge_buttons.addWidget(self.btn_bridge)
+        self.chk_tcp_enabled = QtWidgets.QCheckBox("Enable TCP/IP Connection")
+        self.chk_tcp_enabled.setChecked(self._initial_tcp_enabled)
+        self.chk_tcp_enabled.toggled.connect(self._on_tcp_enable_toggled)
+        bridge_buttons.addWidget(self.chk_tcp_enabled)
         bridge_buttons.addStretch()
         bridge_layout.addLayout(bridge_buttons)
 
@@ -468,11 +475,19 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             st = {}
         client_connected = bool(st.get("tcp_client_connected"))
+        tcp_enabled = bool(st.get("tcp_enabled", True))
+        if self.chk_tcp_enabled is not None and self.chk_tcp_enabled.isChecked() != tcp_enabled:
+            self.chk_tcp_enabled.blockSignals(True)
+            self.chk_tcp_enabled.setChecked(tcp_enabled)
+            self.chk_tcp_enabled.blockSignals(False)
         if not self._disconnect_in_progress:
             self.btn_server.setEnabled(client_connected)
 
         mode = st.get("image_source_mode", "Realtime")
-        tcp_on = "ON" if st.get("tcp_listening") else "OFF"
+        if not tcp_enabled:
+            tcp_on = "DISABLED"
+        else:
+            tcp_on = "ON" if st.get("tcp_listening") else "OFF"
         udp_on = "ON" if st.get("udp_listening") else "OFF"
         client_on = "ON" if client_connected else "OFF"
         mode_label = str(mode)
@@ -652,6 +667,40 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Button handlers
     # ------------------------------------------------------------------
+    def _on_tcp_enable_toggled(self, checked: bool) -> None:
+        desired = bool(checked)
+        setter = getattr(self.bridge, "set_tcp_enabled", None)
+        if not callable(setter):
+            self.log.error("[UI] Bridge does not support TCP enable toggle")
+            QtWidgets.QMessageBox.critical(self, "Error", "TCP/IP 연결 토글을 지원하지 않습니다.")
+            if self.chk_tcp_enabled is not None:
+                self.chk_tcp_enabled.blockSignals(True)
+                self.chk_tcp_enabled.setChecked(not desired)
+                self.chk_tcp_enabled.blockSignals(False)
+            return
+
+        try:
+            result = bool(setter(desired))
+        except Exception as exc:  # pragma: no cover - runtime guard
+            self.log.error("[UI] Failed to toggle TCP listener: %s", exc)
+            QtWidgets.QMessageBox.critical(self, "Error", f"TCP/IP 설정 변경 실패:\n{exc}")
+            if self.chk_tcp_enabled is not None:
+                self.chk_tcp_enabled.blockSignals(True)
+                self.chk_tcp_enabled.setChecked(not desired)
+                self.chk_tcp_enabled.blockSignals(False)
+            return
+
+        if result != desired:
+            self.log.warning("[UI] TCP listener state mismatch: requested=%s got=%s", desired, result)
+            if self.chk_tcp_enabled is not None:
+                self.chk_tcp_enabled.blockSignals(True)
+                self.chk_tcp_enabled.setChecked(result)
+                self.chk_tcp_enabled.blockSignals(False)
+            desired = result
+
+        self.cfg.setdefault("bridge", {})["enable_tcp"] = desired
+        self._refresh_status_labels()
+
     def on_disconnect_stream(self) -> None:
         if self._disconnect_in_progress:
             return
