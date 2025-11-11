@@ -1,14 +1,5 @@
-# utils/__init__.py
 # -*- coding: utf-8 -*-
-"""
-Utilities: settings & helpers
-
-Re-exports:
-- settings:
-    AppConfig, BridgeSettings, GimbalSettings, RelaySettings, ConfigManager
-- helpers:
-    has_display, get_logger, euler_to_quat, clamp, rate_limit
-"""
+"""Support utilities: settings, helpers, and shared math."""
 
 from __future__ import annotations
 

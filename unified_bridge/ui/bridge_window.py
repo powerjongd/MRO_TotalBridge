@@ -7,7 +7,7 @@ from typing import Dict, Optional, Tuple
 
 from PySide6 import QtWidgets
 
-from utils.settings import AppConfig, ConfigManager
+from unified_bridge.support.settings import AppConfig, ConfigManager
 
 SENSOR_TYPES = ["Camera", "GPS", "LiDAR", "RADAR", "LRF", "IMU"]
 SENSOR_COMBO_VALUES = [f"{idx}: {name}" for idx, name in enumerate(SENSOR_TYPES)]

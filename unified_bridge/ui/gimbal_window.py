@@ -9,8 +9,8 @@ from PySide6 import QtWidgets
 from serial.tools import list_ports
 
 # ❌ RPY 리맵핑 함수 임포트 제거
-# from utils.helpers import remap_input_rpy
-from utils.settings import AppConfig, ConfigManager
+# from unified_bridge.support.helpers import remap_input_rpy
+from unified_bridge.support.settings import AppConfig, ConfigManager
 
 
 SENSOR_TYPES = ["Camera", "GPS", "LiDAR", "RADAR", "LRF", "IMU"]

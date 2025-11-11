@@ -1,6 +1,6 @@
-# Mro Unified Bridge
+# Unified Bridge
 
-Unreal 기반 MORAI Sim Air(MRO)와 외부 소프트웨어 사이에서 이미지를 중계하고, 센서·짐벌 제어, Gazebo UDP 릴레이, MAVLink 시리얼 변환 등을 수행하는 데스크톱 애플리케이션입니다. 영문명은 **Unified Bridge**이며, 현재는 PySide6 기반 GUI로 통합 실행됩니다. 실행 파일(또는 `main.py`)과 동일한 경로에 설정과 데이터가 저장됩니다.
+Unreal 기반 MORAI Sim Air(MRO)와 외부 소프트웨어 사이에서 이미지를 중계하고, 센서·짐벌 제어, Gazebo UDP 릴레이, MAVLink 시리얼 변환 등을 수행하는 데스크톱 애플리케이션입니다. 기존 MRO TotalBridge에서 이름을 바꾼 **Unified Bridge**는 PySide6 기반 GUI로 통합 실행되며, 실행 파일(또는 `main.py`)과 동일한 경로에 설정과 데이터가 저장됩니다.
 
 ## 주요 기능
 
@@ -34,16 +34,22 @@ Unreal 기반 MORAI Sim Air(MRO)와 외부 소프트웨어 사이에서 이미�
 ## 폴더 구조
 
 ```
-unified-bridge/
+unified_bridge/
 ├─ main.py
 ├─ requirements.txt
-├─ core/
-├─ ui/
-├─ utils/
-├─ savedata/          # 실행 후 자동 생성(설정/상태 저장)
-├─ SaveFile/          # 실시간 캡처 이미지/프리뷰 저장 (기본 이미지 라이브러리)
-└─ PreDefinedImageSet/ # 사전 정의된 JPEG 이미지 세트 (선택 시 TCP 응답 사용)
+├─ unified_bridge/
+│  ├─ __init__.py
+│  ├─ application.py        # 서비스/Qt 부트스트랩 진입점
+│  ├─ services/             # ImageStreamBridge, GimbalControl, DroneRelay 등 비 UI 로직
+│  ├─ protocols/            # TCP/UDP ICD 및 메시지 빌더
+│  ├─ support/              # 설정/옵저버/수학 유틸리티
+│  └─ ui/                   # PySide6 기반 창/다이얼로그
+├─ savedata/                # 실행 후 자동 생성(설정/상태 저장)
+├─ SaveFile/                # 실시간 캡처 이미지/프리뷰 저장 (기본 이미지 라이브러리)
+└─ PreDefinedImageSet/      # 사전 정의된 JPEG 이미지 세트 (선택 시 TCP 응답 사용)
 ```
+
+모듈은 `unified_bridge.application` → `services/*` → `protocols/*`/`support/*` 순으로 의존하며, UI 계층은 `unified_bridge.ui`에서 서비스 인스턴스를 받아 표시 로직만 담당합니다.
 
 ## 실행 방법
 
@@ -72,7 +78,7 @@ PyInstaller `--windowed` 빌드처럼 콘솔 창이 열리지 않는 환경에�
 ### One-folder (콘솔 숨김)
 
 ```bash
-pyinstaller --noconfirm --clean --name MroUnifiedBridge \
+pyinstaller --noconfirm --clean --name UnifiedBridge \
   --hidden-import "pymavlink.dialects.v20.common" \
   --hidden-import "pymavlink.dialects.v20.ardupilotmega" \
   --hidden-import "serial.tools.list_ports" \
@@ -91,7 +97,7 @@ pyinstaller --noconfirm --clean --name MroUnifiedBridge \
 ### One-file (단일 exe, 최초 실행 다소 느림)
 
 ```bash
-pyinstaller --noconfirm --clean --name MroUnifiedBridge \
+pyinstaller --noconfirm --clean --name UnifiedBridge \
   --hidden-import "pymavlink.dialects.v20.common" \
   --hidden-import "pymavlink.dialects.v20.ardupilotmega" \
   --hidden-import "serial.tools.list_ports" \

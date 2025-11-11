@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Optional
 from PySide6 import QtConcurrent, QtCore, QtGui, QtWidgets
 from serial.tools import list_ports
 
-from utils.settings import AppConfig, ConfigManager
+from unified_bridge.support.settings import AppConfig, ConfigManager
 
 
 class RelaySettingsDialog(QtWidgets.QDialog):

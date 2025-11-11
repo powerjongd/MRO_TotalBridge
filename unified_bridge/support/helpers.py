@@ -1,4 +1,4 @@
-# utils/helpers.py
+# support/helpers.py
 # -*- coding: utf-8 -*-
 """Utility helpers for the desktop bridge suite.
 
