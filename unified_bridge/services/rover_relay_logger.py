@@ -1,4 +1,4 @@
-# core/rover_relay_logger.py
+# services/rover_relay_logger.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from PySide6 import QtCore
 
-from core.network import get_global_dispatcher
+from .network import get_global_dispatcher
 
 from .log_parsers import UNIFIED_CSV_HEADER, RoverFeedbackCsvFormatter
 
@@ -86,14 +86,14 @@ class RoverRelayLogger:
         self._dispatcher = get_global_dispatcher()
         self._feedback_registered = False
 
-        self._relay: Optional["UdpRelay"] = None
+        self._relay: Optional["DroneRelay"] = None
 
         self._load_settings()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def register_relay(self, relay: Optional["UdpRelay"]) -> None:
+    def register_relay(self, relay: Optional["DroneRelay"]) -> None:
         self._relay = relay
 
     def update_settings(self, values: Dict[str, Any]) -> None:
@@ -555,4 +555,4 @@ class RoverRelayLogger:
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .udp_relay import UdpRelay
+    from .drone_relay import DroneRelay

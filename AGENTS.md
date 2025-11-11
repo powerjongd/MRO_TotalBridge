@@ -1,4 +1,4 @@
-# Contributor Guide for MRO TotalBridge
+# Contributor Guide for Unified Bridge
 
 This document captures the functional expectations, configuration layout, and
 coding conventions for the entire repository. Any change inside this repo must
@@ -7,11 +7,11 @@ subdirectory.
 
 ## Application Overview
 
-MRO TotalBridge (a.k.a. Unified Bridge) is a desktop relay hub that links the
+Unified Bridge (formerly MRO TotalBridge) is a desktop relay hub that links the
 MORAI simulator, custom sensor payloads, and external control stacks. The
-application exposes both a Tkinter-based GUI and a headless CLI and stores all
-runtime state beside the executable (`savedata/`, `SaveFile/`, etc.). The
-high-level features are:
+application exposes a PySide6-based GUI (with optional headless services) and
+stores all runtime state beside the executable (`savedata/`, `SaveFile/`, etc.).
+The high-level features are:
 
 - **Image Stream Bridge** – Receives UDP JPEG frames, provides an interactive
   preview, serves images via the `MroCameraControl` TCP service, and manages
@@ -32,27 +32,19 @@ high-level features are:
 
 ## Directory Structure
 
-- `main.py` – Entry point. Parses CLI arguments, bootstraps settings, launches
-  the GUI event loop or headless services, and coordinates shutdown.
-- `core/`
-  - `image_stream_bridge.py` – Core logic for the image pipeline (UDP reception,
-    JPEG buffering, TCP camera server, digital zoom processing).
-  - `gimbal_control.py` – UDP/TCP gimbal control loop, preset management, and
-    synchronization with the UI.
-  - `udp_relay.py` – Gazebo relay processes, distance/heartbeat handling, and
-    logging guards shared with rover relay logging.
-  - `rover_relay_logger.py` – Rover relay logging orchestrator. Manages Tk
-    windows, async loops, log writers, and exclusivity with Gazebo logging.
-- `ui/`
-  - `main_window.py` – Tk main window composition, binding of core modules,
-    logging status widgets, and navigation to configuration dialogs.
-  - `rover_relay_window.py` – Rover relay settings/monitor UI with Tk variable
-    bindings, validation, and live status updates.
-  - `__init.py` – GUI bootstrap helpers (thread coordination, style, dialogs).
-- `utils/`
-  - `settings.py` – Settings dataclasses, schema evolution helpers, atomic JSON
-    persistence, and defaults for every feature.
-- `network/` – Low-level socket helpers and shared protocol definitions.
+- `main.py` – Console entry point that delegates to
+  `unified_bridge.application.run`.
+- `unified_bridge/`
+  - `application.py` – Qt application/bootstrap wiring that instantiates the
+    service layer and coordinates shutdown.
+  - `services/` – UI-agnostic background services (`image_stream_bridge.py`,
+    `gimbal_control.py`, `drone_relay.py`, `rover_relay_logger.py`, etc.).
+  - `protocols/` – TCP/UDP ICD helpers, message builders, and low-level packet
+    utilities shared by services.
+  - `support/` – Configuration managers, observer primitives, math/logging
+    utilities.
+  - `ui/` – PySide6 widgets, dialogs, and logging surfaces. These modules should
+    remain thin wrappers over the service layer.
 
 ## Functional Expectations
 
@@ -60,11 +52,11 @@ high-level features are:
    remain mutually exclusive. UI toggles and backend checks should prevent both
    from being active simultaneously and surface clear status messages.
 2. **Atomic Configuration Writes** – Continue using write-to-temp-file then
-   rename semantics in `utils.settings.save_settings`. Never introduce partial
-   writes.
-3. **Thread & Async Safety** – Tk operations must run on the main thread. When
-   background threads interact with Tk variables/widgets, schedule via
-   `ui.__init.run_on_main_thread` (or equivalent). Long-running IO must avoid
+   rename semantics inside `unified_bridge.support.settings.ConfigManager.save`.
+   Never introduce partial writes.
+3. **Thread & Async Safety** – Qt operations must run on the GUI thread. When
+   background threads interact with widgets or QtCore objects, dispatch via
+   signals/slots or `QtCore.QMetaObject.invokeMethod`. Long-running IO must avoid
    blocking the GUI event loop.
 4. **UDP/TCP Protocol Stability** – Do not change command IDs, binary layouts,
    or default ports without clear backward compatibility notes. Sensor control,
@@ -98,7 +90,7 @@ high-level features are:
 
 ## Network Resiliency Notes (2024-06)
 
-- **UDP 이미지 재조립 안정화** – `core/image_stream_bridge.py` 의 UDP 루프는
+- **UDP 이미지 재조립 안정화** – `unified_bridge/services/image_stream_bridge.py` 의 UDP 루프는
   이제 프레임마다 헤더 필드를 검증하고, 조각 수/총 크기/오프셋이 사양을
   벗어나면 해당 세션을 폐기합니다. 최대 조각 크기(64,970바이트)와 총
   이미지 크기(128MB) 상한을 초과하는 값은 즉시 거부하며, 3초 동안 갱신이

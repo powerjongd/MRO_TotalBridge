@@ -1,4 +1,4 @@
-# core/image_stream_bridge.py
+# services/image_stream_bridge.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import time
 import datetime
 from typing import Callable, Optional, Dict, Any, Tuple, List
 
-from core.network import get_global_dispatcher
+from .network import get_global_dispatcher
 
 try:
     from PIL import Image  # 미리보기 썸네일 생성에 사용될 수 있음(옵션)
@@ -23,7 +23,7 @@ except Exception:
 
 
 # ---- Command IDs (MroCameraControl) ----
-from network.image_stream_icd import (
+from unified_bridge.protocols.image_stream_icd import (
     CMD_REQ_CAPTURE,
     CMD_SET_GIMBAL,
     CMD_SET_COUNT,
@@ -39,7 +39,7 @@ from network.image_stream_icd import (
     parse_udp_header,
     pack_tcp_response,
 )
-from utils.zoom import normalize_zoom_lens_dist, zoom_scale_to_lens_mm
+from unified_bridge.support.zoom import normalize_zoom_lens_dist, zoom_scale_to_lens_mm
 
 
 __all__ = ["ImageStreamBridge", "ImageBridgeCore"]
@@ -58,9 +58,9 @@ class ImageStreamBridge:
     TCP_BYTES_PER_SEC = 256_000  # ~250 KB/s lower bound expectation
     MIN_COMMAND_PAYLOAD = 9
 
-    """Image stream module for MRO UnifiedBridge (통합브릿지).
+    """Image stream module for Unified Bridge (통합브릿지).
 
-    MRO UnifiedBridge를 구성하는 세 모듈 중 영상 스트리밍 담당 파트로,
+    Unified Bridge를 구성하는 세 모듈 중 영상 스트리밍 담당 파트로,
     실시간 UDP 프레임을 조립하고 TCP 명령(캡처/파일 전송 등)에 대응한다.
     SaveFile(실시간 캡처) 또는 PreDefinedImageSet(사전 이미지) 중 선택된
     라이브러리를 사용해 TCP 클라이언트에 이미지를 제공한다.
@@ -1119,7 +1119,7 @@ class ImageStreamBridge:
                 pass
         return zoomed
 
-    # --------------- utils ---------------
+    # --------------- support utilities ---------------
 
     def _prepare_dirs(self) -> None:
         for label, path in ("SaveFile", self.realtime_dir), ("PreDefinedImageSet", self.predefined_dir):

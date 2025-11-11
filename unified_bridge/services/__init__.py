@@ -1,12 +1,10 @@
-# core/__init__.py
 # -*- coding: utf-8 -*-
-"""
-Core layer public API.
+"""Service layer public API.
 
 This package contains UI-agnostic services (Unified Bridge modules):
 - ImageStreamBridge: 영상 스트리밍(TCP 카메라 명령 + UDP 조립)
 - GimbalControl:     짐벌 제어 모듈
-- UdpRelay:          Gazebo/가상 센서 릴레이 모듈
+- DroneRelay:        Gazebo/가상 센서 릴레이 모듈
 """
 
 from __future__ import annotations
@@ -35,14 +33,14 @@ except Exception:  # pragma: no cover
     GimbalControl = None  # type: ignore
 
 try:
-    from .udp_relay import UdpRelay  # noqa: F401
+    from .drone_relay import DroneRelay  # noqa: F401
 except Exception:  # pragma: no cover
-    UdpRelay = None  # type: ignore
+    DroneRelay = None  # type: ignore
 
 
 __all__ = [
     "CoreService",
     "ImageStreamBridge",
     "GimbalControl",
-    "UdpRelay",
+    "DroneRelay",
 ]

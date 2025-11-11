@@ -1,4 +1,4 @@
-# utils/settings.py
+# support/settings.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -48,22 +48,27 @@ def get_program_dir() -> str:
         if getattr(sys, "frozen", False) and hasattr(sys, "executable"):
             cand = os.path.dirname(os.path.abspath(sys.executable))
         else:
-            # utils/settings.py → utils → 프로젝트 루트
+            # support/settings.py → support → 프로젝트 루트
             cand = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # 3) 쓰기 가능 여부 확인, 불가하면 사용자 폴더로 폴백
     if not _is_writable_dir(cand):
-        # Windows: %LOCALAPPDATA%\MroUnifiedBridge
-        # 기타 OS: ~/.local/share/MroUnifiedBridge
+        # Windows: %LOCALAPPDATA%\UnifiedBridge (기존 MroUnifiedBridge 경로도 지원)
+        # 기타 OS: ~/.local/share/UnifiedBridge
         from pathlib import Path
+
         if os.name == "nt":
             base = os.environ.get("LOCALAPPDATA", str(Path.home()))
-            fallback = os.path.join(base, "MroUnifiedBridge")
+            legacy = os.path.join(base, "MroUnifiedBridge")
+            fallback = os.path.join(base, "UnifiedBridge")
         else:
-            fallback = os.path.join(str(Path.home()), ".local", "share", "MroUnifiedBridge")
+            base = os.path.join(str(Path.home()), ".local", "share")
+            legacy = os.path.join(base, "MroUnifiedBridge")
+            fallback = os.path.join(base, "UnifiedBridge")
 
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
+        target = legacy if os.path.exists(legacy) else fallback
+        os.makedirs(target, exist_ok=True)
+        return target
 
     return cand
 

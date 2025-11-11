@@ -1,4 +1,4 @@
-"""PySide6 main window for MRO TotalBridge."""
+"""PySide6 main window for Unified Bridge."""
 from __future__ import annotations
 
 import io
@@ -11,9 +11,9 @@ from typing import Any, Callable, Deque, Dict, Optional
 from PIL import Image
 from PySide6 import QtConcurrent, QtCore, QtGui, QtWidgets
 
-from utils.helpers import get_recent_log_lines
-from utils.observers import ObservableFloat
-from utils.zoom import BASE_ZOOM_LENS_MM
+from unified_bridge.support.helpers import get_recent_log_lines
+from unified_bridge.support.observers import ObservableFloat
+from unified_bridge.support.zoom import BASE_ZOOM_LENS_MM
 
 
 class _LogEmitter(QtCore.QObject):

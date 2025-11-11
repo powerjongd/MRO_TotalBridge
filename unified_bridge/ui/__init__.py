@@ -1,4 +1,4 @@
-"""PySide6 UI bootstrap for MRO TotalBridge."""
+"""PySide6 UI bootstrap for Unified Bridge."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

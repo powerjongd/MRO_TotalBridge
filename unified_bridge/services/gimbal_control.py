@@ -1,4 +1,4 @@
-# core/gimbal_control.py
+# services/gimbal_control.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ try:
 except ImportError:
     from serial.serialutil import SerialException
 
-# ❌ utils.helpers 의존성 없음
-from utils.zoom import zoom_scale_to_lens_mm
-from network.bridge_tcp import parse_bridge_tcp_command
-from network.gimbal_icd import (
+# ❌ support.helpers 의존성 없음
+from unified_bridge.support.zoom import zoom_scale_to_lens_mm
+from unified_bridge.protocols.bridge_tcp import parse_bridge_tcp_command
+from unified_bridge.protocols.gimbal_icd import (
     MC_HB_TYPE,
     GIMBAL_STATUS_FLAGS,
     PARAM_TABLE,
@@ -28,7 +28,7 @@ from network.gimbal_icd import (
     TCP_CMD_SET_TARGET,
     TCP_CMD_SET_ZOOM,
 )
-from network.gimbal_messages import (
+from unified_bridge.protocols.gimbal_messages import (
     StatusSnapshot,
     build_gimbal_ctrl_packet,
     build_power_ctrl_packet,
@@ -1425,7 +1425,7 @@ class GimbalControl:
         hex_str = " ".join(f"{b:02X}" for b in pkt)
         self.log(f"[GIMBAL] {label} packet ({len(pkt)} bytes): {hex_str}")
 
-    # -------- utils --------
+    # -------- support utilities --------
     def _emit_status(self, text: str) -> None:
         try:
             if self.status_cb: self.status_cb(text)

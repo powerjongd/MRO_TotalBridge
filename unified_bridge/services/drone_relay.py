@@ -1,4 +1,4 @@
-# core/udp_relay.py
+# services/drone_relay.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -17,12 +17,12 @@ try:
 except ImportError:
     from serial.serialutil import SerialException
 
-from network import gazebo_relay_icd as relay_icd
+from unified_bridge.protocols import gazebo_relay_icd as relay_icd
 from .log_parsers import UNIFIED_CSV_HEADER, format_drone_csv_row
-from core.network import get_global_dispatcher
+from .network import get_global_dispatcher
 
 
-class UdpRelay:
+class DroneRelay:
     """
     Gazebo UDP → (1) 그대로 ImageGenerator ExternalCtrl UDP로 Relay
                 → (2) Optical Flow 센서(가정)로 변환하여 MAVLink OPTICAL_FLOW(100) 시리얼 송출

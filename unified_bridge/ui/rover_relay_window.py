@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, Optional
 
 from PySide6 import QtConcurrent, QtCore, QtGui, QtWidgets
 
-from utils.settings import AppConfig, ConfigManager
+from unified_bridge.support.settings import AppConfig, ConfigManager
 
 
 class RoverRelaySettingsDialog(QtWidgets.QDialog):
