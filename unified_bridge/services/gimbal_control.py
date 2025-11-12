@@ -1260,36 +1260,52 @@ class GimbalControl:
                         )
                         
                         # 2. (P, Y, R) 입력을 (R, P, Y)로 변환
-                        roll_deg = sim_roll
-                        pitch_deg = sim_pitch
+                        roll_user = sim_roll
+                        pitch_user = sim_pitch
                         yaw_deg = sim_yaw
-                        
-                        # ✅ 3. RPY 리맵핑 (R,P,Y) -> (P,Y,R)
+
+                        # ✅ 3. MAVSerial 사용자 컨벤션 → 브릿지 컨벤션 (Roll/Pitch 부호 반전)
+                        roll_deg = -roll_user
+                        pitch_deg = -pitch_user
+
+                        # ✅ 4. RPY 리맵핑 (R,P,Y) -> (P,Y,R)
                         (r_mapped, p_mapped, y_mapped) = self._remap_rpy_for_control(
                             roll_deg, pitch_deg, yaw_deg
                         )
-                        
-                        # 4. 리맵핑된 RPY -> 새로운 쿼터니언 목표
+
+                        # 5. 리맵핑된 RPY -> 새로운 쿼터니언 목표
                         try:
                             q_new_target = self._rpy_to_quat(r_mapped, p_mapped, y_mapped)
                         except Exception as e:
                             self.log(f"[Gimbal] euler_to_quat_apply (mav) failed: {e}")
-                            q_new_target = self.q_tgt[:] 
+                            q_new_target = self.q_tgt[:]
 
                         with self._lock:
-                            # 5. Anti-Flip
+                            # 6. Anti-Flip
                             dot = self._q_dot(q_new_target, self.q_cur)
                             if dot < 1e-9:
                                 self.q_tgt = [-val for val in q_new_target]
                             else:
                                 self.q_tgt = q_new_target[:]
-                            
-                            # 6. '리맵핑된' 섀도우 RPY 목표 설정
+
+                            # 7. '리맵핑된' 섀도우 RPY 목표 설정
                             self.rpy_tgt[:] = [r_mapped, p_mapped, y_mapped]
-                            
+
                             self._invalidate_cached_orientation_locked()
                         self.log(
-                            f"[GIMBAL] RX MAV target RPY(R,P,Y)=({roll_deg:.1f},{pitch_deg:.1f},{yaw_deg:.1f}) -> Mapped({r_mapped:.1f},{p_mapped:.1f},{y_mapped:.1f})"
+                            "[GIMBAL] RX MAV target user(R,P,Y)=(%.1f,%.1f,%.1f) -> "
+                            "bridge_input(R,P,Y)=(%.1f,%.1f,%.1f) -> Mapped(%.1f,%.1f,%.1f)"
+                            % (
+                                roll_user,
+                                pitch_user,
+                                yaw_deg,
+                                roll_deg,
+                                pitch_deg,
+                                yaw_deg,
+                                r_mapped,
+                                p_mapped,
+                                y_mapped,
+                            )
                         )
                 elif t == "PARAM_REQUEST_LIST":
                     self._send_param_list()
@@ -1320,12 +1336,28 @@ class GimbalControl:
                     with self._lock:
                         # ✅ q_cur (리맵핑된 쿼터니언)
                         q_current_internal = list(self.q_cur)
-                        wx, wy, wz = self.w_cur 
+                        wx_bridge, wy_bridge, wz_bridge = self.w_cur
                         gimbal_id = int(self.mavlink_sensor_id) & 0xFF
-                    
-                    # ✅ q_cur -> MAVLink (w,x,y,z) 변환
-                    q_mavlink = self._remap_quat_for_mavlink(q_current_internal)
-                    
+
+                    # ✅ 브릿지 컨벤션 -> MAVSerial 사용자 컨벤션 (Roll/Pitch 부호 재반전)
+                    r_cur_mapped, p_cur_mapped, y_cur_mapped = self._q_to_rpy(
+                        q_current_internal
+                    )
+                    r_cur_orig, p_cur_orig, y_cur_orig = self._inverse_remap_rpy_for_status(
+                        r_cur_mapped, p_cur_mapped, y_cur_mapped
+                    )
+                    r_user = -r_cur_orig
+                    p_user = -p_cur_orig
+                    y_user = y_cur_orig
+
+                    q_user_xyzw = self._rpy_to_quat(r_user, p_user, y_user)
+                    # ✅ q_cur -> MAVLink (w,x,y,z) 변환 (사용자 컨벤션)
+                    q_mavlink = self._remap_quat_for_mavlink(q_user_xyzw)
+
+                    wx_user = -wx_bridge
+                    wy_user = -wy_bridge
+                    wz_user = wz_bridge
+
                     time_boot_ms = int((now - t0) * 1000.0)
                     # ✅ 리맵핑된 쿼터니언과 각속도 전송 (사용자 요청)
                     mav.mav.gimbal_device_attitude_status_send(
@@ -1334,9 +1366,9 @@ class GimbalControl:
                         time_boot_ms,
                         GIMBAL_STATUS_FLAGS,
                         q_mavlink, # (w,x,y,z)
-                        wx,        # (wx)
-                        wy,        # (wy)
-                        wz,        # (wz)
+                        wx_user,   # (wx)
+                        wy_user,   # (wy)
+                        wz_user,   # (wz)
                         0,
                         float("nan"),
                         float("nan"),
