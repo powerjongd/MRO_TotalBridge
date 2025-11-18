@@ -891,6 +891,9 @@ class GimbalControl:
                 float(target.sim_rpy[1]),
                 float(target.sim_rpy[2]),
             )
+            # TCP/IP 짐벌 컨트롤 명령의 yaw 값은 뒤집힌 상태로 들어오므로
+            # 브릿지 내부 컨벤션에 맞추기 위해 여기서 부호를 반전한다.
+            sim_yaw = -sim_yaw
             with self._lock:
                 self.sensor_type = sensor_type
                 self.sensor_id = sensor_id
@@ -948,8 +951,10 @@ class GimbalControl:
             max_rate = self.max_rate_dps
         
         # ✅ TCP 상태 메시지는 (P, Y, R) 순서를 기대함 (원본 RPY 기준)
-        sim_rpy_cur = (p_orig, y_orig, r_orig)
-        sim_rpy_tgt = (p_tgt_orig, y_tgt_orig, r_tgt_orig)
+            # TCP 피드백 역시 동일한 컨벤션을 따라야 하므로 yaw를 재반전해서
+            # 외부 클라이언트에 전달한다.
+            sim_rpy_cur = (p_orig, -y_orig, r_orig)
+            sim_rpy_tgt = (p_tgt_orig, -y_tgt_orig, r_tgt_orig)
         
         snapshot = StatusSnapshot(
             sensor_type=sensor_type,
