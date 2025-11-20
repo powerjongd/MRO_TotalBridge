@@ -736,7 +736,9 @@ class GimbalControl:
                 r_cur_mapped, p_cur_mapped, y_cur_mapped
             )
 
-            left_handed_rpy = (r_cur_mapped, p_cur_mapped, y_cur_mapped)
+            # LH RPY는 시뮬레이터 송신용(quaternion) 기준으로 표시 (Yaw 반전 반영)
+            yaw_mapped_for_sim = -y_cur_mapped
+            left_handed_rpy = (r_cur_mapped, p_cur_mapped, yaw_mapped_for_sim)
             right_handed_rpy = (r_orig, p_orig, y_orig)
 
             return {
