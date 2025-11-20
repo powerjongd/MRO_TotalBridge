@@ -641,16 +641,14 @@ class GimbalControl:
         self.log(
             "[GIMBAL] external pose applied -> sensor=%d/%d xyz=(%.2f,%.2f,%.2f) "
             "sim_rpy(P,Y,R)=(%.2f,%.2f,%.2f)",
-            (
-                sensor_type_i,
-                sensor_id_i,
-                pos_x,
-                pos_y,
-                pos_z,
-                sim_pitch_deg,
-                sim_yaw_deg,
-                sim_roll_deg,
-            ),
+            sensor_type_i,
+            sensor_id_i,
+            pos_x,
+            pos_y,
+            pos_z,
+            sim_pitch_deg,
+            sim_yaw_deg,
+            sim_roll_deg,
         )
 
     def set_mavlink_target(self, preset_index: int, sensor_type: int, sensor_id: int) -> None:
@@ -1206,7 +1204,15 @@ class GimbalControl:
                 if should_send:
                     # ✅ q_cur (리맵핑된 쿼터니언)을 q_to_send로 설정
                     q_to_send = self.q_cur
-                    
+
+                    r_cur_mapped, p_cur_mapped, y_cur_mapped = self._q_to_rpy(q_to_send)
+                    r_cur_orig, p_cur_orig, y_cur_orig = self._inverse_remap_rpy_for_status(
+                        r_cur_mapped, p_cur_mapped, y_cur_mapped
+                    )
+                    r_tgt_orig, p_tgt_orig, y_tgt_orig = self._inverse_remap_rpy_for_status(
+                        self.rpy_tgt[0], self.rpy_tgt[1], self.rpy_tgt[2]
+                    )
+
                     # ❌ 쿼터니언 리맵핑 제거
                     # remapped_udp_quat = self._remap_quat_for_simulator(q_to_send)
 
@@ -1222,6 +1228,12 @@ class GimbalControl:
                     )
                     dump_ctrl = self.debug_dump_packets
                     self._last_sent_snapshot = snapshot
+
+                    self.log(
+                        f"[GIMBAL] UDP ctrl → cur(P,Y,R)=({p_cur_orig:.1f},{y_cur_orig:.1f},{r_cur_orig:.1f}) "
+                        f"tgt(P,Y,R)=({p_tgt_orig:.1f},{y_tgt_orig:.1f},{r_tgt_orig:.1f}) "
+                        f"quat(x,y,z,w)=({q_to_send[0]:.4f},{q_to_send[1]:.4f},{q_to_send[2]:.4f},{q_to_send[3]:.4f})"
+                    )
 
             if pkt and target:
                 try:
