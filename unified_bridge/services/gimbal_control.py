@@ -732,12 +732,15 @@ class GimbalControl:
             
             # ✅ q_cur (리맵핑된 쿼터니언) -> RPY (리맵핑된 RPY)
             r_cur_mapped, p_cur_mapped, y_cur_mapped = self._q_to_rpy(self.q_cur)
-            
+
             # ✅ 리맵핑된 RPY -> 원본 RPY로 역변환 (R,P,Y)
             (r_orig, p_orig, y_orig) = self._inverse_remap_rpy_for_status(
                 r_cur_mapped, p_cur_mapped, y_cur_mapped
             )
-            
+
+            left_handed_rpy = (r_cur_mapped, p_cur_mapped, y_cur_mapped)
+            right_handed_rpy = (r_orig, p_orig, y_orig)
+
             return {
                 "activated": True,
                 "control_mode": method_display,
@@ -745,6 +748,8 @@ class GimbalControl:
                 "current_roll_deg": r_orig,   # 원본 R
                 "current_pitch_deg": p_orig,  # 원본 P
                 "current_yaw_deg": y_orig,    # 원본 Y
+                "rpy_left_deg": left_handed_rpy,
+                "rpy_right_deg": right_handed_rpy,
                 "current_x": self.pos[0],
                 "current_y": self.pos[1],
                 "current_z": self.pos[2],
@@ -891,9 +896,6 @@ class GimbalControl:
                 float(target.sim_rpy[1]),
                 float(target.sim_rpy[2]),
             )
-            # TCP/IP 짐벌 컨트롤 명령의 yaw 값은 뒤집힌 상태로 들어오므로
-            # 브릿지 내부 컨벤션에 맞추기 위해 여기서 부호를 반전한다.
-            sim_yaw = -sim_yaw
             with self._lock:
                 self.sensor_type = sensor_type
                 self.sensor_id = sensor_id
@@ -951,10 +953,8 @@ class GimbalControl:
             max_rate = self.max_rate_dps
         
         # ✅ TCP 상태 메시지는 (P, Y, R) 순서를 기대함 (원본 RPY 기준)
-            # TCP 피드백 역시 동일한 컨벤션을 따라야 하므로 yaw를 재반전해서
-            # 외부 클라이언트에 전달한다.
-            sim_rpy_cur = (p_orig, -y_orig, r_orig)
-            sim_rpy_tgt = (p_tgt_orig, -y_tgt_orig, r_tgt_orig)
+            sim_rpy_cur = (p_orig, y_orig, r_orig)
+            sim_rpy_tgt = (p_tgt_orig, y_tgt_orig, r_tgt_orig)
         
         snapshot = StatusSnapshot(
             sensor_type=sensor_type,
@@ -1269,9 +1269,9 @@ class GimbalControl:
                         pitch_user = sim_pitch
                         yaw_deg = sim_yaw
 
-                        # ✅ 3. MAVSerial 사용자 컨벤션 → 브릿지 컨벤션 (Roll/Pitch 부호 반전)
-                        roll_deg = -roll_user
-                        pitch_deg = -pitch_user
+                        # ✅ 3. MAVSerial 사용자 컨벤션 → 브릿지 컨벤션 (부호 반전 없음)
+                        roll_deg = roll_user
+                        pitch_deg = pitch_user
 
                         # ✅ 4. RPY 리맵핑 (R,P,Y) -> (P,Y,R)
                         (r_mapped, p_mapped, y_mapped) = self._remap_rpy_for_control(
@@ -1344,15 +1344,15 @@ class GimbalControl:
                         wx_bridge, wy_bridge, wz_bridge = self.w_cur
                         gimbal_id = int(self.mavlink_sensor_id) & 0xFF
 
-                    # ✅ 브릿지 컨벤션 -> MAVSerial 사용자 컨벤션 (Roll/Pitch 부호 재반전)
+                    # ✅ 브릿지 컨벤션 -> MAVSerial 사용자 컨벤션 (부호 반전 없음)
                     r_cur_mapped, p_cur_mapped, y_cur_mapped = self._q_to_rpy(
                         q_current_internal
                     )
                     r_cur_orig, p_cur_orig, y_cur_orig = self._inverse_remap_rpy_for_status(
                         r_cur_mapped, p_cur_mapped, y_cur_mapped
                     )
-                    r_user = -r_cur_orig
-                    p_user = -p_cur_orig
+                    r_user = r_cur_orig
+                    p_user = p_cur_orig
                     y_user = y_cur_orig
 
                     q_user_xyzw = self._rpy_to_quat(r_user, p_user, y_user)

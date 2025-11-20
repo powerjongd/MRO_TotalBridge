@@ -550,15 +550,33 @@ class MainWindow(QtWidgets.QMainWindow):
         elif status.get("serial_state"):
             details.append(f"Serial {status['serial_state']}")
 
-        roll = status.get("current_roll_deg")
-        pitch = status.get("current_pitch_deg")
-        yaw = status.get("current_yaw_deg")
-        angles = []
-        for value in (roll, pitch, yaw):
-            if isinstance(value, (int, float)):
-                angles.append(f"{value:.1f}°")
-        if len(angles) == 3:
-            details.append(f"RPY {'/'.join(angles)}")
+        def _fmt_rpy(triple: object) -> Optional[str]:
+            if not isinstance(triple, (list, tuple)) or len(triple) != 3:
+                return None
+            parts = []
+            for value in triple:
+                if not isinstance(value, (int, float)):
+                    return None
+                parts.append(f"{value:.1f}°")
+            return "/".join(parts)
+
+        lh_rpy = _fmt_rpy(status.get("rpy_left_deg"))
+        rh_rpy = _fmt_rpy(status.get("rpy_right_deg"))
+
+        if lh_rpy:
+            details.append(f"RPY(LH) {lh_rpy}")
+        if rh_rpy:
+            details.append(f"RPY(RH) {rh_rpy}")
+        if not lh_rpy and not rh_rpy:
+            roll = status.get("current_roll_deg")
+            pitch = status.get("current_pitch_deg")
+            yaw = status.get("current_yaw_deg")
+            angles = []
+            for value in (roll, pitch, yaw):
+                if isinstance(value, (int, float)):
+                    angles.append(f"{value:.1f}°")
+            if len(angles) == 3:
+                details.append(f"RPY {'/'.join(angles)}")
 
         zoom = status.get("zoom_scale")
         if isinstance(zoom, (int, float)):
