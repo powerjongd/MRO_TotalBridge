@@ -736,7 +736,9 @@ class GimbalControl:
                 r_cur_mapped, p_cur_mapped, y_cur_mapped
             )
 
-            left_handed_rpy = (r_cur_mapped, p_cur_mapped, y_cur_mapped)
+            # LH RPY는 시뮬레이터 송신용(quaternion) 기준으로 표시 (Yaw 반전 반영)
+            yaw_mapped_for_sim = -y_cur_mapped
+            left_handed_rpy = (r_cur_mapped, p_cur_mapped, yaw_mapped_for_sim)
             right_handed_rpy = (r_orig, p_orig, y_orig)
 
             return {
@@ -1202,10 +1204,12 @@ class GimbalControl:
                 )
                 
                 if should_send:
-                    # ✅ q_cur (리맵핑된 쿼터니언)을 q_to_send로 설정
-                    q_to_send = self.q_cur
-
-                    r_cur_mapped, p_cur_mapped, y_cur_mapped = self._q_to_rpy(q_to_send)
+                    # ✅ q_cur (리맵핑된 쿼터니언)을 시뮬레이터 전송용으로 변환
+                    r_cur_mapped, p_cur_mapped, y_cur_mapped = self._q_to_rpy(self.q_cur)
+                    # LH(시뮬레이터) ↔ RH(유저) 좌표계 차이로 인한 Yaw 방향 반전을 반영
+                    q_to_send = self._rpy_to_quat(
+                        r_cur_mapped, p_cur_mapped, -y_cur_mapped
+                    )
                     r_cur_orig, p_cur_orig, y_cur_orig = self._inverse_remap_rpy_for_status(
                         r_cur_mapped, p_cur_mapped, y_cur_mapped
                     )
