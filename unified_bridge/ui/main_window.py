@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -550,14 +551,71 @@ class MainWindow(QtWidgets.QMainWindow):
         elif status.get("serial_state"):
             details.append(f"Serial {status['serial_state']}")
 
+        def _normalize_rpy_for_display(values: list[float]) -> list[float]:
+            """Collapse Euler-angle aliases to a stable, readable form."""
+
+            tol = 1e-3
+
+            try:
+                roll_deg, pitch_deg, yaw_deg = (float(v) for v in values)
+            except Exception:
+                return values
+
+            roll_rad = math.radians(roll_deg)
+            pitch_rad = math.radians(pitch_deg)
+            yaw_rad = math.radians(yaw_deg)
+
+            cy = math.cos(yaw_rad * 0.5)
+            sy = math.sin(yaw_rad * 0.5)
+            cp = math.cos(pitch_rad * 0.5)
+            sp = math.sin(pitch_rad * 0.5)
+            cr = math.cos(roll_rad * 0.5)
+            sr = math.sin(roll_rad * 0.5)
+
+            qw = cr * cp * cy + sr * sp * sy
+            qx = sr * cp * cy - cr * sp * sy
+            qy = cr * sp * cy + sr * cp * sy
+            qz = cr * cp * sy - sr * sp * cy
+
+            norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) or 1.0
+            qw, qx, qy, qz = (component / norm for component in (qw, qx, qy, qz))
+
+            sinr_cosp = 2.0 * (qw * qx + qy * qz)
+            cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+            roll = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
+
+            sinp = 2.0 * (qw * qy - qz * qx)
+            if abs(sinp) >= 1:
+                pitch = math.degrees(math.copysign(math.pi / 2.0, sinp))
+            else:
+                pitch = math.degrees(math.asin(sinp))
+
+            siny_cosp = 2.0 * (qw * qz + qx * qy)
+            cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+            yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
+
+            wrapped = [((val + 180.0) % 360.0) - 180.0 for val in (roll, pitch, yaw)]
+            normalized: list[float] = []
+            for value in wrapped:
+                if abs(value) < tol:
+                    normalized.append(0.0)
+                elif abs(abs(value) - 180.0) < tol:
+                    normalized.append(0.0)
+                else:
+                    normalized.append(value)
+            return normalized
+
         def _fmt_rpy(triple: object) -> Optional[str]:
             if not isinstance(triple, (list, tuple)) or len(triple) != 3:
                 return None
-            parts = []
+            values: list[float] = []
             for value in triple:
                 if not isinstance(value, (int, float)):
                     return None
-                parts.append(f"{value:.1f}°")
+                values.append(float(value))
+
+            normalized = _normalize_rpy_for_display(values)
+            parts = [f"{val:.1f}°" for val in normalized]
             return "/".join(parts)
 
         lh_rpy = _fmt_rpy(status.get("rpy_left_deg"))
